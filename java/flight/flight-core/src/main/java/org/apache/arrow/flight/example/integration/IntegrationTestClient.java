@@ -51,7 +51,7 @@ import org.apache.commons.cli.ParseException;
 import io.netty.buffer.ArrowBuf;
 
 /**
- * An Example Flight Server that provides access to the InMemoryStore.
+ * A Flight client for integration testing.
  */
 class IntegrationTestClient {
   private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(IntegrationTestClient.class);
@@ -60,6 +60,7 @@ class IntegrationTestClient {
   private IntegrationTestClient() {
     options = new Options();
     options.addOption("j", "json", true, "json file");
+    options.addOption("scenario", true, "The integration test scenario.");
     options.addOption("host", true, "The host to connect to.");
     options.addOption("port", true, "The port to connect to.");
   }
@@ -71,6 +72,8 @@ class IntegrationTestClient {
       fatalError("Invalid parameters", e);
     } catch (IOException e) {
       fatalError("Error accessing files", e);
+    } catch (Exception e) {
+      fatalError("Unknown error", e);
     }
   }
 
@@ -81,7 +84,7 @@ class IntegrationTestClient {
     System.exit(1);
   }
 
-  private void run(String[] args) throws ParseException, IOException {
+  private void run(String[] args) throws Exception {
     final CommandLineParser parser = new DefaultParser();
     final CommandLine cmd = parser.parse(options, args, false);
 
@@ -92,8 +95,12 @@ class IntegrationTestClient {
     try (final BufferAllocator allocator = new RootAllocator(Integer.MAX_VALUE);
         final FlightClient client = FlightClient.builder(allocator, defaultLocation).build()) {
 
-      final String inputPath = cmd.getOptionValue("j");
-      testStream(allocator, defaultLocation, client, inputPath);
+      if (cmd.hasOption("scenario")) {
+        Scenarios.getScenario(cmd.getOptionValue("scenario")).client(allocator, defaultLocation, client);
+      } else {
+        final String inputPath = cmd.getOptionValue("j");
+        testStream(allocator, defaultLocation, client, inputPath);
+      }
     } catch (InterruptedException e) {
       throw new RuntimeException(e);
     }

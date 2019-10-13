@@ -50,8 +50,8 @@ class Tester(object):
     def validate(self, json_path, arrow_path):
         raise NotImplementedError
 
-    def flight_server(self, port):
+    def flight_server(self, port, scenario_name=None):
         raise NotImplementedError
 
-    def flight_request(self, port, json_path):
+    def flight_request(self, port, json_path=None, scenario_name=None):
         raise NotImplementedError

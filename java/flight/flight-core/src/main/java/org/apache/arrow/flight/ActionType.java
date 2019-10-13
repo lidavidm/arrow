@@ -17,12 +17,14 @@
 
 package org.apache.arrow.flight;
 
+import java.util.Objects;
+
 import org.apache.arrow.flight.impl.Flight;
 
 /**
  * POJO wrapper around protocol specifics for Flight actions.
  */
-public class ActionType {
+public final class ActionType {
   private final String type;
   private final String description;
 
@@ -33,7 +35,8 @@ public class ActionType {
    * @param description The description of the type.
    */
   public ActionType(String type, String description) {
-    super();
+    Objects.requireNonNull(type, "type must not be null");
+    Objects.requireNonNull(description, "description must not be null");
     this.type = type;
     this.description = description;
   }
@@ -66,5 +69,23 @@ public class ActionType {
         "type='" + type + '\'' +
         ", description='" + description + '\'' +
         '}';
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    ActionType that = (ActionType) o;
+    return type.equals(that.type) &&
+        description.equals(that.description);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(type, description);
   }
 }

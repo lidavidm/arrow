@@ -236,6 +236,8 @@ class FlightServiceImpl;
 class GrpcServerCallContext : public ServerCallContext {
   const std::string& peer_identity() const override { return peer_identity_; }
 
+  bool IsCancelled() const override { return context_->IsCancelled(); }
+
   // Helper method that runs interceptors given the result of an RPC,
   // then returns the final gRPC status to send to the client
   grpc::Status FinishRequest(const grpc::Status& status) {

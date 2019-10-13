@@ -28,6 +28,7 @@
 
 #include "arrow/flight/visibility.h"
 #include "arrow/ipc/writer.h"
+#include "arrow/result.h"
 
 namespace arrow {
 
@@ -127,6 +128,14 @@ struct ARROW_FLIGHT_EXPORT ActionType {
 
   /// \brief A human-readable description of the action.
   std::string description;
+
+  bool Equals(const ActionType& other) const;
+  friend bool operator==(const ActionType& left, const ActionType& right) {
+    return left.Equals(right);
+  }
+  friend bool operator!=(const ActionType& left, const ActionType& right) {
+    return !(left == right);
+  }
 };
 
 /// \brief Opaque selection criteria for ListFlights RPC
@@ -336,6 +345,8 @@ struct ARROW_FLIGHT_EXPORT FlightPayload {
 struct ARROW_FLIGHT_EXPORT SchemaResult {
  public:
   explicit SchemaResult(std::string schema) : raw_schema_(std::move(schema)) {}
+  /// \brief Static factory to make a SchemaResult from a Schema.
+  static arrow::Result<std::unique_ptr<SchemaResult>> Make(const Schema& schema);
 
   /// \brief return schema
   /// \param[in,out] dictionary_memo for dictionary bookkeeping, will
@@ -362,9 +373,17 @@ class ARROW_FLIGHT_EXPORT FlightInfo {
     int64_t total_bytes;
   };
 
+  FlightInfo(const FlightInfo& other)
+      : data_(other.data_), reconstructed_schema_(false) {}
   explicit FlightInfo(const Data& data) : data_(data), reconstructed_schema_(false) {}
   explicit FlightInfo(Data&& data)
       : data_(std::move(data)), reconstructed_schema_(false) {}
+
+  /// \brief Factory method to construct a FlightInfo.
+  static arrow::Result<FlightInfo> Make(const Schema& schema,
+                                        const FlightDescriptor& descriptor,
+                                        const std::vector<FlightEndpoint>& endpoints,
+                                        int64_t total_records, int64_t total_bytes);
 
   /// \brief Deserialize the Arrow schema of the dataset, to be passed
   /// to each call to DoGet. Populate any dictionary encoded fields
@@ -389,6 +408,11 @@ class ARROW_FLIGHT_EXPORT FlightInfo {
 
   /// The total number of bytes in the dataset. If unknown, set to -1
   int64_t total_bytes() const { return data_.total_bytes; }
+
+  /// \brief Check equality with another FlightInfo.
+  /// \return Status OK if equal, Invalid if unequal, or some code if
+  ///     deserialization failed.
+  Status Equals(const FlightInfo& other) const;
 
   /// \brief Get the wire-format representation of this type.
   ///

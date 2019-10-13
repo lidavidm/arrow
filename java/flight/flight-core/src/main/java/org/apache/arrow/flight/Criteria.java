@@ -36,6 +36,13 @@ public class Criteria {
     this.bytes = bytes;
   }
 
+  /**
+   * Get the contained filter criteria.
+   */
+  public byte[] getExpression() {
+    return bytes;
+  }
+
   Criteria(Flight.Criteria criteria) {
     this.bytes = criteria.getExpression().toByteArray();
   }

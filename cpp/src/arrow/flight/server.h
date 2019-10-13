@@ -106,6 +106,8 @@ class ARROW_FLIGHT_EXPORT ServerCallContext {
   /// to the object beyond the request body.
   /// \return The middleware, or nullptr if not found.
   virtual ServerMiddleware* GetMiddleware(const std::string& key) const = 0;
+  /// \brief Check if the client has cancelled the call.
+  virtual bool IsCancelled() const = 0;
 };
 
 class ARROW_FLIGHT_EXPORT FlightServerOptions {

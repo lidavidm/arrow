@@ -76,8 +76,10 @@ class CPPTester(Tester):
         self.run_shell_command(cmd)
 
     @contextlib.contextmanager
-    def flight_server(self, port):
+    def flight_server(self, port, scenario_name=None):
         cmd = self.FLIGHT_SERVER_CMD + ['-port=' + str(port)]
+        if scenario_name:
+            cmd = cmd + ["-scenario", scenario_name]
         if self.debug:
             log(' '.join(cmd))
         server = subprocess.Popen(cmd,
@@ -97,11 +99,17 @@ class CPPTester(Tester):
             server.kill()
             server.wait(5)
 
-    def flight_request(self, port, json_path):
+    def flight_request(self, port, json_path=None, scenario_name=None):
         cmd = self.FLIGHT_CLIENT_CMD + [
             '-port=' + str(port),
-            '-path=' + json_path,
         ]
+        if json_path:
+            cmd.extend(('-path', json_path))
+        elif scenario_name:
+            cmd.extend(('-scenario', scenario_name))
+        else:
+            raise TypeError("Must provide one of json_path or scenario_name")
+
         if self.debug:
             log(' '.join(cmd))
         run_cmd(cmd)

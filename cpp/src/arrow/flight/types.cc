@@ -77,6 +77,10 @@ Status MakeFlightError(FlightStatusCode code, const std::string& message) {
   return arrow::Status(arrow_code, message, std::make_shared<FlightStatusDetail>(code));
 }
 
+bool ActionType::Equals(const ActionType& other) const {
+  return type == other.type && description == other.description;
+}
+
 bool FlightDescriptor::Equals(const FlightDescriptor& other) const {
   if (type != other.type) {
     return false;
@@ -116,6 +120,13 @@ std::string FlightDescriptor::ToString() const {
   }
   ss << ">";
   return ss.str();
+}
+
+arrow::Result<std::unique_ptr<SchemaResult>> SchemaResult::Make(const Schema& schema) {
+  std::string out;
+  RETURN_NOT_OK(internal::SchemaToString(schema, &out));
+  return arrow::Result<std::unique_ptr<SchemaResult>>(
+      std::unique_ptr<SchemaResult>(new SchemaResult(out)));
 }
 
 Status SchemaResult::GetSchema(ipc::DictionaryMemo* dictionary_memo,
@@ -162,6 +173,47 @@ Status Ticket::Deserialize(const std::string& serialized, Ticket* out) {
     return Status::Invalid("Not a valid ticket");
   }
   return internal::FromProto(pb_ticket, out);
+}
+
+Status FlightInfo::Equals(const FlightInfo& other) const {
+  std::shared_ptr<Schema> ex_schema, actual_schema;
+  ipc::DictionaryMemo expected_memo;
+  ipc::DictionaryMemo actual_memo;
+  RETURN_NOT_OK(GetSchema(&expected_memo, &ex_schema));
+  RETURN_NOT_OK(other.GetSchema(&actual_memo, &actual_schema));
+
+  if (!ex_schema->Equals(*actual_schema)) {
+    return Status::Invalid("FlightInfo::Equals: schemas are unequal");
+  }
+  if (total_records() != other.total_records()) {
+    return Status::Invalid("FlightInfo::Equals: total_records unequal, expected",
+                           total_records(), "got", other.total_records());
+  }
+  if (total_bytes() != other.total_bytes()) {
+    return Status::Invalid("FlightInfo::Equals: total_bytes unequal, expected",
+                           total_bytes(), "got", other.total_bytes());
+  }
+  if (descriptor() != other.descriptor()) {
+    return Status::Invalid("FlightInfo::Equals: descriptors unequal, expected",
+                           descriptor().ToString(), "got", other.descriptor().ToString());
+  }
+  if (endpoints() != other.endpoints()) {
+    return Status::Invalid("FlightInfo::Equals: endpoints are unequal");
+  }
+  return Status::OK();
+}
+
+arrow::Result<FlightInfo> FlightInfo::Make(const Schema& schema,
+                                           const FlightDescriptor& descriptor,
+                                           const std::vector<FlightEndpoint>& endpoints,
+                                           int64_t total_records, int64_t total_bytes) {
+  FlightInfo::Data data;
+  data.descriptor = descriptor;
+  data.endpoints = endpoints;
+  data.total_records = total_records;
+  data.total_bytes = total_bytes;
+  RETURN_NOT_OK(internal::SchemaToString(schema, &data.schema));
+  return arrow::Result<FlightInfo>(FlightInfo(data));
 }
 
 Status FlightInfo::GetSchema(ipc::DictionaryMemo* dictionary_memo,
