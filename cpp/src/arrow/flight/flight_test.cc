@@ -165,7 +165,8 @@ TEST(TestFlight, UnknownLocationScheme) {
   ASSERT_OK(Location::Parse("https://example.com/foo", &location));
 }
 
-TEST(TestFlight, ConnectUri) {
+// ARROW-7551: this test consistently fails in CI on MacOS
+TEST(TestFlight, DISABLED_ConnectUri) {
   TestServer server("flight-test-server");
   server.Start();
   ASSERT_TRUE(server.IsRunning());
