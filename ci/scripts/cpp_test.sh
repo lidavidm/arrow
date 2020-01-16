@@ -39,5 +39,6 @@ case "$(uname)" in
     n_jobs=1
     ;;
 esac
-ctest --output-on-failure -j${n_jobs}
+echo -e 'bt\nquit' > lldb.batch
+lldb --batch -K lldb.batch -o run -f ctest -- --output-on-failure -j${n_jobs} -Lflight -VV
 popd
