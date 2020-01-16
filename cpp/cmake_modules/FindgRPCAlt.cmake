@@ -99,11 +99,13 @@ if(gRPCAlt_FOUND)
   set_target_properties(gRPC::grpc
                         PROPERTIES IMPORTED_LOCATION "${GRPC_GRPC_LIB}"
                                    INTERFACE_INCLUDE_DIRECTORIES "${GRPC_INCLUDE_DIR}")
+  message(STATUS "Location of gRPC::grpc: ${GRPC_GPRC_LIB}")
 
   add_library(gRPC::grpc++ UNKNOWN IMPORTED)
   set_target_properties(gRPC::grpc++
                         PROPERTIES IMPORTED_LOCATION "${GRPC_GRPCPP_LIB}"
                                    INTERFACE_INCLUDE_DIRECTORIES "${GRPC_INCLUDE_DIR}")
+  message(STATUS "Location of gRPC::grpc++: ${GRPC_GRPCPP_LIB}")
 
   if(GRPC_ADDRESS_SORTING_LIB)
     # Address sorting is optional and not always required.

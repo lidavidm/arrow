@@ -34,65 +34,6 @@ env:
   ARROW_ENABLE_TIMING_TESTS: OFF
 
 jobs:
-
-  conda:
-    name: AMD64 Conda C++
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Arrow
-        uses: actions/checkout@v1
-        with:
-          submodules: true
-      - name: Docker Pull
-        shell: bash
-        run: docker-compose pull --ignore-pull-failures conda-cpp
-      - name: Docker Build
-        shell: bash
-        run: docker-compose build conda-cpp
-      - name: Docker Run
-        shell: bash
-        run: docker-compose run conda-cpp
-      - name: Docker Push
-        if: success() && github.event_name == 'push' && github.repository == 'apache/arrow'
-        continue-on-error: true
-        shell: bash
-        run: |
-          docker login -u ${{ secrets.DOCKERHUB_USER }} \
-                       -p ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-compose push conda-cpp
-
-  ubuntu-sanitizer:
-    name: AMD64 Ubuntu ${{ matrix.ubuntu }} C++ ASAN UBSAN
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        ubuntu: [18.04]
-    env:
-      UBUNTU: ${{ matrix.ubuntu }}
-    steps:
-      - name: Checkout Arrow
-        uses: actions/checkout@v1
-        with:
-          submodules: true
-      - name: Docker Pull
-        shell: bash
-        run: docker-compose pull --ignore-pull-failures ubuntu-cpp-sanitizer
-      - name: Docker Build
-        shell: bash
-        run: docker-compose build ubuntu-cpp-sanitizer
-      - name: Docker Run
-        shell: bash
-        run: docker-compose run ubuntu-cpp-sanitizer
-      - name: Docker Push
-        if: success() && github.event_name == 'push' && github.repository == 'apache/arrow'
-        continue-on-error: true
-        shell: bash
-        run: |
-          docker login -u ${{ secrets.DOCKERHUB_USER }} \
-                       -p ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-compose push ubuntu-cpp
-
   macos:
     name: AMD64 MacOS 10.15 C++
     runs-on: macos-latest
@@ -115,6 +56,8 @@ jobs:
       ARROW_WITH_SNAPPY: ON
       ARROW_WITH_BROTLI: ON
       ARROW_BUILD_TESTS: ON
+      gRPC_SOURCE: BUNDLED
+      Protobuf_SOURCE: BUNDLED
     steps:
       - name: Checkout Arrow
         uses: actions/checkout@v1
@@ -123,58 +66,24 @@ jobs:
       - name: Install Dependencies
         shell: bash
         run: brew bundle --file=cpp/Brewfile
+      - name: Uninstall Unsafe Homebrew Dependencies
+        shell: bash
+        run: brew uninstall grpc protobuf
       - name: Build
         shell: bash
         run: ci/scripts/cpp_build.sh $(pwd) $(pwd)/build
-      - name: Test
-        shell: bash
-        run: ci/scripts/cpp_test.sh $(pwd) $(pwd)/build
-
-  windows:
-    name: AMD64 ${{ matrix.name }} C++
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - windows-latest
-        include:
-          - os: windows-latest
-            name: Windows 2019
-            generator: Visual Studio 16 2019
-    env:
-      CMAKE_ARGS: '-A x64'
-      CMAKE_GENERATOR: ${{ matrix.generator }}
-      CMAKE_INSTALL_LIBDIR: bin
-      CMAKE_INSTALL_PREFIX: /usr
-      ARROW_HOME: /usr
-      ARROW_JEMALLOC: OFF
-      ARROW_FLIGHT: OFF
-      ARROW_HDFS: ON
-      ARROW_PARQUET: OFF
-      ARROW_WITH_ZLIB: OFF
-      ARROW_WITH_LZ4: OFF
-      ARROW_WITH_BZ2: OFF
-      ARROW_WITH_ZSTD: OFF
-      ARROW_WITH_SNAPPY: OFF
-      ARROW_WITH_BROTLI: OFF
-      ARROW_USE_GLOG: OFF
-      ARROW_BUILD_TESTS: ON
-      ARROW_BUILD_SHARED: ON
-      ARROW_BUILD_STATIC: OFF
-      ARROW_BOOST_USE_SHARED: OFF
-      ARROW_VERBOSE_THIRDPARTY_BUILD: OFF
-      BOOST_SOURCE: BUNDLED
-    steps:
-      - name: Disable Crash Dialogs
-        run: reg add "HKCU\SOFTWARE\Microsoft\Windows\Windows Error Reporting" /v DontShowUI /t REG_DWORD /d 1 /f
-      - name: Checkout Arrow
-        uses: actions/checkout@v1
+      - uses: actions/upload-artifact@v1
         with:
-          submodules: true
-      - name: Build
-        shell: bash
-        run: ci/scripts/cpp_build.sh $(pwd) $(pwd)/build
+          name: arrow-flight-test
+          path: build/cpp/debug/arrow-flight-test
+      - uses: actions/upload-artifact@v1
+        with:
+          name: libarrow-flight
+          path: build/cpp/debug/libarrow_flight.dylib
+      - uses: actions/upload-artifact@v1
+        with:
+          name: libarrow-flight-testing
+          path: build/cpp/debug/libarrow_flight_testing.dylib
       - name: Test
         shell: bash
         run: ci/scripts/cpp_test.sh $(pwd) $(pwd)/build

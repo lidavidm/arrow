@@ -258,6 +258,9 @@ function(ADD_ARROW_LIB LIB_NAME)
                           LINK_PRIVATE
                           ${ARG_SHARED_PRIVATE_LINK_LIBS})
 
+    get_target_property(OUT ${LIB_NAME}_shared LINK_LIBRARIES)
+    message(STATUS "LINK LIBRARIES FOR ${LIB_NAME}: ${OUT}")
+
     if(ARROW_RPATH_ORIGIN)
       if(APPLE)
         set(_lib_install_rpath "@loader_path")

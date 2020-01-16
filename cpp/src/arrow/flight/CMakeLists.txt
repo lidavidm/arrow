@@ -30,18 +30,23 @@ if(WIN32)
   list(APPEND ARROW_FLIGHT_STATIC_LINK_LIBS Ws2_32.lib)
 endif()
 
+if(APPLE)
+  # gRPC on MacOS will fail to build due to thread local variables.
+  # While the issue is for Bazel builds, CMake is also affected.
+  # https://github.com/grpc/grpc/issues/13856
+  add_definitions(-DGRPC_BAZEL_BUILD)
+endif()
+
 if(GRPC_HAS_ADDRESS_SORTING)
   list(APPEND ARROW_FLIGHT_STATIC_LINK_LIBS gRPC::address_sorting)
 endif()
 
 if(ARROW_TEST_LINKAGE STREQUAL "static")
   set(ARROW_FLIGHT_TEST_LINK_LIBS arrow_flight_static arrow_flight_testing_static
-                                  ${ARROW_TEST_STATIC_LINK_LIBS}
-                                  ${ARROW_FLIGHT_STATIC_LINK_LIBS})
+                                  ${ARROW_TEST_STATIC_LINK_LIBS})
 else()
   set(ARROW_FLIGHT_TEST_LINK_LIBS arrow_flight_shared arrow_flight_testing_shared
-                                  ${ARROW_TEST_SHARED_LINK_LIBS}
-                                  ${ARROW_FLIGHT_STATIC_LINK_LIBS})
+                                  ${ARROW_TEST_SHARED_LINK_LIBS})
 endif()
 
 # TODO(wesm): Protobuf shared vs static linking
