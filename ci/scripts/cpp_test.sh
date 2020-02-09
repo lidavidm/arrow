@@ -41,7 +41,12 @@ case "$(uname)" in
     n_jobs=1
     ;;
 esac
-ctest --output-on-failure -j${n_jobs}
+
+echo -e 'bt\nquit' > lldb.batch
+lldb --batch -K lldb.batch -o run -f $build_dir/debug/arrow-flight-test
+
+echo -e 'bt\nquit' > lldb.batch
+lldb --batch -K lldb.batch -o run -f ctest -- --output-on-failure -j${n_jobs} -VV
 
 if [ "${ARROW_FUZZING}" == "ON" ]; then
     # Fuzzing regression tests
