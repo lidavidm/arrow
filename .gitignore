@@ -77,3 +77,7 @@ site/
 # macOS
 cpp/Brewfile.lock.json
 .DS_Store
+
+venv/
+miniconda3/
+build/

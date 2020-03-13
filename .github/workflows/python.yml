@@ -33,43 +33,6 @@ on:
 
 jobs:
 
-  ubuntu:
-    name: AMD64 Ubuntu ${{ matrix.ubuntu }} Python 3
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    strategy:
-      fail-fast: false
-      matrix:
-        ubuntu: [16.04, 18.04]
-    env:
-      UBUNTU: ${{ matrix.ubuntu }}
-    steps:
-      - name: Checkout Arrow
-        uses: actions/checkout@v1
-        with:
-          submodules: true
-      - name: Docker Pull
-        shell: bash
-        run: |
-          docker-compose pull --ignore-pull-failures ubuntu-cpp
-          docker-compose pull --ignore-pull-failures ubuntu-python
-      - name: Docker Build
-        shell: bash
-        run: |
-          docker-compose build ubuntu-cpp
-          docker-compose build ubuntu-python
-      - name: Docker Run
-        shell: bash
-        run: docker-compose run ubuntu-python
-      - name: Docker Push
-        if: success() && github.event_name == 'push' && github.repository == 'apache/arrow'
-        continue-on-error: true
-        shell: bash
-        run: |
-          docker login -u ${{ secrets.DOCKERHUB_USER }} \
-                       -p ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-compose push ubuntu-python
-
   conda:
     name: AMD64 Conda Python ${{ matrix.python }}
     runs-on: ubuntu-latest
@@ -146,46 +109,3 @@ jobs:
           docker login -u ${{ secrets.DOCKERHUB_USER }} \
                        -p ${{ secrets.DOCKERHUB_TOKEN }}
           docker-compose push conda-python
-
-  macos:
-    name: AMD64 MacOS 10.15 Python 3
-    runs-on: macos-latest
-    env:
-      ARROW_HOME: /usr/local
-      ARROW_DATASET: ON
-      ARROW_JEMALLOC: ON
-      ARROW_ORC: ON
-      ARROW_PYTHON: ON
-      ARROW_PLASMA: ON
-      ARROW_GANDIVA: ON
-      ARROW_PARQUET: ON
-      ARROW_WITH_ZLIB: ON
-      ARROW_WITH_LZ4: ON
-      ARROW_WITH_BZ2: ON
-      ARROW_WITH_ZSTD: ON
-      ARROW_WITH_SNAPPY: ON
-      ARROW_WITH_BROTLI: ON
-      ARROW_BUILD_TESTS: OFF
-      CMAKE_ARGS: "-DPYTHON_EXECUTABLE=/usr/local/bin/python3"
-    steps:
-      - name: Checkout Arrow
-        uses: actions/checkout@v1
-        with:
-          submodules: true
-      - name: Install Dependencies
-        shell: bash
-        run: |
-          brew bundle --file=cpp/Brewfile
-          brew install coreutils python
-          pip3 install -r python/requirements.txt \
-                       -r python/requirements-test.txt \
-                       cython
-      - name: Build
-        shell: bash
-        run: |
-          export PYTHON=python3
-          ci/scripts/cpp_build.sh $(pwd) $(pwd)/build
-          ci/scripts/python_build.sh $(pwd) $(pwd)/build
-      - name: Test
-        shell: bash
-        run: ci/scripts/python_test.sh $(pwd) $(pwd)/build
