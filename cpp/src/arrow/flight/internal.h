@@ -67,6 +67,18 @@ namespace internal {
 ARROW_FLIGHT_EXPORT
 extern const char* kGrpcAuthHeader;
 
+/// The name of the header used to pass the exact Arrow status code.
+ARROW_FLIGHT_EXPORT
+extern const char* kGrpcStatusCodeHeader;
+
+/// The name of the header used to pass the exact Arrow status message.
+ARROW_FLIGHT_EXPORT
+extern const char* kGrpcStatusMessageHeader;
+
+/// The name of the header used to pass the exact Arrow status detail.
+ARROW_FLIGHT_EXPORT
+extern const char* kGrpcStatusDetailHeader;
+
 ARROW_FLIGHT_EXPORT
 Status SchemaToString(const Schema& schema, std::string* out);
 

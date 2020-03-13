@@ -248,6 +248,19 @@ class GrpcServerCallContext : public ServerCallContext {
     for (const auto& instance : middleware_) {
       instance->CallCompleted(status);
     }
+
+    // Set custom headers to map the exact Arrow status for clients
+    // who want it.
+    if (ARROW_PREDICT_FALSE(!status.ok())) {
+      context_->AddTrailingMetadata(internal::kGrpcStatusCodeHeader,
+                                    std::to_string(static_cast<int>(status.code())));
+      context_->AddTrailingMetadata(internal::kGrpcStatusMessageHeader, status.message());
+      if (status.detail()) {
+        context_->AddTrailingMetadata(internal::kGrpcStatusDetailHeader,
+                                      status.detail()->ToString());
+      }
+    }
+
     return internal::ToGrpcStatus(status);
   }
 

@@ -45,6 +45,9 @@ namespace flight {
 namespace internal {
 
 const char* kGrpcAuthHeader = "auth-token-bin";
+const char* kGrpcStatusCodeHeader = "x-arrow-status";
+const char* kGrpcStatusMessageHeader = "x-arrow-status-message-bin";
+const char* kGrpcStatusDetailHeader = "x-arrow-status-detail-bin";
 
 Status FromGrpcStatus(const grpc::Status& grpc_status) {
   if (grpc_status.ok()) {
