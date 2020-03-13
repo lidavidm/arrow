@@ -20,6 +20,7 @@
 #include "arrow/flight/protocol_internal.h"
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -49,9 +50,69 @@ const char* kGrpcStatusCodeHeader = "x-arrow-status";
 const char* kGrpcStatusMessageHeader = "x-arrow-status-message-bin";
 const char* kGrpcStatusDetailHeader = "x-arrow-status-detail-bin";
 
-Status FromGrpcStatus(const grpc::Status& grpc_status) {
+/// Try to extract a status from gRPC trailers. If not found, return
+/// Status::OK.
+Status FromGrpcContext(const grpc::ClientContext& ctx) {
+  const std::multimap<grpc::string_ref, grpc::string_ref> trailers =
+      ctx.GetServerTrailingMetadata();
+  const auto code_val = trailers.find(kGrpcStatusCodeHeader);
+  if (code_val == trailers.end()) {
+    return Status::OK();
+  }
+
+  // Bounce through std::string to get a proper null-terminated C string
+  const grpc::string_ref code_ref = (*code_val).second;
+  const auto code_int = std::atoi(std::string(code_ref.data(), code_ref.size()).c_str());
+  StatusCode code = StatusCode::OK;
+  switch (code_int) {
+    case static_cast<int>(StatusCode::OutOfMemory):
+    case static_cast<int>(StatusCode::KeyError):
+    case static_cast<int>(StatusCode::TypeError):
+    case static_cast<int>(StatusCode::Invalid):
+    case static_cast<int>(StatusCode::IOError):
+    case static_cast<int>(StatusCode::CapacityError):
+    case static_cast<int>(StatusCode::IndexError):
+    case static_cast<int>(StatusCode::UnknownError):
+    case static_cast<int>(StatusCode::NotImplemented):
+    case static_cast<int>(StatusCode::SerializationError):
+    case static_cast<int>(StatusCode::RError):
+    case static_cast<int>(StatusCode::CodeGenError):
+    case static_cast<int>(StatusCode::ExpressionValidationError):
+    case static_cast<int>(StatusCode::ExecutionError):
+    case static_cast<int>(StatusCode::AlreadyExists): {
+      code = static_cast<StatusCode>(code_int);
+      break;
+    }
+    default:
+      // Code is invalid
+      return Status::OK();
+  }
+
+  const auto message_val = trailers.find(kGrpcStatusMessageHeader);
+  const grpc::string_ref message_ref = (*message_val).second;
+  if (message_val == trailers.end()) {
+    return Status::OK();
+  }
+  std::string message = std::string(message_ref.data(), message_ref.size());
+  const auto detail_val = trailers.find(kGrpcStatusDetailHeader);
+  if (detail_val != trailers.end()) {
+    const grpc::string_ref detail_ref = (*detail_val).second;
+    message += ". Detail: ";
+    message += std::string(detail_ref.data(), detail_ref.size());
+  }
+  return Status(code, message);
+}
+
+Status FromGrpcStatus(const grpc::Status& grpc_status, grpc::ClientContext* ctx) {
   if (grpc_status.ok()) {
     return Status::OK();
+  }
+
+  if (ctx) {
+    const auto arrow_status = FromGrpcContext(*ctx);
+    if (!arrow_status.ok()) {
+      return arrow_status;
+    }
   }
 
   switch (grpc_status.error_code()) {

@@ -82,8 +82,12 @@ extern const char* kGrpcStatusDetailHeader;
 ARROW_FLIGHT_EXPORT
 Status SchemaToString(const Schema& schema, std::string* out);
 
+/// Convert a gRPC status to an Arrow status. Optionally, provide a
+/// ClientContext to recover the exact Arrow status if it was passed
+/// over the wire.
 ARROW_FLIGHT_EXPORT
-Status FromGrpcStatus(const grpc::Status& grpc_status);
+Status FromGrpcStatus(const grpc::Status& grpc_status,
+                      grpc::ClientContext* ctx = nullptr);
 
 ARROW_FLIGHT_EXPORT
 grpc::Status ToGrpcStatus(const Status& arrow_status);
