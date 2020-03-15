@@ -28,6 +28,7 @@
 
 #include "arrow/flight/visibility.h"
 #include "arrow/ipc/writer.h"
+#include "arrow/result.h"
 
 namespace arrow {
 
@@ -463,7 +464,7 @@ class ARROW_FLIGHT_EXPORT MetadataRecordBatchReader {
   virtual ~MetadataRecordBatchReader() = default;
 
   /// \brief Get the schema for this stream.
-  virtual std::shared_ptr<Schema> schema() const = 0;
+  virtual arrow::Result<std::shared_ptr<Schema>> GetSchema() = 0;
   /// \brief Get the next message from Flight. If the stream is
   /// finished, then the members of \a FlightStreamChunk will be
   /// nullptr.

@@ -87,6 +87,8 @@ service FlightService {
    */
   rpc DoPut(stream FlightData) returns (stream PutResult) {}
 
+  rpc DoExchange(stream FlightData) returns (stream FlightData) {}
+
   /*
    * Flight services can support an arbitrary number of simple actions in
    * addition to the possible ListFlights, GetFlightInfo, DoGet, DoPut

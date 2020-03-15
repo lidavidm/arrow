@@ -90,6 +90,9 @@ class ARROW_FLIGHT_EXPORT FlightStreamReader : public MetadataRecordBatchReader 
 /// application-defined metadata via the Flight protocol.
 class ARROW_FLIGHT_EXPORT FlightStreamWriter : public ipc::RecordBatchWriter {
  public:
+  /// \brief Begin writing data.
+  virtual Status Begin(const std::shared_ptr<Schema>& schema) = 0;
+  virtual Status WriteMetadata(std::shared_ptr<Buffer> app_metadata) = 0;
   virtual Status WriteWithMetadata(const RecordBatch& batch,
                                    std::shared_ptr<Buffer> app_metadata) = 0;
   /// \brief Indicate that the application is done writing to this stream.
@@ -239,6 +242,15 @@ class ARROW_FLIGHT_EXPORT FlightClient {
                std::unique_ptr<FlightStreamWriter>* stream,
                std::unique_ptr<FlightMetadataReader>* reader) {
     return DoPut({}, descriptor, schema, stream, reader);
+  }
+
+  Status DoExchange(const FlightCallOptions& options, const FlightDescriptor& descriptor,
+                    std::unique_ptr<FlightStreamReader>* reader,
+                    std::unique_ptr<FlightStreamWriter>* writer);
+  Status DoExchange(const FlightDescriptor& descriptor,
+                    std::unique_ptr<FlightStreamReader>* reader,
+                    std::unique_ptr<FlightStreamWriter>* writer) {
+    return DoExchange({}, descriptor, reader, writer);
   }
 
  private:
