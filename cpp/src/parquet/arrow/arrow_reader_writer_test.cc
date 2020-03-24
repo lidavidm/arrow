@@ -1979,7 +1979,8 @@ TEST(TestArrowReadWrite, ReadTableManually) {
   AssertTablesEqual(*actual, *expected, /*same_chunk_layout=*/false);
 }
 
-TEST(TestArrowReadWrite, GetRecordBatchReader) {
+void TestGetRecordBatchReader(
+    ReaderProperties parquet_properties = default_reader_properties()) {
   const int num_columns = 20;
   const int num_rows = 1000;
   const int batch_size = 100;
@@ -2029,6 +2030,15 @@ TEST(TestArrowReadWrite, GetRecordBatchReader) {
 
   ASSERT_OK(rb_reader->ReadNext(&actual_batch));
   ASSERT_EQ(nullptr, actual_batch);
+}
+
+TEST(TestArrowReadWrite, GetRecordBatchReader) { TestGetRecordBatchReader(); }
+
+// Same as the test above, but using coalesced reads.
+TEST(TestArrowReadWrite, CoalescedReads) {
+  ReaderProperties parquet_properties = default_reader_properties();
+  parquet_properties.enable_coalesced_stream();
+  TestGetRecordBatchReader(parquet_properties);
 }
 
 TEST(TestArrowReadWrite, ScanContents) {

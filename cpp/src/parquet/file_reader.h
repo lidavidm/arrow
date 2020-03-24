@@ -117,6 +117,13 @@ class PARQUET_EXPORT ParquetFileReader {
   // Returns the file metadata. Only one instance is ever created
   std::shared_ptr<FileMetaData> metadata() const;
 
+  /// Pre-buffer the specified column indices in all row groups.
+  ///
+  /// Intended to increase performance on high-latency filesystems
+  /// (e.g. Amazon S3).
+  void PreBuffer(const std::vector<int>& row_groups,
+                 const std::vector<int>& column_indices);
+
  private:
   // Holds a pointer to an instance of Contents implementation
   std::unique_ptr<Contents> contents_;

@@ -40,12 +40,14 @@ struct ParquetVersion {
 
 static int64_t DEFAULT_BUFFER_SIZE = 1024;
 static bool DEFAULT_USE_BUFFERED_STREAM = false;
+static bool DEFAULT_USE_COALESCED_STREAM = false;
 
 class PARQUET_EXPORT ReaderProperties {
  public:
   explicit ReaderProperties(MemoryPool* pool = ::arrow::default_memory_pool())
       : pool_(pool) {
     buffered_stream_enabled_ = DEFAULT_USE_BUFFERED_STREAM;
+    coalesced_stream_enabled_ = DEFAULT_USE_COALESCED_STREAM;
     buffer_size_ = DEFAULT_BUFFER_SIZE;
   }
 
@@ -56,9 +58,15 @@ class PARQUET_EXPORT ReaderProperties {
 
   bool is_buffered_stream_enabled() const { return buffered_stream_enabled_; }
 
+  bool is_coalesced_stream_enabled() const { return coalesced_stream_enabled_; }
+
   void enable_buffered_stream() { buffered_stream_enabled_ = true; }
 
   void disable_buffered_stream() { buffered_stream_enabled_ = false; }
+
+  void enable_coalesced_stream() { coalesced_stream_enabled_ = true; }
+
+  void disable_coalesced_stream() { coalesced_stream_enabled_ = false; }
 
   void set_buffer_size(int64_t buf_size) { buffer_size_ = buf_size; }
 
@@ -76,6 +84,7 @@ class PARQUET_EXPORT ReaderProperties {
   MemoryPool* pool_;
   int64_t buffer_size_;
   bool buffered_stream_enabled_;
+  bool coalesced_stream_enabled_;
   std::shared_ptr<FileDecryptionProperties> file_decryption_properties_;
 };
 

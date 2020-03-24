@@ -271,23 +271,30 @@ static void CoalescedRead(benchmark::State& st, S3FileSystem* fs,
 }
 
 /// Read a Parquet file from S3.
-static void ParquetRead(benchmark::State& st, S3FileSystem* fs, const std::string& path) {
+static void ParquetRead(benchmark::State& st, S3FileSystem* fs, const std::string& path,
+                        std::vector<int> column_indices, bool pre_buffer) {
   int64_t total_bytes = 0;
   int total_items = 0;
+
+  parquet::ArrowReaderProperties properties;
+  properties.set_use_threads(true);
+  parquet::ReaderProperties parquet_properties = parquet::default_reader_properties();
+  if (pre_buffer) {
+    parquet_properties.enable_coalesced_stream();
+  }
+
   for (auto _ : st) {
     std::shared_ptr<io::RandomAccessFile> file;
     int64_t size = 0;
     ASSERT_OK_AND_ASSIGN(file, fs->OpenInputFile(path));
     ASSERT_OK_AND_ASSIGN(size, file->GetSize());
 
-    parquet::ArrowReaderProperties properties;
-    properties.set_use_threads(true);
     std::unique_ptr<parquet::arrow::FileReader> reader;
     parquet::arrow::FileReaderBuilder builder;
-    ASSERT_OK(builder.Open(file));
+    ASSERT_OK(builder.Open(file, parquet_properties));
     ASSERT_OK(builder.properties(properties)->Build(&reader));
     std::shared_ptr<RecordBatchReader> rb_reader;
-    ASSERT_OK(reader->GetRecordBatchReader({0}, &rb_reader));
+    ASSERT_OK(reader->GetRecordBatchReader({0}, column_indices, &rb_reader));
     std::shared_ptr<Table> table;
     ASSERT_OK(rb_reader->ReadAll(&table));
 
@@ -332,9 +339,38 @@ BENCHMARK_DEFINE_F(MinioFixture, ReadCoalesced500Mib)(benchmark::State& st) {
 BENCHMARK_REGISTER_F(MinioFixture, ReadCoalesced500Mib)->UseRealTime();
 
 BENCHMARK_DEFINE_F(MinioFixture, ReadParquet250K)(benchmark::State& st) {
-  ParquetRead(st, fs_.get(), bucket_ + "/pq_c100_r250k");
+  std::vector<int> column_indices(100);
+  std::iota(column_indices.begin(), column_indices.end(), 0);
+  ParquetRead(st, fs_.get(), bucket_ + "/pq_c100_r250k", column_indices, false);
 }
 BENCHMARK_REGISTER_F(MinioFixture, ReadParquet250K)->UseRealTime();
+BENCHMARK_DEFINE_F(MinioFixture, ReadParquet250KSelection)(benchmark::State& st) {
+  // Read first 50 columns, then scattered
+  std::vector<int> column_indices(50);
+  std::iota(column_indices.begin(), column_indices.end(), 0);
+  for (int i = 52; i < 100; i += 2) {
+    column_indices.push_back(i);
+  }
+  ParquetRead(st, fs_.get(), bucket_ + "/pq_c100_r250k", column_indices, false);
+}
+BENCHMARK_REGISTER_F(MinioFixture, ReadParquet250KSelection)->UseRealTime();
+BENCHMARK_DEFINE_F(MinioFixture, ReadCoalescedParquet250K)(benchmark::State& st) {
+  std::vector<int> column_indices(100);
+  std::iota(column_indices.begin(), column_indices.end(), 0);
+  ParquetRead(st, fs_.get(), bucket_ + "/pq_c100_r250k", column_indices, true);
+}
+BENCHMARK_REGISTER_F(MinioFixture, ReadCoalescedParquet250K)->UseRealTime();
+BENCHMARK_DEFINE_F(MinioFixture, ReadCoalescedParquet250KSelection)
+(benchmark::State& st) {
+  // Read first 50 columns, then scattered
+  std::vector<int> column_indices(50);
+  std::iota(column_indices.begin(), column_indices.end(), 0);
+  for (int i = 52; i < 100; i += 2) {
+    column_indices.push_back(i);
+  }
+  ParquetRead(st, fs_.get(), bucket_ + "/pq_c100_r250k", column_indices, true);
+}
+BENCHMARK_REGISTER_F(MinioFixture, ReadCoalescedParquet250KSelection)->UseRealTime();
 
 }  // namespace fs
 }  // namespace arrow
