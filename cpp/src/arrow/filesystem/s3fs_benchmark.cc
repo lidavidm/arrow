@@ -36,6 +36,7 @@
 #include "arrow/table.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/random.h"
+#include "arrow/util/range.h"
 
 #include "parquet/arrow/reader.h"
 #include "parquet/arrow/writer.h"
@@ -100,7 +101,10 @@ class MinioFixture : public benchmark::Fixture {
       ASSERT_OK(MakeObject("bytes_1mib", 1024 * 1024));
       ASSERT_OK(MakeObject("bytes_100mib", 100 * 1024 * 1024));
       ASSERT_OK(MakeObject("bytes_500mib", 500 * 1024 * 1024));
-      ASSERT_OK(MakeParquetObject(bucket_ + "/pq_c100_r250k", 100, 250000));
+      ASSERT_OK(MakeParquetObject(bucket_ + "/pq_c402_r50k", 400, 50000));
+      ASSERT_OK(MakeParquetObject(bucket_ + "/pq_c402_r250k", 400, 250000));
+      ASSERT_OK(MakeParquetObject(bucket_ + "/pq_c221_r50k", 219, 50000));
+      ASSERT_OK(MakeParquetObject(bucket_ + "/pq_c221_r250k", 219, 250000));
     }
   }
 
@@ -141,16 +145,31 @@ class MinioFixture : public benchmark::Fixture {
   }
 
   /// Make an object with Parquet data.
+  /// Appends integer columns to the beginning (to act as indices).
   Status MakeParquetObject(const std::string& path, int num_columns, int num_rows) {
-    std::vector<std::shared_ptr<ChunkedArray>> columns(num_columns);
-    std::vector<std::shared_ptr<Field>> fields(num_columns);
-    for (int i = 0; i < num_columns; ++i) {
+    std::vector<std::shared_ptr<ChunkedArray>> columns;
+    std::vector<std::shared_ptr<Field>> fields;
+
+    {
+      arrow::random::RandomArrayGenerator generator(0);
+      std::shared_ptr<Array> values = generator.Int64(num_rows, 0, 1e10, 0);
+      columns.push_back(std::make_shared<ChunkedArray>(values));
+      fields.push_back(::arrow::field("timestamp", values->type()));
+    }
+    {
+      arrow::random::RandomArrayGenerator generator(1);
+      std::shared_ptr<Array> values = generator.Int32(num_rows, 0, 1e9, 0);
+      columns.push_back(std::make_shared<ChunkedArray>(values));
+      fields.push_back(::arrow::field("val", values->type()));
+    }
+
+    for (int i = 0; i < num_columns; i++) {
       arrow::random::RandomArrayGenerator generator(i);
       std::shared_ptr<Array> values = generator.Float64(num_rows, -1.e10, 1e10, 0);
       std::stringstream ss;
       ss << "col" << i;
-      columns[i] = std::make_shared<ChunkedArray>(values);
-      fields[i] = ::arrow::field(ss.str(), values->type());
+      columns.push_back(std::make_shared<ChunkedArray>(values));
+      fields.push_back(::arrow::field(ss.str(), values->type()));
     }
     auto schema = std::make_shared<::arrow::Schema>(fields);
 
@@ -246,7 +265,7 @@ static void CoalescedRead(benchmark::State& st, S3FileSystem* fs,
     ASSERT_OK_AND_ASSIGN(size, file->GetSize());
     total_items += 1;
 
-    io::internal::ReadRangeCache cache(file, 8192, 64 * 1024 * 1024);
+    io::internal::ReadRangeCache cache(file, io::CacheOptions{8192, 64 * 1024 * 1024});
     std::vector<io::ReadRange> ranges;
 
     int64_t offset = 0;
@@ -271,23 +290,30 @@ static void CoalescedRead(benchmark::State& st, S3FileSystem* fs,
 }
 
 /// Read a Parquet file from S3.
-static void ParquetRead(benchmark::State& st, S3FileSystem* fs, const std::string& path) {
+static void ParquetRead(benchmark::State& st, S3FileSystem* fs, const std::string& path,
+                        std::vector<int> column_indices, bool pre_buffer) {
   int64_t total_bytes = 0;
   int total_items = 0;
+
+  parquet::ArrowReaderProperties properties;
+  properties.set_use_threads(true);
+  parquet::ReaderProperties parquet_properties = parquet::default_reader_properties();
+  if (pre_buffer) {
+    parquet_properties.enable_coalesced_stream();
+  }
+
   for (auto _ : st) {
     std::shared_ptr<io::RandomAccessFile> file;
     int64_t size = 0;
     ASSERT_OK_AND_ASSIGN(file, fs->OpenInputFile(path));
     ASSERT_OK_AND_ASSIGN(size, file->GetSize());
 
-    parquet::ArrowReaderProperties properties;
-    properties.set_use_threads(true);
     std::unique_ptr<parquet::arrow::FileReader> reader;
     parquet::arrow::FileReaderBuilder builder;
-    ASSERT_OK(builder.Open(file));
+    ASSERT_OK(builder.Open(file, parquet_properties));
     ASSERT_OK(builder.properties(properties)->Build(&reader));
     std::shared_ptr<RecordBatchReader> rb_reader;
-    ASSERT_OK(reader->GetRecordBatchReader({0}, &rb_reader));
+    ASSERT_OK(reader->GetRecordBatchReader({0}, column_indices, &rb_reader));
     std::shared_ptr<Table> table;
     ASSERT_OK(rb_reader->ReadAll(&table));
 
@@ -331,10 +357,53 @@ BENCHMARK_DEFINE_F(MinioFixture, ReadCoalesced500Mib)(benchmark::State& st) {
 }
 BENCHMARK_REGISTER_F(MinioFixture, ReadCoalesced500Mib)->UseRealTime();
 
-BENCHMARK_DEFINE_F(MinioFixture, ReadParquet250K)(benchmark::State& st) {
-  ParquetRead(st, fs_.get(), bucket_ + "/pq_c100_r250k");
-}
-BENCHMARK_REGISTER_F(MinioFixture, ReadParquet250K)->UseRealTime();
+#define PQ_BENCHMARK_IMPL(NAME, ROWS, COLS)                                     \
+  BENCHMARK_DEFINE_F(MinioFixture, NAME##AllNaive)(benchmark::State & st) {     \
+    std::vector<int> column_indices(COLS);                                      \
+    std::iota(column_indices.begin(), column_indices.end(), 0);                 \
+    std::stringstream ss;                                                       \
+    ss << bucket_ << "/pq_c" << COLS << "_r" << ROWS << "k";                    \
+    ParquetRead(st, fs_.get(), ss.str(), column_indices, false);                \
+  }                                                                             \
+  BENCHMARK_REGISTER_F(MinioFixture, NAME##AllNaive)->UseRealTime();            \
+  BENCHMARK_DEFINE_F(MinioFixture, NAME##AllCoalesced)(benchmark::State & st) { \
+    std::vector<int> column_indices(COLS);                                      \
+    std::iota(column_indices.begin(), column_indices.end(), 0);                 \
+    std::stringstream ss;                                                       \
+    ss << bucket_ << "/pq_c" << COLS << "_r" << ROWS << "k";                    \
+    ParquetRead(st, fs_.get(), ss.str(), column_indices, true);                 \
+  }                                                                             \
+  BENCHMARK_REGISTER_F(MinioFixture, NAME##AllCoalesced)->UseRealTime();
+
+#define PQ_BENCHMARK_PICK_IMPL(NAME, ROWS, COLS, COL_INDICES)                    \
+  BENCHMARK_DEFINE_F(MinioFixture, NAME##PickNaive)(benchmark::State & st) {     \
+    std::stringstream ss;                                                        \
+    ss << bucket_ << "/pq_c" << COLS << "_r" << ROWS << "k";                     \
+    ParquetRead(st, fs_.get(), ss.str(), COL_INDICES, false);                    \
+  }                                                                              \
+  BENCHMARK_REGISTER_F(MinioFixture, NAME##PickNaive)->UseRealTime();            \
+  BENCHMARK_DEFINE_F(MinioFixture, NAME##PickCoalesced)(benchmark::State & st) { \
+    std::stringstream ss;                                                        \
+    ss << bucket_ << "/pq_c" << COLS << "_r" << ROWS << "k";                     \
+    ParquetRead(st, fs_.get(), ss.str(), COL_INDICES, true);                     \
+  }                                                                              \
+  BENCHMARK_REGISTER_F(MinioFixture, NAME##PickCoalesced)->UseRealTime();
+
+#define PQ_BENCHMARK(ROWS, COLS) \
+  PQ_BENCHMARK_IMPL(ReadParquet_c##COLS##_r##ROWS##K_, ROWS, COLS)
+
+#define PQ_BENCHMARK_PICK(NAME, ROWS, COLS, COL_INDICES)                         \
+  PQ_BENCHMARK_PICK_IMPL(ReadParquet_c##COLS##_r##ROWS##K_##NAME##_, ROWS, COLS, \
+                         COL_INDICES)
+
+PQ_BENCHMARK(50, 402);
+PQ_BENCHMARK(250, 402);
+PQ_BENCHMARK_PICK(A, 250, 402, (std::vector<int>{0, 1, 98}));
+
+PQ_BENCHMARK(50, 221);
+PQ_BENCHMARK(250, 221);
+PQ_BENCHMARK_PICK(A, 250, 221, (std::vector<int>{0, 1, 2, 3, 4, 90}));
+PQ_BENCHMARK_PICK(B, 250, 221, (::arrow::internal::Iota(41)));
 
 }  // namespace fs
 }  // namespace arrow
