@@ -31,6 +31,7 @@
 #include "arrow/util/iterator.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/range.h"
+#include "arrow/util/span.h"
 #include "parquet/arrow/reader.h"
 #include "parquet/arrow/schema.h"
 #include "parquet/arrow/writer.h"
@@ -52,11 +53,13 @@ using parquet::arrow::StatisticsAsScalars;
 /// \brief A ScanTask backed by a parquet file and a RowGroup within a parquet file.
 class ParquetScanTask : public ScanTask {
  public:
-  ParquetScanTask(int row_group, std::vector<int> column_projection,
+  ParquetScanTask(const std::string& path,
+                  int row_group, std::vector<int> column_projection,
                   std::shared_ptr<parquet::arrow::FileReader> reader,
                   std::shared_ptr<ScanOptions> options,
                   std::shared_ptr<ScanContext> context)
       : ScanTask(std::move(options), std::move(context)),
+        path_(path),
         row_group_(row_group),
         column_projection_(std::move(column_projection)),
         reader_(std::move(reader)) {}
@@ -70,22 +73,26 @@ class ParquetScanTask : public ScanTask {
     // when Execute is called.
     struct {
       Result<std::shared_ptr<RecordBatch>> operator()() const {
+        arrow::util::span::Span ignored("arrow::dataset::ParquetScanTask::Execute::Next", path, 0);
         return record_batch_reader->Next();
       }
 
       // The RecordBatchIterator must hold a reference to the FileReader;
       // since it must outlive the wrapped RecordBatchReader
+      std::string path;
       std::shared_ptr<parquet::arrow::FileReader> file_reader;
       std::unique_ptr<RecordBatchReader> record_batch_reader;
     } NextBatch;
 
     NextBatch.file_reader = reader_;
+    NextBatch.path = path_;
     RETURN_NOT_OK(reader_->GetRecordBatchReader({row_group_}, column_projection_,
                                                 &NextBatch.record_batch_reader));
     return MakeFunctionIterator(std::move(NextBatch));
   }
 
  private:
+  std::string path_;
   int row_group_;
   std::vector<int> column_projection_;
   std::shared_ptr<parquet::arrow::FileReader> reader_;
@@ -106,11 +113,12 @@ static parquet::ReaderProperties MakeReaderProperties(
 
 static parquet::ArrowReaderProperties MakeArrowReaderProperties(
     const ParquetFileFormat& format, const parquet::FileMetaData& metadata) {
-  parquet::ArrowReaderProperties properties(/* use_threads = */ false);
+  parquet::ArrowReaderProperties properties(/* use_threads = */ true);
   for (const std::string& name : format.reader_options.dict_columns) {
     auto column_index = metadata.schema()->ColumnIndex(name);
     properties.set_read_dictionary(column_index, true);
   }
+  properties.set_pre_buffer(true);
   return properties;
 }
 
@@ -286,6 +294,7 @@ Result<std::unique_ptr<parquet::arrow::FileReader>> ParquetFileFormat::GetReader
 Result<ScanTaskIterator> ParquetFileFormat::ScanFile(std::shared_ptr<ScanOptions> options,
                                                      std::shared_ptr<ScanContext> context,
                                                      FileFragment* fragment) const {
+  arrow::util::span::Span ignored("arrow::dataset::ParquetFileFormat::ScanFile", fragment->source().path(), 0);
   auto* parquet_fragment = checked_cast<ParquetFileFragment*>(fragment);
   std::vector<int> row_groups;
 
@@ -321,7 +330,7 @@ Result<ScanTaskIterator> ParquetFileFormat::ScanFile(std::shared_ptr<ScanOptions
   ScanTaskVector tasks(row_groups.size());
 
   for (size_t i = 0; i < row_groups.size(); ++i) {
-    tasks[i] = std::make_shared<ParquetScanTask>(row_groups[i], column_projection, reader,
+    tasks[i] = std::make_shared<ParquetScanTask>(fragment->source().path(), row_groups[i], column_projection, reader,
                                                  options, context);
   }
 

@@ -21,10 +21,14 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <iostream>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
+
+#include "arrow/util/logging.h"
+#include "arrow/util/span.h"
 
 #ifdef _WIN32
 // Undefine preprocessor macros that interfere with AWS function / method names
@@ -141,6 +145,7 @@ Status DoInitializeS3(const S3GlobalOptions& options) {
   };
   Aws::InitAPI(aws_options);
   aws_initialized.store(true);
+  arrow::util::ArrowLog::StartArrowLog("UrsaWorker", arrow::util::ArrowLogLevel::ARROW_DEBUG, "/tmp/spans");
   return Status::OK();
 }
 
@@ -718,6 +723,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
     }
 
     // Read the desired range of bytes
+    arrow::util::span::Span ignored("arrow::filesystem::s3fs::GetObjectRange", path_.key, nbytes);
     ARROW_ASSIGN_OR_RAISE(S3Model::GetObjectResult result,
                           GetObjectRange(client_, path_, position, nbytes, out));
 

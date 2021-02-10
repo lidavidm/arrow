@@ -35,6 +35,7 @@
 #include "arrow/util/make_unique.h"
 #include "arrow/util/parallel.h"
 #include "arrow/util/range.h"
+#include "arrow/util/span.h"
 #include "parquet/arrow/reader_internal.h"
 #include "parquet/column_reader.h"
 #include "parquet/exception.h"
@@ -882,6 +883,7 @@ Status GetReader(const SchemaField& field, const std::shared_ptr<ReaderContext>&
 Status FileReaderImpl::GetRecordBatchReader(const std::vector<int>& row_groups,
                                             const std::vector<int>& column_indices,
                                             std::unique_ptr<RecordBatchReader>* out) {
+  ::arrow::util::span::Span ignored("parquet::arrow::FileReader::GetRecordBatchReader", "(unknown)", 0);
   RETURN_NOT_OK(BoundsCheck(row_groups, column_indices));
 
   if (reader_properties_.pre_buffer()) {

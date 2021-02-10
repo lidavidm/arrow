@@ -2125,12 +2125,34 @@ cdef class ScanTask(_Weakrefable):
         -------
         record_batches : iterator of RecordBatch
         """
-        cdef shared_ptr[CRecordBatch] record_batch
+        cdef CRecordBatchIterator c_iterator
+        cdef RecordBatchIterator iterator
         with nogil:
-            for maybe_batch in GetResultValue(self.task.Execute()):
-                record_batch = GetResultValue(move(maybe_batch))
-                with gil:
-                    yield pyarrow_wrap_batch(record_batch)
+            c_iterator = move(GetResultValue(self.task.Execute()))
+        return RecordBatchIterator.wrap(move(c_iterator))
+
+
+cdef class RecordBatchIterator(_Weakrefable):
+    cdef:
+        CRecordBatchIterator iterator
+
+    def __init__(self):
+        _forbid_instantiation(self.__class__, subclasses_instead=False)
+
+    @staticmethod
+    cdef wrap(CRecordBatchIterator iterator):
+        cdef RecordBatchIterator self = RecordBatchIterator.__new__(RecordBatchIterator)
+        self.iterator = move(iterator)
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        cdef shared_ptr[CRecordBatch] c_batch = move(GetResultValue(self.iterator.Next()))
+        if c_batch == NULL:
+            raise StopIteration
+        return pyarrow_wrap_batch(c_batch)
 
 
 cdef shared_ptr[CScanContext] _build_scan_context(bint use_threads=True,
