@@ -111,6 +111,7 @@ static parquet::ArrowReaderProperties MakeArrowReaderProperties(
     auto column_index = metadata.schema()->ColumnIndex(name);
     properties.set_read_dictionary(column_index, true);
   }
+  properties.set_pre_buffer(true);
   return properties;
 }
 
