@@ -104,6 +104,8 @@ class ARROW_DS_EXPORT ScanTask {
   /// particular ScanTask implementation
   virtual Result<RecordBatchIterator> Execute() = 0;
 
+  virtual std::string name() { return "(unknown)"; }
+
   virtual ~ScanTask() = default;
 
   const std::shared_ptr<ScanOptions>& options() const { return options_; }
@@ -127,6 +129,8 @@ class ARROW_DS_EXPORT InMemoryScanTask : public ScanTask {
         record_batches_(std::move(record_batches)) {}
 
   Result<RecordBatchIterator> Execute() override;
+
+  std::string name() override { return "(memory)"; };
 
  protected:
   std::vector<std::shared_ptr<RecordBatch>> record_batches_;

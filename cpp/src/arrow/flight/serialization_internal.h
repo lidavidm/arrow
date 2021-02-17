@@ -22,10 +22,12 @@
 
 #include <memory>
 
+#include "arrow/buffer.h"
 #include "arrow/flight/internal.h"
 #include "arrow/flight/types.h"
 #include "arrow/ipc/message.h"
 #include "arrow/result.h"
+#include "arrow/util/span.h"
 
 namespace arrow {
 
@@ -130,12 +132,17 @@ class PeekableFlightDataReader {
       return valid_;
     }
 
+    Span span("PeekableFlightDataReader::ReadPayload");
+    int64_t length = 0;
     if (!internal::ReadPayload(&*stream_, &peek_)) {
       finished_ = true;
       valid_ = false;
     } else {
       valid_ = true;
+      length += peek_.metadata ? peek_.metadata->size() : 0;
+      length += peek_.body ? peek_.body->size() : 0;
     }
+    span.AddAttribute("size", std::to_string(length));
     return valid_;
   }
 

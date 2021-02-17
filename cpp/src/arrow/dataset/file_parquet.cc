@@ -53,7 +53,7 @@ using parquet::arrow::StatisticsAsScalars;
 /// \brief A ScanTask backed by a parquet file and a RowGroup within a parquet file.
 class ParquetScanTask : public ScanTask {
  public:
-  ParquetScanTask(int row_group, std::vector<int> column_projection,
+  ParquetScanTask(std::string name, int row_group, std::vector<int> column_projection,
                   std::shared_ptr<parquet::arrow::FileReader> reader,
                   std::shared_ptr<std::once_flag> pre_buffer_once,
                   std::vector<int> pre_buffer_row_groups,
@@ -62,6 +62,7 @@ class ParquetScanTask : public ScanTask {
                   std::shared_ptr<ScanOptions> options,
                   std::shared_ptr<ScanContext> context)
       : ScanTask(std::move(options), std::move(context)),
+        name_(std::move(name)),
         row_group_(row_group),
         column_projection_(std::move(column_projection)),
         reader_(std::move(reader)),
@@ -113,7 +114,10 @@ class ParquetScanTask : public ScanTask {
     return Status::OK();
   }
 
+  std::string name() override { return name_; }
+
  private:
+  std::string name_;
   int row_group_;
   std::vector<int> column_projection_;
   std::shared_ptr<parquet::arrow::FileReader> reader_;
@@ -361,8 +365,9 @@ Result<ScanTaskIterator> ParquetFileFormat::ScanFile(std::shared_ptr<ScanOptions
 
   for (size_t i = 0; i < row_groups.size(); ++i) {
     tasks[i] = std::make_shared<ParquetScanTask>(
-        row_groups[i], column_projection, reader, pre_buffer_once, row_groups,
-        reader_options.async_context, reader_options.cache_options, options, context);
+        fragment->source().path(), row_groups[i], column_projection, reader,
+        pre_buffer_once, row_groups, reader_options.async_context,
+        reader_options.cache_options, options, context);
   }
 
   return MakeVectorIterator(std::move(tasks));

@@ -92,6 +92,8 @@ class FilterAndProjectScanTask : public ScanTask {
     return ProjectRecordBatch(std::move(filter_it), &projector_, context_->pool);
   }
 
+  std::string name() override { return task_->name(); }
+
  private:
   std::shared_ptr<ScanTask> task_;
   Expression partition_;

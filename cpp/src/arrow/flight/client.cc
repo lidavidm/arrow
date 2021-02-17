@@ -493,6 +493,7 @@ class GrpcStreamReader : public FlightStreamReader {
         read_mutex_(read_mutex),
         options_(options),
         stream_(stream),
+        span_("DoGet"),
         peekable_reader_(new internal::PeekableFlightDataReader<std::shared_ptr<Reader>>(
             stream->stream())),
         app_metadata_(nullptr) {}
@@ -510,6 +511,7 @@ class GrpcStreamReader : public FlightStreamReader {
             FlightStatusCode::Internal, "Server never sent a data message"));
       }
 
+      Span span("GrpcStreamReader::Next::ReadNext");
       auto message_reader =
           std::unique_ptr<ipc::MessageReader>(new GrpcIpcMessageReader<Reader>(
               rpc_, read_mutex_, stream_, peekable_reader_, &app_metadata_));
@@ -551,8 +553,11 @@ class GrpcStreamReader : public FlightStreamReader {
       // Re-peek here since EnsureDataStarted() advances the stream
       return Next(out);
     }
-    RETURN_NOT_OK(batch_reader_->ReadNext(&out->data));
-    out->app_metadata = std::move(app_metadata_);
+    {
+      Span span("GrpcStreamReader::Next::ReadNext");
+      RETURN_NOT_OK(batch_reader_->ReadNext(&out->data));
+      out->app_metadata = std::move(app_metadata_);
+    }
     return Status::OK();
   }
   void Cancel() override { rpc_->context.TryCancel(); }
@@ -577,6 +582,7 @@ class GrpcStreamReader : public FlightStreamReader {
   // read. Nullable, as DoGet() doesn't need this.
   std::shared_ptr<std::mutex> read_mutex_;
   ipc::IpcReadOptions options_;
+  Span span_;
   std::shared_ptr<FinishableStream<Reader, internal::FlightData>> stream_;
   std::shared_ptr<internal::PeekableFlightDataReader<std::shared_ptr<Reader>>>
       peekable_reader_;
@@ -1214,7 +1220,12 @@ class FlightClient::FlightClientImpl {
   int64_t write_size_limit_bytes_;
 };
 
-FlightClient::FlightClient() { impl_.reset(new FlightClientImpl); }
+std::once_flag kInitLog;
+
+FlightClient::FlightClient() {
+  impl_.reset(new FlightClientImpl);
+  std::call_once(kInitLog, []() { util::ArrowLog::StartArrowLog("ArrowFlight", util::ArrowLogLevel::ARROW_DEBUG); });
+}
 
 FlightClient::~FlightClient() {}
 

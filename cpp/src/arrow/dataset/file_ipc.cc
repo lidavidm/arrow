@@ -110,6 +110,8 @@ class IpcScanTask : public ScanTask {
     return Impl::Make(source_, options_->MaterializedFields(), context_->pool);
   }
 
+  std::string name() override { return source_.path(); }
+
  private:
   FileSource source_;
 };

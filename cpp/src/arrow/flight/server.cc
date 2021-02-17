@@ -44,6 +44,7 @@
 #include "arrow/status.h"
 #include "arrow/util/io_util.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/span.h"
 #include "arrow/util/uri.h"
 
 #include "arrow/flight/internal.h"
@@ -656,15 +657,28 @@ class FlightServiceImpl : public FlightService::Service {
     }
 
     // Consume data stream and write out payloads
+    int64_t bytes_written = 0;
     while (!context->IsCancelled()) {
       FlightPayload payload;
-      SERVICE_RETURN_NOT_OK(flight_context, data_stream->Next(&payload));
-      if (payload.ipc_message.metadata == nullptr ||
-          !internal::WritePayload(payload, writer))
-        // No more messages to write, or connection terminated for some other
-        // reason
-        break;
+      {
+        Span span("DoGet::FlightDataStream::Next");
+        SERVICE_RETURN_NOT_OK(flight_context, data_stream->Next(&payload));
+      }
+      int64_t payload_bytes = 0;
+      {
+        Span span("DoGet::WritePayload");
+        if (payload.ipc_message.metadata == nullptr ||
+            !internal::WritePayload(payload, writer))
+          // No more messages to write, or connection terminated for some other
+          // reason
+          break;
+        payload_bytes += payload.ipc_message.metadata ? payload.ipc_message.metadata->size() : 0;
+        payload_bytes += payload.ipc_message.body_length;
+        span.AddAttribute("size", std::to_string(payload_bytes));
+      }
+      bytes_written += payload_bytes;
     }
+    ARROW_LOG(INFO) << "DoGet bytes written: " << bytes_written;
     RETURN_WITH_MIDDLEWARE(flight_context, context->IsCancelled()
                                                ? grpc::Status::CANCELLED
                                                : grpc::Status::OK);
@@ -1101,6 +1115,7 @@ class DataStreamAsyncGenerator {
   // implementations (including the one in python/flight.cc) to ease implementation of
   // things like delta dictionaries in the future
   Future<Item> operator()() {
+    Span span("DataStreamAsyncGenerator::Next");
     if (stage_ == Stage::SCHEMA) {
       // Must be done synchronously - future calls require the mapper to be populated
       FlightPayload payload;
@@ -1129,6 +1144,7 @@ class DataStreamAsyncGenerator {
             auto future, async_context_.executor->Submit(
                              [](std::pair<int64_t, std::shared_ptr<Array>> dictionary,
                                 ipc::IpcWriteOptions ipc_options) -> arrow::Result<Item> {
+                               Span span("DataStreamAsyncGenerator::GetDictionaryPayload");
                                FlightPayload payload;
                                RETURN_NOT_OK(ipc::GetDictionaryPayload(
                                    dictionary.first, dictionary.second, ipc_options,
@@ -1150,6 +1166,7 @@ class DataStreamAsyncGenerator {
           auto future, async_context_.executor->Submit(
                            [](std::shared_ptr<RecordBatch> current_batch,
                               ipc::IpcWriteOptions ipc_options) -> arrow::Result<Item> {
+                             Span span("DataStreamAsyncGenerator::GetRecordBatchPayload");
                              FlightPayload payload;
                              RETURN_NOT_OK(ipc::GetRecordBatchPayload(
                                  *current_batch, ipc_options, &payload.ipc_message));
