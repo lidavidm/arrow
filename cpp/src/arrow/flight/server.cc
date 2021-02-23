@@ -96,7 +96,7 @@ template <typename Reader>
 class FlightIpcMessageReader : public ipc::MessageReader {
  public:
   explicit FlightIpcMessageReader(
-      std::shared_ptr<internal::PeekableFlightDataReader<Reader*>> peekable_reader,
+      std::shared_ptr<internal::FlightDataReader> peekable_reader,
       std::shared_ptr<Buffer>* app_metadata)
       : peekable_reader_(peekable_reader), app_metadata_(app_metadata) {}
 
@@ -104,9 +104,9 @@ class FlightIpcMessageReader : public ipc::MessageReader {
     if (stream_finished_) {
       return nullptr;
     }
-    internal::FlightData* data;
-    peekable_reader_->Next(&data);
-    if (!data) {
+    util::optional<internal::FlightData> data;
+    data = std::move(peekable_reader_->Advance());
+    if (!data.has_value()) {
       stream_finished_ = true;
       if (first_message_) {
         return Status::Invalid(
@@ -114,12 +114,12 @@ class FlightIpcMessageReader : public ipc::MessageReader {
       }
       return nullptr;
     }
-    *app_metadata_ = std::move(data->app_metadata);
-    return data->OpenMessage();
+    *app_metadata_ = std::move(data.value().app_metadata);
+    return data.value().OpenMessage();
   }
 
  protected:
-  std::shared_ptr<internal::PeekableFlightDataReader<Reader*>> peekable_reader_;
+  std::shared_ptr<internal::FlightDataReader> peekable_reader_;
   // A reference to FlightMessageReaderImpl.app_metadata_. That class
   // can't access the app metadata because when it Peek()s the stream,
   // it may be looking at a dictionary batch, not the record
@@ -137,12 +137,12 @@ class FlightMessageReaderImpl : public FlightMessageReader {
 
   explicit FlightMessageReaderImpl(GrpcStream* reader)
       : reader_(reader),
-        peekable_reader_(new internal::PeekableFlightDataReader<GrpcStream*>(reader)) {}
+        peekable_reader_(new internal::SynchronousFlightDataReader<GrpcStream*>(reader)) {
+  }
 
   Status Init() {
     // Peek the first message to get the descriptor.
-    internal::FlightData* data;
-    peekable_reader_->Peek(&data);
+    const internal::FlightData* data = peekable_reader_->Peek();
     if (!data) {
       return Status::IOError("Stream finished before first message sent");
     }
@@ -154,7 +154,7 @@ class FlightMessageReaderImpl : public FlightMessageReader {
     if (data->metadata) {
       return EnsureDataStarted();
     }
-    peekable_reader_->Next(&data);
+    peekable_reader_->Advance();
     return Status::OK();
   }
 
@@ -166,8 +166,7 @@ class FlightMessageReaderImpl : public FlightMessageReader {
   }
 
   Status Next(FlightStreamChunk* out) override {
-    internal::FlightData* data;
-    peekable_reader_->Peek(&data);
+    const internal::FlightData* data = peekable_reader_->Peek();
     if (!data) {
       out->app_metadata = nullptr;
       out->data = nullptr;
@@ -178,7 +177,7 @@ class FlightMessageReaderImpl : public FlightMessageReader {
       // Metadata-only (data->metadata is the IPC header)
       out->app_metadata = data->app_metadata;
       out->data = nullptr;
-      peekable_reader_->Next(&data);
+      peekable_reader_->Advance();
       return Status::OK();
     }
 
@@ -210,7 +209,7 @@ class FlightMessageReaderImpl : public FlightMessageReader {
 
   FlightDescriptor descriptor_;
   GrpcStream* reader_;
-  std::shared_ptr<internal::PeekableFlightDataReader<GrpcStream*>> peekable_reader_;
+  std::shared_ptr<internal::FlightDataReader> peekable_reader_;
   std::shared_ptr<RecordBatchReader> batch_reader_;
   std::shared_ptr<Buffer> app_metadata_;
 };
@@ -656,7 +655,7 @@ class FlightServiceImpl : public FlightService::Service {
     }
 
     // Consume data stream and write out payloads
-    while (true) {
+    while (!context->IsCancelled()) {
       FlightPayload payload;
       SERVICE_RETURN_NOT_OK(flight_context, data_stream->Next(&payload));
       if (payload.ipc_message.metadata == nullptr ||
@@ -665,7 +664,9 @@ class FlightServiceImpl : public FlightService::Service {
         // reason
         break;
     }
-    RETURN_WITH_MIDDLEWARE(flight_context, grpc::Status::OK);
+    RETURN_WITH_MIDDLEWARE(flight_context, context->IsCancelled()
+                                               ? grpc::Status::CANCELLED
+                                               : grpc::Status::OK);
   }
 
   grpc::Status DoPut(ServerContext* context,
@@ -1067,6 +1068,141 @@ Status RecordBatchStream::GetSchemaPayload(FlightPayload* payload) {
 }
 
 Status RecordBatchStream::Next(FlightPayload* payload) { return impl_->Next(payload); }
+
+// ----------------------------------------------------------------------
+// Implement GeneratorDataStream
+
+// \brief Given an iterator of record batches, produce an async generator of
+//     FlightPayloads.
+//
+// Converting the record batch to a payload is done on a background thread. Normally
+// this is cheap, but options like compression can make this expensive.
+class DataStreamAsyncGenerator {
+ public:
+  using Item = util::optional<FlightPayload>;
+  // Stages of the stream when producing payloads
+  enum class Stage {
+    SCHEMA,
+    NEW,          // The stream has been created, but Next has not been called yet
+    DICTIONARY,   // Dictionaries have been collected, and are being sent
+    RECORD_BATCH  // Initial have been sent
+  };
+
+  DataStreamAsyncGenerator(std::shared_ptr<RecordBatchReader> reader,
+                           const ipc::IpcWriteOptions& options,
+                           arrow::io::IOContext io_context)
+      : reader_(std::move(reader)),
+        mapper_(*reader_->schema()),
+        ipc_options_(options),
+        io_context_(io_context) {}
+
+  // TODO: the logic here is entirely duplicated - we should consolidate these
+  // implementations (including the one in python/flight.cc) to ease implementation of
+  // things like delta dictionaries in the future
+  Future<Item> operator()() {
+    if (stage_ == Stage::SCHEMA) {
+      // Must be done synchronously - future calls require the mapper to be populated
+      FlightPayload payload;
+      RETURN_NOT_OK(ipc::GetSchemaPayload(*reader_->schema(), ipc_options_, mapper_,
+                                          &payload.ipc_message));
+      stage_ = Stage::NEW;
+      auto result = util::make_optional(std::move(payload));
+      return Future<Item>::MakeFinished(result);
+    } else if (stage_ == Stage::NEW) {
+      // We synchronously read the next batch. The application can implement readahead
+      // so this is non-blocking.
+      RETURN_NOT_OK(reader_->ReadNext(&current_batch_));
+      if (!current_batch_) {
+        return Future<Item>::MakeFinished(arrow::IterationTraits<Item>::End());
+      }
+      ARROW_ASSIGN_OR_RAISE(dictionaries_,
+                            ipc::CollectDictionaries(*current_batch_, mapper_));
+      stage_ = Stage::DICTIONARY;
+      // Fall through
+    }
+    if (stage_ == Stage::DICTIONARY) {
+      if (dictionary_index_ == static_cast<int>(dictionaries_.size())) {
+        stage_ = Stage::RECORD_BATCH;
+      } else {
+        ARROW_ASSIGN_OR_RAISE(
+            auto future, io_context_.executor()->Submit(
+                             [](std::pair<int64_t, std::shared_ptr<Array>> dictionary,
+                                ipc::IpcWriteOptions ipc_options) -> arrow::Result<Item> {
+                               FlightPayload payload;
+                               RETURN_NOT_OK(ipc::GetDictionaryPayload(
+                                   dictionary.first, dictionary.second, ipc_options,
+                                   &payload.ipc_message));
+                               return util::make_optional(std::move(payload));
+                             },
+                             dictionaries_[dictionary_index_++], ipc_options_));
+        return future;
+      }
+    } else {
+      RETURN_NOT_OK(reader_->ReadNext(&current_batch_));
+    }
+
+    // TODO(wesm): Delta dictionaries
+    if (!current_batch_) {
+      return Future<Item>::MakeFinished(arrow::IterationTraits<Item>::End());
+    } else {
+      ARROW_ASSIGN_OR_RAISE(
+          auto future, io_context_.executor()->Submit(
+                           [](std::shared_ptr<RecordBatch> current_batch,
+                              ipc::IpcWriteOptions ipc_options) -> arrow::Result<Item> {
+                             FlightPayload payload;
+                             RETURN_NOT_OK(ipc::GetRecordBatchPayload(
+                                 *current_batch, ipc_options, &payload.ipc_message));
+                             return util::make_optional(std::move(payload));
+                           },
+                           current_batch_, ipc_options_));
+      return future;
+    }
+  }
+
+ private:
+  Stage stage_ = Stage::SCHEMA;
+  std::shared_ptr<RecordBatchReader> reader_;
+  ipc::DictionaryFieldMapper mapper_;
+  ipc::IpcWriteOptions ipc_options_;
+  arrow::io::IOContext io_context_;
+  std::shared_ptr<RecordBatch> current_batch_;
+  std::vector<std::pair<int64_t, std::shared_ptr<Array>>> dictionaries_;
+
+  // Index of next dictionary to send
+  int dictionary_index_ = 0;
+};
+
+AsyncGenerator<util::optional<FlightPayload>> MakePayloadGenerator(
+    std::shared_ptr<RecordBatchReader> reader, const ipc::IpcWriteOptions& options,
+    arrow::io::IOContext io_context) {
+  auto gen =
+      std::make_shared<DataStreamAsyncGenerator>(std::move(reader), options, io_context);
+  return [gen]() { return (*gen)(); };
+}
+
+std::shared_ptr<Schema> GeneratorDataStream::schema() { return schema_; }
+
+Status GeneratorDataStream::GetSchemaPayload(FlightPayload* payload) {
+  // TODO: this isn't quite safe...only works for the first call
+  // TODO: make a breaking change and turn FlightDataStream into purely an
+  // iterator-based interface?
+  return Next(payload);
+}
+
+Status GeneratorDataStream::Next(FlightPayload* payload) {
+  try {
+    auto fut = generator_();
+    ARROW_ASSIGN_OR_RAISE(auto maybe_payload, fut.result());
+    if (maybe_payload.has_value()) {
+      *payload = maybe_payload.value();
+    } else {
+      payload->ipc_message.metadata = nullptr;
+    }
+  } catch (const std::exception& e) {
+    return Status::UnknownError(e.what());
+  }
+  return Status::OK();
+}
 
 }  // namespace flight
 }  // namespace arrow

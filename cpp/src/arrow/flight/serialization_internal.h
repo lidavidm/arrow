@@ -26,6 +26,7 @@
 #include "arrow/flight/types.h"
 #include "arrow/ipc/message.h"
 #include "arrow/result.h"
+#include "arrow/util/optional.h"
 
 namespace arrow {
 
@@ -85,42 +86,52 @@ bool ReadPayload(grpc::ClientReaderWriter<pb::FlightData, pb::PutResult>* reader
 // The Flight reader can then peek at the message to determine whether
 // it has application metadata or not, and pass the message to
 // RecordBatchStreamReader as appropriate.
-template <typename ReaderPtr>
-class PeekableFlightDataReader {
+class FlightDataReader {
  public:
-  explicit PeekableFlightDataReader(ReaderPtr stream)
+  virtual const FlightData* Peek() = 0;
+  virtual util::optional<FlightData> Advance() = 0;
+  virtual bool SkipToData() = 0;
+};
+
+template <typename ReaderPtr>
+class SynchronousFlightDataReader : public FlightDataReader {
+ public:
+  explicit SynchronousFlightDataReader(ReaderPtr stream)
       : stream_(stream), peek_(), finished_(false), valid_(false) {}
 
-  void Peek(internal::FlightData** out) {
-    *out = nullptr;
+  const FlightData* Peek() override {
     if (finished_) {
-      return;
+      return nullptr;
+    } else if (EnsurePeek()) {
+      return &peek_;
     }
-    if (EnsurePeek()) {
-      *out = &peek_;
-    }
+    return nullptr;
   }
 
-  void Next(internal::FlightData** out) {
-    Peek(out);
-    valid_ = false;
+  util::optional<FlightData> Advance() override {
+    if (finished_) {
+      return util::nullopt;
+    } else if (EnsurePeek()) {
+      valid_ = false;
+      return util::make_optional<FlightData>(std::move(peek_));
+    }
+    return util::nullopt;
   }
 
   /// \brief Peek() until the first data message.
   ///
   /// After this is called, either this will return \a false, or the
   /// next result of \a Peek and \a Next will contain Arrow data.
-  bool SkipToData() {
-    FlightData* data;
+  bool SkipToData() override {
     while (true) {
-      Peek(&data);
+      auto data = Peek();
       if (!data) {
         return false;
       }
       if (data->metadata) {
         return true;
       }
-      Next(&data);
+      valid_ = false;
     }
   }
 

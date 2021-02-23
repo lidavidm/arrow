@@ -450,8 +450,26 @@ class FlightTestServer : public FlightServerBase {
   }
 };
 
+class GeneratorFlightTestServer : public FlightTestServer {
+  Status DoGet(const ServerCallContext& context, const Ticket& request,
+               std::unique_ptr<FlightDataStream>* data_stream) override {
+    std::shared_ptr<RecordBatchReader> batch_reader;
+    RETURN_NOT_OK(GetBatchForFlight(request, &batch_reader));
+
+    auto generator = MakePayloadGenerator(batch_reader, ipc::IpcWriteOptions::Defaults(),
+                                          io::AsyncContext());
+    *data_stream = std::unique_ptr<FlightDataStream>(
+        new GeneratorDataStream(batch_reader->schema(), generator));
+    return Status::OK();
+  }
+};
+
 std::unique_ptr<FlightServerBase> ExampleTestServer() {
   return std::unique_ptr<FlightServerBase>(new FlightTestServer);
+}
+
+std::unique_ptr<FlightServerBase> GeneratorTestServer() {
+  return std::unique_ptr<FlightServerBase>(new GeneratorFlightTestServer);
 }
 
 Status MakeFlightInfo(const Schema& schema, const FlightDescriptor& descriptor,

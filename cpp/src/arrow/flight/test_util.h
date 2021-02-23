@@ -76,6 +76,9 @@ class ARROW_FLIGHT_EXPORT TestServer {
 ARROW_FLIGHT_EXPORT
 std::unique_ptr<FlightServerBase> ExampleTestServer();
 
+ARROW_FLIGHT_EXPORT
+std::unique_ptr<FlightServerBase> GeneratorTestServer();
+
 // ----------------------------------------------------------------------
 // A RecordBatchReader for serving a sequence of in-memory record batches
 

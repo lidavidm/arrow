@@ -154,7 +154,7 @@ class FinishableStream {
     // reader finishes, so it's OK to assume the client no longer
     // wants to read and drain the read side. (If the client wants to
     // indicate that it is done writing, but not done reading, it
-    // should use DoneWriting.
+    // should use DoneWriting.)
     ReadT message;
     while (internal::ReadPayload(stream_.get(), &message)) {
       // Drain the read side to avoid gRPC hanging in Finish()
@@ -430,8 +430,7 @@ class GrpcIpcMessageReader : public ipc::MessageReader {
   GrpcIpcMessageReader(
       std::shared_ptr<ClientRpc> rpc, std::shared_ptr<std::mutex> read_mutex,
       std::shared_ptr<FinishableStream<Reader, internal::FlightData>> stream,
-      std::shared_ptr<internal::PeekableFlightDataReader<std::shared_ptr<Reader>>>
-          peekable_reader,
+      std::shared_ptr<internal::FlightDataReader> peekable_reader,
       std::shared_ptr<Buffer>* app_metadata)
       : rpc_(rpc),
         read_mutex_(read_mutex),
@@ -444,18 +443,18 @@ class GrpcIpcMessageReader : public ipc::MessageReader {
     if (stream_finished_) {
       return nullptr;
     }
-    internal::FlightData* data;
+    util::optional<internal::FlightData> data;
     {
       auto guard = read_mutex_ ? std::unique_lock<std::mutex>(*read_mutex_)
                                : std::unique_lock<std::mutex>();
-      peekable_reader_->Next(&data);
+      data = std::move(peekable_reader_->Advance());
     }
-    if (!data) {
+    if (!data.has_value()) {
       stream_finished_ = true;
       return stream_->Finish(Status::OK());
     }
     // Validate IPC message
-    auto result = data->OpenMessage();
+    auto result = data.value().OpenMessage();
     if (!result.ok()) {
       return stream_->Finish(std::move(result).status());
     }
@@ -470,8 +469,7 @@ class GrpcIpcMessageReader : public ipc::MessageReader {
   // side calls Finish(). Nullable as DoGet doesn't need this.
   std::shared_ptr<std::mutex> read_mutex_;
   std::shared_ptr<FinishableStream<Reader, internal::FlightData>> stream_;
-  std::shared_ptr<internal::PeekableFlightDataReader<std::shared_ptr<Reader>>>
-      peekable_reader_;
+  std::shared_ptr<internal::FlightDataReader> peekable_reader_;
   // A reference to GrpcStreamReader.app_metadata_. That class
   // can't access the app metadata because when it Peek()s the stream,
   // it may be looking at a dictionary batch, not the record
@@ -493,8 +491,9 @@ class GrpcStreamReader : public FlightStreamReader {
         read_mutex_(read_mutex),
         options_(options),
         stream_(stream),
-        peekable_reader_(new internal::PeekableFlightDataReader<std::shared_ptr<Reader>>(
-            stream->stream())),
+        peekable_reader_(
+            new internal::SynchronousFlightDataReader<std::shared_ptr<Reader>>(
+                stream->stream())),
         app_metadata_(nullptr) {}
 
   Status EnsureDataStarted() {
@@ -524,10 +523,10 @@ class GrpcStreamReader : public FlightStreamReader {
     return batch_reader_->schema();
   }
   Status Next(FlightStreamChunk* out) override {
-    internal::FlightData* data;
+    const internal::FlightData* data;
     {
       auto guard = TakeGuard();
-      peekable_reader_->Peek(&data);
+      data = peekable_reader_->Peek();
     }
     if (!data) {
       out->app_metadata = nullptr;
@@ -541,7 +540,7 @@ class GrpcStreamReader : public FlightStreamReader {
       out->data = nullptr;
       {
         auto guard = TakeGuard();
-        peekable_reader_->Next(&data);
+        peekable_reader_->Advance();
       }
       return Status::OK();
     }
@@ -578,8 +577,7 @@ class GrpcStreamReader : public FlightStreamReader {
   std::shared_ptr<std::mutex> read_mutex_;
   ipc::IpcReadOptions options_;
   std::shared_ptr<FinishableStream<Reader, internal::FlightData>> stream_;
-  std::shared_ptr<internal::PeekableFlightDataReader<std::shared_ptr<Reader>>>
-      peekable_reader_;
+  std::shared_ptr<internal::FlightDataReader> peekable_reader_;
   std::shared_ptr<ipc::RecordBatchReader> batch_reader_;
   std::shared_ptr<Buffer> app_metadata_;
 };
