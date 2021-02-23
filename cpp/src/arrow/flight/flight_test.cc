@@ -380,6 +380,40 @@ Status MakeServer(std::unique_ptr<FlightServerBase>* server,
   return FlightClient::Connect(real_location, client_options, client);
 }
 
+// Check the results of a DoGet against a vector of batches.
+void CheckDoGet(FlightClient* client, const Ticket& ticket,
+                const BatchVector& expected_batches) {
+  auto num_batches = static_cast<int>(expected_batches.size());
+  ASSERT_GE(num_batches, 2);
+
+  std::unique_ptr<FlightStreamReader> stream;
+  ASSERT_OK(client->DoGet(ticket, &stream));
+
+  FlightStreamChunk chunk;
+  for (int i = 0; i < num_batches; ++i) {
+    ASSERT_OK(stream->Next(&chunk));
+    ASSERT_NE(nullptr, chunk.data);
+#if !defined(__MINGW32__)
+    ASSERT_BATCHES_EQUAL(*expected_batches[i], *chunk.data);
+#else
+    // In MINGW32, the following code does not have the reproducibility at the LSB
+    // even when this is called twice with the same seed.
+    // As a workaround, use approxEqual
+    //   /* from GenerateTypedData in random.cc */
+    //   std::default_random_engine rng(seed);  // seed = 282475250
+    //   std::uniform_real_distribution<double> dist;
+    //   std::generate(data, data + n,          // n = 10
+    //                 [&dist, &rng] { return static_cast<ValueType>(dist(rng)); });
+    //   /* data[1] = 0x40852cdfe23d3976 or 0x40852cdfe23d3975 */
+    ASSERT_BATCHES_APPROX_EQUAL(*expected_batches[i], *chunk.data);
+#endif
+  }
+
+  // Stream exhausted
+  ASSERT_OK(stream->Next(&chunk));
+  ASSERT_EQ(nullptr, chunk.data);
+}
+
 class TestFlightClient : public ::testing::Test {
  public:
   void SetUp() {
@@ -421,35 +455,7 @@ class TestFlightClient : public ::testing::Test {
   }
 
   void CheckDoGet(const Ticket& ticket, const BatchVector& expected_batches) {
-    auto num_batches = static_cast<int>(expected_batches.size());
-    ASSERT_GE(num_batches, 2);
-
-    std::unique_ptr<FlightStreamReader> stream;
-    ASSERT_OK(client_->DoGet(ticket, &stream));
-
-    FlightStreamChunk chunk;
-    for (int i = 0; i < num_batches; ++i) {
-      ASSERT_OK(stream->Next(&chunk));
-      ASSERT_NE(nullptr, chunk.data);
-#if !defined(__MINGW32__)
-      ASSERT_BATCHES_EQUAL(*expected_batches[i], *chunk.data);
-#else
-      // In MINGW32, the following code does not have the reproducibility at the LSB
-      // even when this is called twice with the same seed.
-      // As a workaround, use approxEqual
-      //   /* from GenerateTypedData in random.cc */
-      //   std::default_random_engine rng(seed);  // seed = 282475250
-      //   std::uniform_real_distribution<double> dist;
-      //   std::generate(data, data + n,          // n = 10
-      //                 [&dist, &rng] { return static_cast<ValueType>(dist(rng)); });
-      //   /* data[1] = 0x40852cdfe23d3976 or 0x40852cdfe23d3975 */
-      ASSERT_BATCHES_APPROX_EQUAL(*expected_batches[i], *chunk.data);
-#endif
-    }
-
-    // Stream exhausted
-    ASSERT_OK(stream->Next(&chunk));
-    ASSERT_EQ(nullptr, chunk.data);
+    flight::CheckDoGet(client_.get(), ticket, expected_batches);
   }
 
  protected:
@@ -1339,6 +1345,32 @@ class TestCookieParsing : public ::testing::Test {
     const std::vector<std::string> expected_split_cookies =
         TestCookieMiddleware::SplitCookies(expected_cookies);
   }
+};
+
+class TestGenerator : public ::testing::Test {
+ public:
+  void SetUp() {
+    server_ = GeneratorTestServer();
+
+    Location location;
+    ASSERT_OK(Location::ForGrpcTcp("localhost", 0, &location));
+    FlightServerOptions options(location);
+    ASSERT_OK(server_->Init(options));
+
+    ASSERT_OK(ConnectClient());
+  }
+
+  void TearDown() { ASSERT_OK(server_->Shutdown()); }
+
+  Status ConnectClient() {
+    Location location;
+    RETURN_NOT_OK(Location::ForGrpcTcp("localhost", server_->port(), &location));
+    return FlightClient::Connect(location, &client_);
+  }
+
+ protected:
+  std::unique_ptr<FlightClient> client_;
+  std::unique_ptr<FlightServerBase> server_;
 };
 
 TEST_F(TestErrorMiddleware, TestMetadata) {
@@ -2660,6 +2692,34 @@ TEST_F(TestCookieParsing, CookieCache) {
   AddCookieVerifyCache({"id0=0;", "id0=1;"}, "id0=\"1\"");
   AddCookieVerifyCache({"id0=0;", "id1=1;"}, "id0=\"0\"; id1=\"1\"");
   AddCookieVerifyCache({"id0=0;", "id1=1;", "id2=2"}, "id0=\"0\"; id1=\"1\"; id2=\"2\"");
+}
+
+TEST_F(TestGenerator, DoGetInts) {
+  BatchVector expected_batches;
+  ASSERT_OK(ExampleIntBatches(&expected_batches));
+  Ticket ticket{"ticket-ints-1"};
+  CheckDoGet(client_.get(), ticket, expected_batches);
+}
+
+TEST_F(TestGenerator, DoGetFloats) {
+  BatchVector expected_batches;
+  ASSERT_OK(ExampleFloatBatches(&expected_batches));
+  Ticket ticket{"ticket-floats-1"};
+  CheckDoGet(client_.get(), ticket, expected_batches);
+}
+
+TEST_F(TestGenerator, DoGetDicts) {
+  BatchVector expected_batches;
+  ASSERT_OK(ExampleDictBatches(&expected_batches));
+  Ticket ticket{"ticket-dicts-1"};
+  CheckDoGet(client_.get(), ticket, expected_batches);
+}
+
+TEST_F(TestGenerator, DoGetLargeBatch) {
+  BatchVector expected_batches;
+  ASSERT_OK(ExampleLargeBatches(&expected_batches));
+  Ticket ticket{"ticket-large-batch-1"};
+  CheckDoGet(client_.get(), ticket, expected_batches);
 }
 
 }  // namespace flight

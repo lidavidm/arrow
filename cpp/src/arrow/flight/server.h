@@ -29,9 +29,11 @@
 #include "arrow/flight/server_auth.h"
 #include "arrow/flight/types.h"       // IWYU pragma: keep
 #include "arrow/flight/visibility.h"  // IWYU pragma: keep
+#include "arrow/io/interfaces.h"
 #include "arrow/ipc/dictionary.h"
 #include "arrow/ipc/options.h"
 #include "arrow/record_batch.h"
+#include "arrow/util/async_generator.h"
 
 namespace arrow {
 
@@ -78,6 +80,27 @@ class ARROW_FLIGHT_EXPORT RecordBatchStream : public FlightDataStream {
   class RecordBatchStreamImpl;
   std::unique_ptr<RecordBatchStreamImpl> impl_;
 };
+
+// TODO: may want to move into a new header
+class ARROW_FLIGHT_EXPORT GeneratorDataStream : public FlightDataStream {
+ public:
+  explicit GeneratorDataStream(std::shared_ptr<Schema> schema,
+                               AsyncGenerator<util::optional<FlightPayload>> generator)
+      : schema_(std::move(schema)), generator_(generator) {}
+  ~GeneratorDataStream() = default;
+
+  std::shared_ptr<Schema> schema() override;
+  Status GetSchemaPayload(FlightPayload* payload) override;
+  Status Next(FlightPayload* payload) override;
+
+ private:
+  std::shared_ptr<Schema> schema_;
+  AsyncGenerator<util::optional<FlightPayload>> generator_;
+};
+
+AsyncGenerator<util::optional<FlightPayload>> MakePayloadGenerator(
+    std::shared_ptr<RecordBatchReader> reader, const ipc::IpcWriteOptions& options,
+    arrow::io::AsyncContext async_context);
 
 /// \brief A reader for IPC payloads uploaded by a client. Also allows
 /// reading application-defined metadata via the Flight protocol.
