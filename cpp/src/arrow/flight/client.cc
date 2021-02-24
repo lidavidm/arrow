@@ -962,6 +962,11 @@ class FlightClient::FlightClientImpl {
     // Setting this arg enables each client to open it's own TCP connection to server,
     // not sharing one single connection, which becomes bottleneck under high load.
     default_args[GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL] = 1;
+    // Encourage gRPC to read more at a time from the socket
+    default_args[GRPC_ARG_TCP_MIN_READ_CHUNK_SIZE] = 1024 * 1024;
+    // In gRPC source, 32 MiB is the max of the max chunk size
+    default_args[GRPC_ARG_TCP_MAX_READ_CHUNK_SIZE] = 32 * 1024 * 1024;
+    default_args[GRPC_ARG_TCP_READ_CHUNK_SIZE] = 32 * 1024 * 1024;
 
     if (options.override_hostname != "") {
       args.SetSslTargetNameOverride(options.override_hostname);
