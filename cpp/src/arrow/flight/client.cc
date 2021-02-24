@@ -979,9 +979,6 @@ class FlightClient::FlightClientImpl {
     for (const auto& pair : default_args) {
       args.SetInt(pair.first, pair.second);
     }
-    args.SetInt(GRPC_ARG_TCP_MIN_READ_CHUNK_SIZE, 1024 * 1024);
-    args.SetInt(GRPC_ARG_TCP_MAX_READ_CHUNK_SIZE, 64 * 1024 * 1024);
-    args.SetInt(GRPC_ARG_TCP_READ_CHUNK_SIZE, 32 * 1024 * 1024);
 
     std::vector<std::unique_ptr<grpc::experimental::ClientInterceptorFactoryInterface>>
         interceptors;

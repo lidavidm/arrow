@@ -23,7 +23,6 @@
 #include <vector>
 
 #include "arrow/flight/platform.h"
-#include "arrow/util/logging.h"
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -107,7 +106,6 @@ class GrpcBuffer : public MutableBuffer {
     // flatbuffers/grpc.h
 
     // Check if this is a single uncompressed slice.
-    ARROW_LOG(INFO) << "Buffer count: " << buffer->data.raw.slice_buffer.count;
     if ((buffer->type == GRPC_BB_RAW) &&
         (buffer->data.raw.compression == GRPC_COMPRESS_NONE) &&
         (buffer->data.raw.slice_buffer.count == 1)) {
