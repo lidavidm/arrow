@@ -880,6 +880,7 @@ Status FlightServerBase::Init(const FlightServerOptions& options) {
   // Disable SO_REUSEPORT - it makes debugging/testing a pain as
   // leftover processes can handle requests on accident
   builder.AddChannelArgument(GRPC_ARG_ALLOW_REUSEPORT, 0);
+  builder.AddChannelArgument(GRPC_ARG_TCP_TX_ZEROCOPY_ENABLED, 1);
 
   if (options.builder_hook) {
     options.builder_hook(&builder);
