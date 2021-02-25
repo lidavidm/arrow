@@ -135,8 +135,11 @@ def run_cmd(cmd):
     if isinstance(cmd, str):
         cmd = cmd.split(' ')
 
+    env = os.environ.copy()
+    env['GRPC_VERBOSITY'] = 'debug'
+    env['GRPC_TRACE'] = 'all'
     try:
-        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+        output = subprocess.check_output(cmd, env=env, stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as e:
         # this avoids hiding the stdout / stderr of failed processes
         sio = io.StringIO()

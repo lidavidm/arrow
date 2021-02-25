@@ -94,6 +94,7 @@ class RustTester(Tester):
                     "stdout:\n{}\n\nstderr:\n{}\n"
                     .format(output + out.decode(), err.decode()))
             port = int(output.split(":")[1])
+            print("Server running on port", port)
             yield port
         finally:
             server.kill()
