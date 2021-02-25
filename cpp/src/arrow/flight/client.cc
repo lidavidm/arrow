@@ -145,6 +145,7 @@ class FinishableStream {
 
   /// \brief Finish the call, adding server context to the given status.
   virtual Status Finish(Status st) {
+    Span span("Finish");
     if (finished_) {
       return MergeStatus(std::move(st));
     }
