@@ -53,23 +53,24 @@ using parquet::arrow::StatisticsAsScalars;
 /// \brief A ScanTask backed by a parquet file and a RowGroup within a parquet file.
 class ParquetScanTask : public ScanTask {
  public:
-  ParquetScanTask(std::string name, int row_group, std::vector<int> column_projection,
+  ParquetScanTask(std::string name,
+                  std::vector<int> row_group, std::vector<int> column_projection,
                   std::shared_ptr<parquet::arrow::FileReader> reader,
-                  std::shared_ptr<std::once_flag> pre_buffer_once,
-                  std::vector<int> pre_buffer_row_groups,
-                  arrow::io::AsyncContext async_context,
-                  arrow::io::CacheOptions cache_options,
                   std::shared_ptr<ScanOptions> options,
-                  std::shared_ptr<ScanContext> context)
+                  std::shared_ptr<ScanContext> context,
+                  bool pre_buffer,
+                  io::AsyncContext async_context,
+                  io::CacheOptions cache_options
+                  )
       : ScanTask(std::move(options), std::move(context)),
         name_(std::move(name)),
-        row_group_(row_group),
+        row_group_(std::move(row_group)),
         column_projection_(std::move(column_projection)),
         reader_(std::move(reader)),
-        pre_buffer_once_(std::move(pre_buffer_once)),
-        pre_buffer_row_groups_(std::move(pre_buffer_row_groups)),
+        pre_buffer_(pre_buffer),
         async_context_(async_context),
-        cache_options_(cache_options) {}
+        cache_options_(cache_options)
+  {}
 
   Result<RecordBatchIterator> Execute() override {
     // The construction of parquet's RecordBatchReader is deferred here to
@@ -79,54 +80,43 @@ class ParquetScanTask : public ScanTask {
     // The memory and IO incurred by the RecordBatchReader is allocated only
     // when Execute is called.
     struct {
-      Result<std::shared_ptr<RecordBatch>> operator()() const {
+      Result<std::shared_ptr<RecordBatch>> operator()() {
+        if (!record_batch_reader) {
+          RETURN_NOT_OK(file_reader->GetRecordBatchReader(row_group_, column_projection_,
+                                                      &record_batch_reader));
+        }
         return record_batch_reader->Next();
       }
 
       // The RecordBatchIterator must hold a reference to the FileReader;
       // since it must outlive the wrapped RecordBatchReader
       std::shared_ptr<parquet::arrow::FileReader> file_reader;
+      std::vector<int> row_group_;
+      std::vector<int> column_projection_;
       std::unique_ptr<RecordBatchReader> record_batch_reader;
     } NextBatch;
 
-    RETURN_NOT_OK(EnsurePreBuffered());
     NextBatch.file_reader = reader_;
-    RETURN_NOT_OK(reader_->GetRecordBatchReader({row_group_}, column_projection_,
-                                                &NextBatch.record_batch_reader));
-    return MakeFunctionIterator(std::move(NextBatch));
-  }
-
-  // Ensure that pre-buffering has been applied to the underlying Parquet reader
-  // exactly once (if needed). If we instead set pre_buffer on in the Arrow
-  // reader properties, each scan task will try to separately pre-buffer, which
-  // will lead to crashes as they trample the Parquet file reader's internal
-  // state. Instead, pre-buffer once at the file level. This also has the
-  // advantage that we can coalesce reads across row groups.
-  Status EnsurePreBuffered() {
-    if (pre_buffer_once_) {
+    NextBatch.row_group_ = row_group_;
+    NextBatch.column_projection_ = column_projection_;
+    if (pre_buffer_) {
       BEGIN_PARQUET_CATCH_EXCEPTIONS
-      std::call_once(*pre_buffer_once_, [this]() {
-        reader_->parquet_reader()->PreBuffer(pre_buffer_row_groups_, column_projection_,
-                                             async_context_, cache_options_);
-      });
+      reader_->parquet_reader()->PreBuffer(row_group_, column_projection_, async_context_, cache_options_);
       END_PARQUET_CATCH_EXCEPTIONS
     }
-    return Status::OK();
+    return MakeFunctionIterator(std::move(NextBatch));
   }
 
   std::string name() override { return name_; }
 
  private:
   std::string name_;
-  int row_group_;
+  std::vector<int> row_group_;
   std::vector<int> column_projection_;
   std::shared_ptr<parquet::arrow::FileReader> reader_;
-  // Pre-buffering state. pre_buffer_once will be nullptr if no pre-buffering is
-  // to be done. We assume all scan tasks have the same column projection.
-  std::shared_ptr<std::once_flag> pre_buffer_once_;
-  std::vector<int> pre_buffer_row_groups_;
-  arrow::io::AsyncContext async_context_;
-  arrow::io::CacheOptions cache_options_;
+  bool pre_buffer_;
+  io::AsyncContext async_context_;
+  io::CacheOptions cache_options_;
 };
 
 static parquet::ReaderProperties MakeReaderProperties(
@@ -292,19 +282,26 @@ Result<std::shared_ptr<Schema>> ParquetFileFormat::Inspect(
 
 Result<std::unique_ptr<parquet::arrow::FileReader>> ParquetFileFormat::GetReader(
     const FileSource& source, ScanOptions* options, ScanContext* context) const {
+  ARROW_ASSIGN_OR_RAISE(auto input, source.Open());
+  return GetReader(source, input, nullptr, options, context);
+}
+
+Result<std::unique_ptr<parquet::arrow::FileReader>> ParquetFileFormat::GetReader(
+    const FileSource& source, std::shared_ptr<io::RandomAccessFile> input,
+    std::shared_ptr<parquet::FileMetaData> metadata, ScanOptions* options,
+    ScanContext* context) const {
   MemoryPool* pool = context ? context->pool : default_memory_pool();
   auto properties = MakeReaderProperties(*this, pool);
 
-  ARROW_ASSIGN_OR_RAISE(auto input, source.Open());
   std::unique_ptr<parquet::ParquetFileReader> reader;
   try {
-    reader = parquet::ParquetFileReader::Open(std::move(input), std::move(properties));
+    reader = parquet::ParquetFileReader::Open(std::move(input), std::move(properties),
+                                              metadata);
   } catch (const ::parquet::ParquetException& e) {
     return Status::IOError("Could not open parquet input source '", source.path(),
                            "': ", e.what());
   }
 
-  std::shared_ptr<parquet::FileMetaData> metadata = reader->metadata();
   auto arrow_properties = MakeArrowReaderProperties(*this, *metadata);
 
   if (options) {
@@ -348,6 +345,7 @@ Result<ScanTaskIterator> ParquetFileFormat::ScanFile(std::shared_ptr<ScanOptions
   // Ensure that parquet_fragment has FileMetaData
   RETURN_NOT_OK(parquet_fragment->EnsureCompleteMetadata(reader.get()));
 
+  // TODO: group multiple row groups into one
   if (!pre_filtered) {
     // row groups were not already filtered; do this now
     ARROW_ASSIGN_OR_RAISE(row_groups, parquet_fragment->FilterRowGroups(options->filter));
@@ -356,18 +354,23 @@ Result<ScanTaskIterator> ParquetFileFormat::ScanFile(std::shared_ptr<ScanOptions
   }
 
   auto column_projection = InferColumnProjection(*reader, *options);
-  ScanTaskVector tasks(row_groups.size());
+  ScanTaskVector tasks;
 
-  std::shared_ptr<std::once_flag> pre_buffer_once = nullptr;
-  if (reader_options.pre_buffer) {
-    pre_buffer_once = std::make_shared<std::once_flag>();
-  }
-
-  for (size_t i = 0; i < row_groups.size(); ++i) {
-    tasks[i] = std::make_shared<ParquetScanTask>(
-        fragment->source().path(), row_groups[i], column_projection, reader,
-        pre_buffer_once, row_groups, reader_options.async_context,
-        reader_options.cache_options, options, context);
+  ARROW_ASSIGN_OR_RAISE(auto input, fragment->source().Open());
+  size_t i = 0;
+  while (i < row_groups.size()) {
+    std::vector<int> sub_groups;
+    do {
+      sub_groups.push_back(i);
+      i++;
+    } while (sub_groups.size() < 5 && i < row_groups.size());
+    ARROW_ASSIGN_OR_RAISE(auto sub_reader, GetReader(fragment->source(), input,
+                                                     reader->parquet_reader()->metadata(),
+                                                     options.get(), context.get()));
+    tasks.push_back(std::make_shared<ParquetScanTask>(fragment->source().path(), sub_groups,
+                                                 column_projection, std::move(sub_reader),
+                                                      options, context,
+                                                      reader_options.pre_buffer, reader_options.async_context, reader_options.cache_options));
   }
 
   return MakeVectorIterator(std::move(tasks));
