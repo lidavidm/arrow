@@ -1044,6 +1044,7 @@ class RecordBatchStream::RecordBatchStreamImpl {
       payload->ipc_message.metadata = nullptr;
       return Status::OK();
     } else {
+      Span span("RecordBatchStream::GetRecordBatchPayload");
       return ipc::GetRecordBatchPayload(*current_batch_, ipc_options_,
                                         &payload->ipc_message);
     }
