@@ -60,6 +60,8 @@ enum class ParquetDataPageVersion { V1, V2 };
 
 /// Align the default buffer size to a small multiple of a page size.
 constexpr int64_t kDefaultBufferSize = 4096 * 4;
+// PARQUET-978: Minimize footer reads by reading 64 KB from the end of the file
+constexpr int64_t kDefaultFooterReadSize = 64 * 1024;
 
 class PARQUET_EXPORT ReaderProperties {
  public:
@@ -85,6 +87,13 @@ class PARQUET_EXPORT ReaderProperties {
   int64_t buffer_size() const { return buffer_size_; }
   void set_buffer_size(int64_t size) { buffer_size_ = size; }
 
+  /// When reading the footer, speculatively read up to this many
+  /// bytes from the end of the file. If the entire footer is in the
+  /// initially read segment, then a second read operation will be
+  /// unnecessary.
+  int64_t footer_read_size() const { return footer_read_size_; }
+  void set_footer_read_size(int64_t size) { footer_read_size_ = size; }
+
   void file_decryption_properties(std::shared_ptr<FileDecryptionProperties> decryption) {
     file_decryption_properties_ = std::move(decryption);
   }
@@ -97,6 +106,7 @@ class PARQUET_EXPORT ReaderProperties {
   MemoryPool* pool_;
   int64_t buffer_size_ = kDefaultBufferSize;
   bool buffered_stream_enabled_ = false;
+  int64_t footer_read_size_ = kDefaultFooterReadSize;
   std::shared_ptr<FileDecryptionProperties> file_decryption_properties_;
 };
 

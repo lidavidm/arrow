@@ -138,6 +138,7 @@ static parquet::ReaderProperties MakeReaderProperties(
     properties.disable_buffered_stream();
   }
   properties.set_buffer_size(format.reader_options.buffer_size);
+  properties.set_footer_read_size(format.reader_options.footer_read_size);
   properties.file_decryption_properties(format.reader_options.file_decryption_properties);
   return properties;
 }

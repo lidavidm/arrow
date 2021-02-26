@@ -82,6 +82,7 @@ class ARROW_DS_EXPORT ParquetFileFormat : public FileFormat {
     /// @{
     bool use_buffered_stream = false;
     int64_t buffer_size = 1 << 13;
+    int64_t footer_read_size = 64 * 1024;
     std::shared_ptr<parquet::FileDecryptionProperties> file_decryption_properties;
     /// @}
 

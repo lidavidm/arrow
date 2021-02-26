@@ -46,8 +46,6 @@
 
 namespace parquet {
 
-// PARQUET-978: Minimize footer reads by reading 64 KB from the end of the file
-static constexpr int64_t kDefaultFooterReadSize = 64 * 1024;
 static constexpr uint32_t kFooterSize = 8;
 
 // For PARQUET-816
@@ -275,7 +273,7 @@ class SerializedFile : public ParquetFileReader::Contents {
           " bytes, smaller than the minimum file footer (", kFooterSize, " bytes)");
     }
 
-    int64_t footer_read_size = std::min(source_size_, kDefaultFooterReadSize);
+    int64_t footer_read_size = std::min(source_size_, properties_.footer_read_size());
     PARQUET_ASSIGN_OR_THROW(
         auto footer_buffer,
         source_->ReadAt(source_size_ - footer_read_size, footer_read_size));
