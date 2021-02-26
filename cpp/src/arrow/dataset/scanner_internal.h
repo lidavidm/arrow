@@ -55,11 +55,15 @@ inline RecordBatchIterator FilterRecordBatch(RecordBatchIterator it, Expression 
 }
 
 inline RecordBatchIterator ProjectRecordBatch(RecordBatchIterator it,
-                                              RecordBatchProjector projector,
+                                              RecordBatchProjector* projector,
                                               MemoryPool* pool) {
   return MakeMaybeMapIterator(
-      [=](std::shared_ptr<RecordBatch> in) mutable {
-        return projector.Project(*in, pool);
+      [=](std::shared_ptr<RecordBatch> in) {
+        // The RecordBatchProjector is shared across ScanTasks of the same
+        // Fragment. The resize operation of missing columns is not thread safe.
+        // Ensure that each ScanTask gets his own projector.
+        RecordBatchProjector local_projector{*projector};
+        return local_projector.Project(*in, pool);
       },
       std::move(it));
 }
@@ -85,10 +89,7 @@ class FilterAndProjectScanTask : public ScanTask {
     RETURN_NOT_OK(
         KeyValuePartitioning::SetDefaultValuesFromKeys(partition_, &projector_));
 
-        // The RecordBatchProjector is shared across ScanTasks of the same
-        // Fragment. The resize operation of missing columns is not thread safe.
-        // Ensure that each ScanTask gets his own projector.
-    return ProjectRecordBatch(std::move(filter_it), projector_, context_->pool);
+    return ProjectRecordBatch(std::move(filter_it), &projector_, context_->pool);
   }
 
   std::string name() override { return task_->name(); }

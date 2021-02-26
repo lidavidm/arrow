@@ -138,12 +138,6 @@ class ARROW_DS_EXPORT ParquetFileFormat : public FileFormat {
       std::shared_ptr<FileWriteOptions> options) const override;
 
   std::shared_ptr<FileWriteOptions> DefaultWriteOptions() override;
-
- private:
-  Result<std::unique_ptr<parquet::arrow::FileReader>> GetReader(
-      const FileSource& source, std::shared_ptr<io::RandomAccessFile> input,
-      std::shared_ptr<parquet::FileMetaData> metadata, ScanOptions* = NULLPTR,
-      ScanContext* = NULLPTR) const;
 };
 
 /// \brief A FileFragment with parquet logic.
