@@ -523,8 +523,9 @@ class GrpcStreamReader : public FlightStreamReader {
     return Status::OK();
   }
   arrow::Result<std::shared_ptr<Schema>> GetSchema() override {
-    RETURN_NOT_OK(EnsureDataStarted());
-    return batch_reader_->schema();
+    return schema_;
+    // RETURN_NOT_OK(EnsureDataStarted());
+    // return batch_reader_->schema();
   }
   Status Next(FlightStreamChunk* out) override {
     internal::FlightData* data;
@@ -549,16 +550,21 @@ class GrpcStreamReader : public FlightStreamReader {
       return Status::OK();
     }
 
-    if (!batch_reader_) {
-      RETURN_NOT_OK(EnsureDataStarted());
-      // Re-peek here since EnsureDataStarted() advances the stream
-      return Next(out);
-    }
+    out->data = batch_;
     {
-      Span span("GrpcStreamReader::Next::ReadNext");
-      RETURN_NOT_OK(batch_reader_->ReadNext(&out->data));
-      out->app_metadata = std::move(app_metadata_);
+      auto guard = TakeGuard();
+      peekable_reader_->Next(&data);
     }
+    // if (!batch_reader_) {
+    //   RETURN_NOT_OK(EnsureDataStarted());
+    //   // Re-peek here since EnsureDataStarted() advances the stream
+    //   return Next(out);
+    // }
+    // {
+    //   Span span("GrpcStreamReader::Next::ReadNext");
+    //   RETURN_NOT_OK(batch_reader_->ReadNext(&out->data));
+    //   out->app_metadata = std::move(app_metadata_);
+    // }
     return Status::OK();
   }
   void Cancel() override { rpc_->context.TryCancel(); }
@@ -589,6 +595,8 @@ class GrpcStreamReader : public FlightStreamReader {
       peekable_reader_;
   std::shared_ptr<ipc::RecordBatchReader> batch_reader_;
   std::shared_ptr<Buffer> app_metadata_;
+  std::shared_ptr<Schema> schema_ = std::make_shared<Schema>(std::vector<std::shared_ptr<Field>>());
+  std::shared_ptr<RecordBatch> batch_ = RecordBatch::Make(schema_, 0, std::vector<std::shared_ptr<Array>>());
 };
 
 // The next two classes implement writing to a FlightData stream.
