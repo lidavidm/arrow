@@ -171,6 +171,7 @@ class FinishableStream {
     if (server_status_.ok()) {
       return std::move(st);
     }
+    // TODO: this needs to have a custom detail that'll also expose the client-side error
     return Status::FromDetailAndArgs(
         server_status_.code(), server_status_.detail(), server_status_.message(),
         ". Client context: ", st.ToString(),
@@ -486,14 +487,13 @@ class GrpcStreamReader : public FlightStreamReader {
  public:
   GrpcStreamReader(std::shared_ptr<ClientRpc> rpc, std::shared_ptr<std::mutex> read_mutex,
                    const ipc::IpcReadOptions& options,
-                   std::shared_ptr<FinishableStream<Reader, internal::FlightData>> stream)
+                   std::shared_ptr<FinishableStream<Reader, internal::FlightData>> stream,
+                   std::shared_ptr<internal::FlightDataReader> peekable_reader)
       : rpc_(rpc),
         read_mutex_(read_mutex),
         options_(options),
         stream_(stream),
-        peekable_reader_(
-            new internal::SynchronousFlightDataReader<std::shared_ptr<Reader>>(
-                stream->stream())),
+        peekable_reader_(std::move(peekable_reader)),
         app_metadata_(nullptr) {}
 
   Status EnsureDataStarted() {
@@ -546,11 +546,22 @@ class GrpcStreamReader : public FlightStreamReader {
     }
 
     if (!batch_reader_) {
-      RETURN_NOT_OK(EnsureDataStarted());
+      auto status = EnsureDataStarted();
+      if (!status.ok()) {
+        // TODO: pack this into a helper
+        rpc_->context.TryCancel();
+        peekable_reader_->Drain();
+        return stream_->Finish(status);
+      }
       // Re-peek here since EnsureDataStarted() advances the stream
       return Next(out);
     }
-    RETURN_NOT_OK(batch_reader_->ReadNext(&out->data));
+    auto status = batch_reader_->ReadNext(&out->data);
+    if (!status.ok()) {
+      rpc_->context.TryCancel();
+      peekable_reader_->Drain();
+      return stream_->Finish(status);
+    }
     out->app_metadata = std::move(app_metadata_);
     return Status::OK();
   }
@@ -1164,8 +1175,12 @@ class FlightClient::FlightClientImpl {
     auto finishable_stream = std::make_shared<
         FinishableStream<grpc::ClientReader<pb::FlightData>, internal::FlightData>>(
         rpc, stream);
-    *out = std::unique_ptr<StreamReader>(
-        new StreamReader(rpc, nullptr, options.read_options, finishable_stream));
+    auto data_reader = std::make_shared<internal::ReadaheadFlightDataReader<
+        std::shared_ptr<grpc::ClientReader<pb::FlightData>>>>(stream);
+    std::shared_ptr<std::mutex> read_mutex = std::make_shared<std::mutex>();
+    RETURN_NOT_OK(data_reader->Start(10, read_mutex, io::IOContext()));
+    *out = std::unique_ptr<StreamReader>(new StreamReader(
+        rpc, nullptr, options.read_options, finishable_stream, data_reader));
     // Eagerly read the schema
     return static_cast<StreamReader*>(out->get())->EnsureDataStarted();
   }
@@ -1209,8 +1224,10 @@ class FlightClient::FlightClientImpl {
     auto finishable_stream =
         std::make_shared<FinishableWritableStream<GrpcStream, internal::FlightData>>(
             rpc, read_mutex, stream);
-    *reader = std::unique_ptr<StreamReader>(
-        new StreamReader(rpc, read_mutex, options.read_options, finishable_stream));
+    auto data_reader = std::make_shared<
+        internal::SynchronousFlightDataReader<std::shared_ptr<GrpcStream>>>(stream);
+    *reader = std::unique_ptr<StreamReader>(new StreamReader(
+        rpc, read_mutex, options.read_options, finishable_stream, data_reader));
     // Do not eagerly read the schema. There may be metadata messages
     // before any data is sent, or data may not be sent at all.
     return StreamWriter::Open(descriptor, nullptr, options.write_options, rpc,

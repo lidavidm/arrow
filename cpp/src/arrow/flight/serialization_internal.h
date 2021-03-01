@@ -20,13 +20,18 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <queue>
 
 #include "arrow/flight/internal.h"
 #include "arrow/flight/types.h"
+#include "arrow/io/interfaces.h"
 #include "arrow/ipc/message.h"
 #include "arrow/result.h"
 #include "arrow/util/optional.h"
+#include "arrow/util/thread_pool.h"
 
 namespace arrow {
 
@@ -86,13 +91,17 @@ bool ReadPayload(grpc::ClientReaderWriter<pb::FlightData, pb::PutResult>* reader
 // The Flight reader can then peek at the message to determine whether
 // it has application metadata or not, and pass the message to
 // RecordBatchStreamReader as appropriate.
-class FlightDataReader {
+class FlightDataReader : public std::enable_shared_from_this<FlightDataReader> {
  public:
   virtual const FlightData* Peek() = 0;
   virtual util::optional<FlightData> Advance() = 0;
   virtual bool SkipToData() = 0;
+  virtual void Drain() {
+    while (Advance().has_value()) {}
+  }
 };
 
+// TODO: move templates into .cc file and explicitly instantiate only the ones we need
 template <typename ReaderPtr>
 class SynchronousFlightDataReader : public FlightDataReader {
  public:
@@ -154,6 +163,76 @@ class SynchronousFlightDataReader : public FlightDataReader {
   internal::FlightData peek_;
   bool finished_;
   bool valid_;
+};
+
+template <typename ReaderPtr>
+class ReadaheadFlightDataReader : public FlightDataReader {
+ public:
+  explicit ReadaheadFlightDataReader(ReaderPtr stream)
+      : reader_(stream), queue_(), finished_(false), lock_(), cv_() {}
+
+  Status Start(size_t readahead, std::shared_ptr<std::mutex> read_mutex,
+               io::IOContext io_context) {
+    auto self = std::dynamic_pointer_cast<ReadaheadFlightDataReader>(shared_from_this());
+    return io_context.executor()->Spawn([=]() {
+      while (true) {
+        util::optional<FlightData> item;
+        {
+          // std::unique_lock<std::mutex> lock(*read_mutex);
+          item = std::move(self->reader_.Advance());
+        }
+        std::unique_lock<std::mutex> lock(self->lock_);
+        if (item.has_value()) {
+          cv_.wait(lock, [=]() { return self->queue_.size() < readahead; });
+          self->queue_.push(std::move(item.value()));
+        } else {
+          self->finished_ = true;
+        }
+        cv_.notify_all();
+        if (self->finished_) break;
+      }
+    });
+  }
+
+  const FlightData* Peek() override {
+    std::unique_lock<std::mutex> lock(lock_);
+    cv_.wait(lock, [this]() { return !queue_.empty() || finished_; });
+    return queue_.empty() ? nullptr : &queue_.front();
+  }
+
+  util::optional<FlightData> Advance() override {
+    std::unique_lock<std::mutex> lock(lock_);
+    cv_.wait(lock, [this]() { return !queue_.empty() || finished_; });
+    if (queue_.empty()) {
+      return util::nullopt;
+    }
+    bool before = queue_.front().body != nullptr;
+    auto result = util::make_optional<FlightData>(std::move(queue_.front()));
+    bool after = result.value().body != nullptr;
+    queue_.pop();
+    cv_.notify_all();
+    return result;
+  }
+
+  bool SkipToData() override {
+    while (true) {
+      auto data = Peek();
+      if (!data) {
+        return false;
+      }
+      if (data->metadata) {
+        return true;
+      }
+      Advance();
+    }
+  }
+
+ private:
+  SynchronousFlightDataReader<ReaderPtr> reader_;
+  std::queue<FlightData> queue_;
+  bool finished_;
+  std::mutex lock_;
+  std::condition_variable cv_;
 };
 
 }  // namespace internal

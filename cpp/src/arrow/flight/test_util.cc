@@ -533,7 +533,7 @@ std::shared_ptr<Schema> ExampleDictSchema() {
 
 std::shared_ptr<Schema> ExampleLargeSchema() {
   std::vector<std::shared_ptr<arrow::Field>> fields;
-  for (int i = 0; i < 128; i++) {
+  for (int i = 0; i < 32; i++) {
     const auto field_name = "f" + std::to_string(i);
     fields.push_back(arrow::field(field_name, arrow::float64()));
   }
@@ -623,7 +623,7 @@ Status ExampleLargeBatches(BatchVector* out) {
   std::shared_ptr<RecordBatch> batch;
   std::vector<std::shared_ptr<arrow::Array>> arrays;
   const auto arr = arrow::ConstantArrayGenerator::Float64(array_length, 1.0);
-  for (int i = 0; i < 128; i++) {
+  for (int i = 0; i < 32; i++) {
     arrays.push_back(arr);
   }
   auto schema = ExampleLargeSchema();
