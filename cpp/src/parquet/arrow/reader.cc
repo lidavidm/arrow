@@ -293,6 +293,10 @@ class FileReaderImpl : public FileReader {
                        const std::vector<int>& indices,
                        std::shared_ptr<Table>* table) override;
 
+  Status ReadRowGroupsImpl(const std::vector<int>& row_groups,
+                           const std::vector<int>& indices,
+                           std::shared_ptr<Table>* table);
+
   Status ReadRowGroups(const std::vector<int>& row_groups,
                        std::shared_ptr<Table>* table) override {
     return ReadRowGroups(row_groups, Iota(reader_->metadata()->num_columns()), table);
@@ -889,29 +893,6 @@ Status GetReader(const SchemaField& field, const std::shared_ptr<ReaderContext>&
 
 }  // namespace
 
-// Generate empty batches with a given schema and number of rows for the case
-// where we read no columns.
-::arrow::Result<::arrow::RecordBatchVector> GenerateEmptyBatches(
-    const std::shared_ptr<::arrow::Schema>& batch_schema, int64_t batch_size,
-    FileMetaData* metadata, const std::vector<int>& row_groups) {
-  auto max_sized_batch =
-      ::arrow::RecordBatch::Make(batch_schema, batch_size, ::arrow::ArrayVector{});
-
-  ::arrow::RecordBatchVector batches;
-
-  for (int row_group : row_groups) {
-    int64_t num_rows = metadata->RowGroup(row_group)->num_rows();
-
-    batches.insert(batches.end(), num_rows / batch_size, max_sized_batch);
-
-    if (int64_t trailing_rows = num_rows % batch_size) {
-      batches.push_back(max_sized_batch->Slice(0, trailing_rows));
-    }
-  }
-
-  return batches;
-}
-
 Status FileReaderImpl::GetRecordBatchReader(const std::vector<int>& row_groups,
                                             const std::vector<int>& column_indices,
                                             std::unique_ptr<RecordBatchReader>* out) {
@@ -933,10 +914,21 @@ Status FileReaderImpl::GetRecordBatchReader(const std::vector<int>& row_groups,
   if (readers.empty()) {
     // Just generate all batches right now; they're cheap since they have no columns.
     int64_t batch_size = properties().batch_size();
-    ARROW_ASSIGN_OR_RAISE(
-        auto batches,
-        GenerateEmptyBatches(batch_schema, batch_size, parquet_reader()->metadata().get(),
-                             row_groups));
+    auto max_sized_batch =
+        ::arrow::RecordBatch::Make(batch_schema, batch_size, ::arrow::ArrayVector{});
+
+    ::arrow::RecordBatchVector batches;
+
+    for (int row_group : row_groups) {
+      int64_t num_rows = parquet_reader()->metadata()->RowGroup(row_group)->num_rows();
+
+      batches.insert(batches.end(), num_rows / batch_size, max_sized_batch);
+
+      if (int64_t trailing_rows = num_rows % batch_size) {
+        batches.push_back(max_sized_batch->Slice(0, trailing_rows));
+      }
+    }
+
     *out = ::arrow::internal::make_unique<RowGroupRecordBatchReader>(
         ::arrow::MakeVectorIterator(std::move(batches)), std::move(batch_schema));
 
@@ -987,6 +979,8 @@ Status FileReaderImpl::GetRecordBatchReader(const std::vector<int>& row_groups,
   return Status::OK();
 }
 
+/// Given a file reader and a list of row groups, this is a generator of record
+/// batch vectors (where each vector is the contents of a single row group).
 class RowGroupGenerator {
  public:
   using Item = ::arrow::util::optional<::arrow::RecordBatchVector>;
@@ -1003,69 +997,34 @@ class RowGroupGenerator {
       return ::arrow::Future<Item>::MakeFinished(::arrow::util::nullopt);
     }
     int row_group = row_groups_[index_++];
-    auto fut = ::arrow::Future<Item>::Make();
     FileReaderImpl* self = self_;
     std::vector<int> column_indices = column_indices_;
-    // TODO: this would be a useful helper method on Executor itself
-    RETURN_NOT_OK(::arrow::internal::GetCpuThreadPool()->Submit(
-        [fut, self, column_indices, row_group]() mutable {
-          fut.MarkFinished(([self, column_indices, row_group]() -> ::arrow::Result<Item> {
-            // TODO: what if we just called ReadRowGroup({row_group}) and returned that?
-            // We'd need a way to force pre_buffer to be disabled
-            std::vector<std::shared_ptr<ColumnReaderImpl>> readers;
-            std::shared_ptr<::arrow::Schema> batch_schema;
-            std::vector<int> row_groups = {row_group};
-            RETURN_NOT_OK(self->GetFieldReaders(column_indices, row_groups, &readers,
-                                                &batch_schema));
-            if (readers.empty()) {
-              // TODO: share with GetRowGroupReader
-              int64_t batch_size = self->properties().batch_size();
-              ARROW_ASSIGN_OR_RAISE(
-                  auto batches,
-                  GenerateEmptyBatches(batch_schema, batch_size,
-                                       self->parquet_reader()->metadata().get(),
-                                       row_groups));
-              return ::arrow::util::make_optional<::arrow::RecordBatchVector>(
-                  std::move(batches));
-            }
-            ::arrow::ChunkedArrayVector columns(readers.size());
-
-            // don't reserve more rows than necessary
-            int64_t num_rows =
-                self->parquet_reader()->metadata()->RowGroup(row_group)->num_rows();
-            int64_t batch_size = std::min(self->properties().batch_size(), num_rows);
-            num_rows -= batch_size;
-
-            RETURN_NOT_OK(::arrow::internal::OptionalParallelFor(
-                self->reader_properties_.use_threads(), static_cast<int>(readers.size()),
-                [&](int i) { return readers[i]->NextBatch(batch_size, &columns[i]); }));
-
-            for (const auto& column : columns) {
-              if (column == nullptr || column->length() == 0) {
-                return ::arrow::util::make_optional<::arrow::RecordBatchVector>({});
-              }
-            }
-
-            // TODO: can we go straight from ChunkedArray to RecordBatchVector?
-            auto table = ::arrow::Table::Make(batch_schema, std::move(columns));
-            auto table_reader = std::make_shared<::arrow::TableBatchReader>(*table);
-            ::arrow::RecordBatchVector batches;
-            while (true) {
-              std::shared_ptr<::arrow::RecordBatch> batch;
-              RETURN_NOT_OK(table_reader->ReadNext(&batch));
-              if (!batch) {
-                break;
-              }
-              batches.push_back(batch);
-            }
-            return ::arrow::util::make_optional<::arrow::RecordBatchVector>(
-                std::move(batches));
-          })());
-        }));
+    ARROW_ASSIGN_OR_RAISE(auto fut,
+                          ::arrow::internal::GetCpuThreadPool()->Submit(
+                              &ReadOneRowGroup, self, row_group, column_indices));
     return fut;
   }
 
  private:
+  static ::arrow::Result<Item> ReadOneRowGroup(FileReaderImpl* self, const int row_group,
+                                               const std::vector<int>& column_indices) {
+    std::shared_ptr<::arrow::Table> table;
+    // Call the version that skips bound checks/pre-buffering, since we've done that
+    // already
+    RETURN_NOT_OK(self->ReadRowGroupsImpl({row_group}, column_indices, &table));
+    auto table_reader = std::make_shared<::arrow::TableBatchReader>(*table);
+    ::arrow::RecordBatchVector batches;
+    while (true) {
+      std::shared_ptr<::arrow::RecordBatch> batch;
+      RETURN_NOT_OK(table_reader->ReadNext(&batch));
+      if (!batch) {
+        break;
+      }
+      batches.push_back(batch);
+    }
+    return ::arrow::util::make_optional<::arrow::RecordBatchVector>(std::move(batches));
+  }
+
   FileReaderImpl* self_;
   size_t index_;
   std::vector<int> row_groups_;
@@ -1116,6 +1075,13 @@ Status FileReaderImpl::ReadRowGroups(const std::vector<int>& row_groups,
     END_PARQUET_CATCH_EXCEPTIONS
   }
 
+  return ReadRowGroupsImpl(row_groups, column_indices, out);
+}
+
+// Also used by RowGroupGenerator - skip bounds check/pre-buffer to avoid doing that twice
+Status FileReaderImpl::ReadRowGroupsImpl(const std::vector<int>& row_groups,
+                                         const std::vector<int>& column_indices,
+                                         std::shared_ptr<Table>* out) {
   std::vector<std::shared_ptr<ColumnReaderImpl>> readers;
   std::shared_ptr<::arrow::Schema> result_schema;
   RETURN_NOT_OK(GetFieldReaders(column_indices, row_groups, &readers, &result_schema));

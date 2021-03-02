@@ -21,7 +21,6 @@
 #include <memory>
 #include <vector>
 
-// TODO: does Weston's PR cover this in type_fwd?
 #include "arrow/util/async_generator.h"
 #include "arrow/util/optional.h"
 #include "parquet/file_reader.h"
@@ -178,6 +177,17 @@ class PARQUET_EXPORT FileReader {
       const std::vector<int>& row_group_indices, const std::vector<int>& column_indices,
       std::unique_ptr<::arrow::RecordBatchReader>* out) = 0;
 
+  /// \brief Return a generator of record batch vectors, where each vector represents
+  ///     the contents of a row group from row_group_indices, whose columns are selected
+  ///     by column_indices.
+  ///
+  /// An empty optional indicates the end of the generator.
+  ///
+  /// Note that the ordering in row_group_indices and column_indices matter. FileReaders
+  /// must outlive their generators.
+  ///
+  /// \returns error Result if either row_group_indices or column_indices contains an
+  ///     invalid index
   virtual ::arrow::Result<
       ::arrow::AsyncGenerator<::arrow::util::optional<::arrow::RecordBatchVector>>>
   GetRecordBatchGenerator(const std::vector<int>& row_group_indices,
