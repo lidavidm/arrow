@@ -30,7 +30,9 @@
 #include "arrow/record_batch.h"
 #include "arrow/table.h"
 #include "arrow/type.h"
+#include "arrow/util/async_generator.h"
 #include "arrow/util/bit_util.h"
+#include "arrow/util/future.h"
 #include "arrow/util/iterator.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/make_unique.h"
@@ -314,6 +316,11 @@ class FileReaderImpl : public FileReader {
     return GetRecordBatchReader(row_group_indices,
                                 Iota(reader_->metadata()->num_columns()), out);
   }
+
+  ::arrow::Result<
+      ::arrow::AsyncGenerator<::arrow::util::optional<::arrow::RecordBatchVector>>>
+  GetRecordBatchGenerator(const std::vector<int>& row_group_indices,
+                          const std::vector<int>& column_indices) override;
 
   int num_columns() const { return reader_->metadata()->num_columns(); }
 
@@ -882,6 +889,29 @@ Status GetReader(const SchemaField& field, const std::shared_ptr<ReaderContext>&
 
 }  // namespace
 
+// Generate empty batches with a given schema and number of rows for the case
+// where we read no columns.
+::arrow::Result<::arrow::RecordBatchVector> GenerateEmptyBatches(
+    const std::shared_ptr<::arrow::Schema>& batch_schema, int64_t batch_size,
+    FileMetaData* metadata, const std::vector<int>& row_groups) {
+  auto max_sized_batch =
+      ::arrow::RecordBatch::Make(batch_schema, batch_size, ::arrow::ArrayVector{});
+
+  ::arrow::RecordBatchVector batches;
+
+  for (int row_group : row_groups) {
+    int64_t num_rows = metadata->RowGroup(row_group)->num_rows();
+
+    batches.insert(batches.end(), num_rows / batch_size, max_sized_batch);
+
+    if (int64_t trailing_rows = num_rows % batch_size) {
+      batches.push_back(max_sized_batch->Slice(0, trailing_rows));
+    }
+  }
+
+  return batches;
+}
+
 Status FileReaderImpl::GetRecordBatchReader(const std::vector<int>& row_groups,
                                             const std::vector<int>& column_indices,
                                             std::unique_ptr<RecordBatchReader>* out) {
@@ -903,21 +933,10 @@ Status FileReaderImpl::GetRecordBatchReader(const std::vector<int>& row_groups,
   if (readers.empty()) {
     // Just generate all batches right now; they're cheap since they have no columns.
     int64_t batch_size = properties().batch_size();
-    auto max_sized_batch =
-        ::arrow::RecordBatch::Make(batch_schema, batch_size, ::arrow::ArrayVector{});
-
-    ::arrow::RecordBatchVector batches;
-
-    for (int row_group : row_groups) {
-      int64_t num_rows = parquet_reader()->metadata()->RowGroup(row_group)->num_rows();
-
-      batches.insert(batches.end(), num_rows / batch_size, max_sized_batch);
-
-      if (int64_t trailing_rows = num_rows % batch_size) {
-        batches.push_back(max_sized_batch->Slice(0, trailing_rows));
-      }
-    }
-
+    ARROW_ASSIGN_OR_RAISE(
+        auto batches,
+        GenerateEmptyBatches(batch_schema, batch_size, parquet_reader()->metadata().get(),
+                             row_groups));
     *out = ::arrow::internal::make_unique<RowGroupRecordBatchReader>(
         ::arrow::MakeVectorIterator(std::move(batches)), std::move(batch_schema));
 
@@ -966,6 +985,107 @@ Status FileReaderImpl::GetRecordBatchReader(const std::vector<int>& row_groups,
       ::arrow::MakeFlattenIterator(std::move(batches)), std::move(batch_schema));
 
   return Status::OK();
+}
+
+class RowGroupGenerator {
+ public:
+  using Item = ::arrow::util::optional<::arrow::RecordBatchVector>;
+
+  explicit RowGroupGenerator(FileReaderImpl* self, std::vector<int> row_groups,
+                             std::vector<int> column_indices)
+      : self_(self),
+        index_(0),
+        row_groups_(std::move(row_groups)),
+        column_indices_(std::move(column_indices)) {}
+
+  ::arrow::Future<Item> operator()() {
+    if (index_ >= row_groups_.size()) {
+      return ::arrow::Future<Item>::MakeFinished(::arrow::util::nullopt);
+    }
+    int row_group = row_groups_[index_++];
+    auto fut = ::arrow::Future<Item>::Make();
+    FileReaderImpl* self = self_;
+    std::vector<int> column_indices = column_indices_;
+    // TODO: this would be a useful helper method on Executor itself
+    RETURN_NOT_OK(::arrow::internal::GetCpuThreadPool()->Submit(
+        [fut, self, column_indices, row_group]() mutable {
+          fut.MarkFinished(([self, column_indices, row_group]() -> ::arrow::Result<Item> {
+            // TODO: what if we just called ReadRowGroup({row_group}) and returned that?
+            // We'd need a way to force pre_buffer to be disabled
+            std::vector<std::shared_ptr<ColumnReaderImpl>> readers;
+            std::shared_ptr<::arrow::Schema> batch_schema;
+            std::vector<int> row_groups = {row_group};
+            RETURN_NOT_OK(self->GetFieldReaders(column_indices, row_groups, &readers,
+                                                &batch_schema));
+            if (readers.empty()) {
+              // TODO: share with GetRowGroupReader
+              int64_t batch_size = self->properties().batch_size();
+              ARROW_ASSIGN_OR_RAISE(
+                  auto batches,
+                  GenerateEmptyBatches(batch_schema, batch_size,
+                                       self->parquet_reader()->metadata().get(),
+                                       row_groups));
+              return ::arrow::util::make_optional<::arrow::RecordBatchVector>(
+                  std::move(batches));
+            }
+            ::arrow::ChunkedArrayVector columns(readers.size());
+
+            // don't reserve more rows than necessary
+            int64_t num_rows =
+                self->parquet_reader()->metadata()->RowGroup(row_group)->num_rows();
+            int64_t batch_size = std::min(self->properties().batch_size(), num_rows);
+            num_rows -= batch_size;
+
+            RETURN_NOT_OK(::arrow::internal::OptionalParallelFor(
+                self->reader_properties_.use_threads(), static_cast<int>(readers.size()),
+                [&](int i) { return readers[i]->NextBatch(batch_size, &columns[i]); }));
+
+            for (const auto& column : columns) {
+              if (column == nullptr || column->length() == 0) {
+                return ::arrow::util::make_optional<::arrow::RecordBatchVector>({});
+              }
+            }
+
+            // TODO: can we go straight from ChunkedArray to RecordBatchVector?
+            auto table = ::arrow::Table::Make(batch_schema, std::move(columns));
+            auto table_reader = std::make_shared<::arrow::TableBatchReader>(*table);
+            ::arrow::RecordBatchVector batches;
+            while (true) {
+              std::shared_ptr<::arrow::RecordBatch> batch;
+              RETURN_NOT_OK(table_reader->ReadNext(&batch));
+              if (!batch) {
+                break;
+              }
+              batches.push_back(batch);
+            }
+            return ::arrow::util::make_optional<::arrow::RecordBatchVector>(
+                std::move(batches));
+          })());
+        }));
+    return fut;
+  }
+
+ private:
+  FileReaderImpl* self_;
+  size_t index_;
+  std::vector<int> row_groups_;
+  std::vector<int> column_indices_;
+};
+
+::arrow::Result<
+    ::arrow::AsyncGenerator<::arrow::util::optional<::arrow::RecordBatchVector>>>
+FileReaderImpl::GetRecordBatchGenerator(const std::vector<int>& row_groups,
+                                        const std::vector<int>& column_indices) {
+  RETURN_NOT_OK(BoundsCheck(row_groups, column_indices));
+  if (reader_properties_.pre_buffer()) {
+    // PARQUET-1698/PARQUET-1820: pre-buffer row groups/column chunks if enabled
+    BEGIN_PARQUET_CATCH_EXCEPTIONS
+    reader_->PreBuffer(row_groups, column_indices, reader_properties_.io_context(),
+                       reader_properties_.cache_options());
+    END_PARQUET_CATCH_EXCEPTIONS
+  }
+  // N.B. we (and underlying Parquet reader) must outlive generator
+  return RowGroupGenerator(this, row_groups, column_indices);
 }
 
 Status FileReaderImpl::GetColumn(int i, FileColumnIteratorFactory iterator_factory,
