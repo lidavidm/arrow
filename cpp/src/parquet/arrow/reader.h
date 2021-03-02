@@ -21,6 +21,9 @@
 #include <memory>
 #include <vector>
 
+// TODO: does Weston's PR cover this in type_fwd?
+#include "arrow/util/async_generator.h"
+#include "arrow/util/optional.h"
 #include "parquet/file_reader.h"
 #include "parquet/platform.h"
 #include "parquet/properties.h"
@@ -174,6 +177,11 @@ class PARQUET_EXPORT FileReader {
   virtual ::arrow::Status GetRecordBatchReader(
       const std::vector<int>& row_group_indices, const std::vector<int>& column_indices,
       std::unique_ptr<::arrow::RecordBatchReader>* out) = 0;
+
+  virtual ::arrow::Result<
+      ::arrow::AsyncGenerator<::arrow::util::optional<::arrow::RecordBatchVector>>>
+  GetRecordBatchGenerator(const std::vector<int>& row_group_indices,
+                          const std::vector<int>& column_indices) = 0;
 
   ::arrow::Status GetRecordBatchReader(const std::vector<int>& row_group_indices,
                                        const std::vector<int>& column_indices,
