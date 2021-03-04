@@ -20,11 +20,17 @@
 
 #include "arrow/flight/server.h"
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -768,13 +774,15 @@ struct FlightServerBase::Impl {
   std::unique_ptr<FlightServiceImpl> service_;
   std::unique_ptr<grpc::Server> server_;
   int port_;
-#ifdef _WIN32
-  // Signal handlers are executed in a separate thread on Windows, so getting
-  // the current thread instance wouldn't make sense.  This means only a single
-  // instance can receive signals on Windows.
+
+  // Signal handlers (on Windows) and the shutdown handler (other platforms)
+  // are executed in a separate thread, so getting the current thread instance
+  // wouldn't make sense.  This means only a single instance can receive signals.
   static std::atomic<Impl*> running_instance_;
-#else
-  static thread_local std::atomic<Impl*> running_instance_;
+#ifndef _WIN32
+  // On Unix-like platforms, we'll use the self-pipe trick to notify a thread
+  // from the signal handler. The thread will then shut down the gRPC server.
+  std::array<int, 2> self_pipe_;
 #endif
 
   // Signal handling
@@ -791,16 +799,30 @@ struct FlightServerBase::Impl {
 
   void DoHandleSignal(int signum) {
     got_signal_ = signum;
+#ifdef _WIN32
     server_->Shutdown();
+#else
+    int saved_errno = errno;
+    // Ignore errors - pipe is nonblocking
+    write(self_pipe_[1], "0", 1);
+    errno = saved_errno;
+#endif
   }
+
+#ifndef _WIN32
+  static void WaitForSignals(int fd) {
+    // Wait for a signal handler to write to the pipe
+    int8_t buf[1];
+    read(fd, /*buf=*/buf, /*count=*/1);
+    auto instance = running_instance_.load();
+    if (instance != nullptr) {
+      instance->server_->Shutdown();
+    }
+  }
+#endif
 };
 
-#ifdef _WIN32
 std::atomic<FlightServerBase::Impl*> FlightServerBase::Impl::running_instance_;
-#else
-thread_local std::atomic<FlightServerBase::Impl*>
-    FlightServerBase::Impl::running_instance_;
-#endif
 
 FlightServerOptions::FlightServerOptions(const Location& location_)
     : location(location_),
@@ -892,6 +914,25 @@ Status FlightServerBase::Serve() {
   impl_->old_signal_handlers_.clear();
   impl_->running_instance_ = impl_.get();
 
+#ifndef _WIN32
+  // Create the self-pipe for signal handlers to use
+  if (pipe(impl_->self_pipe_.data()) != 0) {
+    return arrow::internal::IOErrorFromErrno(
+        errno, "Could not initialize self-pipe to wait for signals");
+  }
+  // Make write end nonblocking
+  int flags = fcntl(impl_->self_pipe_[1], F_GETFL);
+  if (flags == -1) {
+    return arrow::internal::IOErrorFromErrno(
+        errno, "Could not initialize self-pipe to wait for signals");
+  }
+  flags |= O_NONBLOCK;
+  if (fcntl(impl_->self_pipe_[1], F_SETFL, flags) == -1) {
+    return arrow::internal::IOErrorFromErrno(
+        errno, "Could not initialize self-pipe to wait for signals");
+  }
+  std::thread handle_signals(&Impl::WaitForSignals, impl_->self_pipe_[0]);
+#endif
   // Override existing signal handlers with our own handler so as to stop the server.
   for (size_t i = 0; i < impl_->signals_.size(); ++i) {
     int signum = impl_->signals_[i];
@@ -908,7 +949,20 @@ Status FlightServerBase::Serve() {
     RETURN_NOT_OK(
         SetSignalHandler(impl_->signals_[i], impl_->old_signal_handlers_[i]).status());
   }
-
+#ifndef _WIN32
+  // We don't care if writing is blocked - that means a signal was already raised
+  if (write(impl_->self_pipe_[1], "0", 1) < 0 && errno != EAGAIN &&
+      errno != EWOULDBLOCK && errno != EINTR) {
+    return arrow::internal::IOErrorFromErrno(errno, "Could not unblock signal thread");
+  }
+  if (close(impl_->self_pipe_[0]) < 0) {
+    return arrow::internal::IOErrorFromErrno(errno, "Could not close self-pipe");
+  }
+  if (close(impl_->self_pipe_[1]) < 0) {
+    return arrow::internal::IOErrorFromErrno(errno, "Could not close self-pipe");
+  }
+  handle_signals.join();
+#endif
   return Status::OK();
 }
 
