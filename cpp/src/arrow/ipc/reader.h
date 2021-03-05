@@ -31,6 +31,7 @@
 #include "arrow/record_batch.h"
 #include "arrow/result.h"
 #include "arrow/type_fwd.h"
+#include "arrow/util/async_generator.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/visibility.h"
 
@@ -99,7 +100,8 @@ class ARROW_EXPORT RecordBatchStreamReader : public RecordBatchReader {
 };
 
 /// \brief Reads the record batch file format
-class ARROW_EXPORT RecordBatchFileReader {
+class ARROW_EXPORT RecordBatchFileReader
+    : public std::enable_shared_from_this<RecordBatchFileReader> {
  public:
   virtual ~RecordBatchFileReader() = default;
 
@@ -169,6 +171,19 @@ class ARROW_EXPORT RecordBatchFileReader {
 
   /// \brief Return current read statistics
   virtual ReadStats stats() const = 0;
+
+  /// \brief Get a reentrant generator of record batches.
+  ///
+  /// \param[in] readahead_messages The number of messages to read ahead.
+  /// \param[in] io_context The IOContext to use (controls which thread pool
+  ///     is used for I/O).
+  /// \param[in] executor Optionally, an executor to use for decoding record
+  ///     batches. This is generally only a benefit for very wide and/or
+  ///     compressed batches.
+  virtual Result<AsyncGenerator<std::shared_ptr<RecordBatch>>> GetRecordBatchGenerator(
+      int readahead_messages = 0,
+      const io::IOContext& io_context = io::default_io_context(),
+      arrow::internal::Executor* executor = NULLPTR) = 0;
 };
 
 /// \brief A general listener class to receive events.
