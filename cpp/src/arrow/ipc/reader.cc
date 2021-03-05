@@ -51,6 +51,7 @@
 #include "arrow/util/logging.h"
 #include "arrow/util/parallel.h"
 #include "arrow/util/string.h"
+#include "arrow/util/thread_pool.h"
 #include "arrow/util/ubsan.h"
 #include "arrow/visitor_inline.h"
 
@@ -958,9 +959,107 @@ Result<std::shared_ptr<RecordBatchStreamReader>> RecordBatchStreamReader::Open(
 // ----------------------------------------------------------------------
 // Reader implementation
 
+// Common functions used in both the random-access file reader and the
+// asynchronous generator
 static inline FileBlock FileBlockFromFlatbuffer(const flatbuf::Block* block) {
   return FileBlock{block->offset(), block->metaDataLength(), block->bodyLength()};
 }
+
+static Result<std::unique_ptr<Message>> ReadMessageFromBlock(const FileBlock& block,
+                                                             io::RandomAccessFile* file) {
+  if (!BitUtil::IsMultipleOf8(block.offset) ||
+      !BitUtil::IsMultipleOf8(block.metadata_length) ||
+      !BitUtil::IsMultipleOf8(block.body_length)) {
+    return Status::Invalid("Unaligned block in IPC file");
+  }
+
+  // TODO(wesm): this breaks integration tests, see ARROW-3256
+  // DCHECK_EQ((*out)->body_length(), block.body_length);
+
+  ARROW_ASSIGN_OR_RAISE(auto message,
+                        ReadMessage(block.offset, block.metadata_length, file));
+  return std::move(message);
+}
+
+static Status ReadOneDictionary(Message* message, const IpcReadContext& context) {
+  CHECK_HAS_BODY(*message);
+  ARROW_ASSIGN_OR_RAISE(auto reader, Buffer::GetReader(message->body()));
+  DictionaryKind kind;
+  RETURN_NOT_OK(ReadDictionary(*message->metadata(), context, &kind, reader.get()));
+  if (kind != DictionaryKind::New) {
+    return Status::Invalid(
+        "Unsupported dictionary replacement or "
+        "dictionary delta in IPC file");
+  }
+  return Status::OK();
+}
+
+class RecordBatchFileReaderImpl;
+
+/// A generator of IPC messages (performs I/O for a record batch generator).
+///
+/// First all dictionary messages are yielded in order, then all record batch messages
+/// are yielded in order.
+class ARROW_EXPORT IpcMessageGenerator {
+ public:
+  // Yield a copyable type to make operations with Futures easier
+  using Item = std::shared_ptr<Message>;
+  explicit IpcMessageGenerator(std::shared_ptr<RecordBatchFileReaderImpl> state,
+                               const io::IOContext& io_context)
+      : state_(std::move(state)),
+        executor_(io_context.executor()),
+        dictionary_index_(0),
+        record_batch_index_(0) {}
+
+  Future<Item> operator()();
+
+  static Result<std::shared_ptr<Message>> ReadMessageFromBlock(
+      const FileBlock& block, io::RandomAccessFile* file) {
+    ARROW_ASSIGN_OR_RAISE(auto message, arrow::ipc::ReadMessageFromBlock(block, file));
+    std::shared_ptr<Message> shared_message = std::move(message);
+    return shared_message;
+  }
+
+ private:
+  std::shared_ptr<RecordBatchFileReaderImpl> state_;
+  arrow::internal::Executor* executor_;
+  int dictionary_index_;
+  int record_batch_index_;
+};
+
+/// A generator of record batches.
+///
+/// All batches are yielded in order.
+class ARROW_EXPORT IpcFileRecordBatchGenerator {
+ public:
+  using Item = std::shared_ptr<RecordBatch>;
+
+  explicit IpcFileRecordBatchGenerator(
+      std::shared_ptr<RecordBatchFileReaderImpl> state,
+      AsyncGenerator<std::shared_ptr<Message>> message_generator,
+      arrow::internal::Executor* executor)
+      : state_(std::move(state)),
+        message_generator_(std::move(message_generator)),
+        executor_(executor),
+        index_(0) {}
+
+  Future<Item> operator()();
+
+  static Result<std::shared_ptr<Message>> ReadDictionaries(
+      RecordBatchFileReaderImpl* state,
+      std::vector<std::shared_ptr<Message>> dictionary_messages);
+
+  static Result<std::shared_ptr<RecordBatch>> ReadRecordBatch(
+      RecordBatchFileReaderImpl* state, Message* message);
+
+ private:
+  std::shared_ptr<RecordBatchFileReaderImpl> state_;
+  AsyncGenerator<std::shared_ptr<Message>> message_generator_;
+  arrow::internal::Executor* executor_;
+  int index_;
+  // Odd Future type, but this lets us use All() easily
+  Future<std::shared_ptr<Message>> read_dictionaries_;
+};
 
 class RecordBatchFileReaderImpl : public RecordBatchFileReader {
  public:
@@ -1022,7 +1121,25 @@ class RecordBatchFileReaderImpl : public RecordBatchFileReader {
 
   ReadStats stats() const override { return stats_; }
 
+  Result<AsyncGenerator<std::shared_ptr<RecordBatch>>> GetRecordBatchGenerator(
+      int readahead_messages, const io::IOContext& io_context,
+      arrow::internal::Executor* executor) override {
+    auto state = std::dynamic_pointer_cast<RecordBatchFileReaderImpl>(shared_from_this());
+    AsyncGenerator<std::shared_ptr<Message>> message_generator =
+        IpcMessageGenerator(state, io_context);
+    if (readahead_messages > 0) {
+      message_generator =
+          MakeReadaheadGenerator(std::move(message_generator), readahead_messages);
+    }
+    return IpcFileRecordBatchGenerator(
+        std::move(state), std::move(message_generator),
+        executor ? executor : arrow::internal::GetCpuThreadPool());
+  }
+
  private:
+  friend class IpcMessageGenerator;
+  friend class IpcFileRecordBatchGenerator;
+
   FileBlock GetRecordBatchBlock(int i) const {
     return FileBlockFromFlatbuffer(footer_->recordBatches()->Get(i));
   }
@@ -1032,37 +1149,18 @@ class RecordBatchFileReaderImpl : public RecordBatchFileReader {
   }
 
   Result<std::unique_ptr<Message>> ReadMessageFromBlock(const FileBlock& block) {
-    if (!BitUtil::IsMultipleOf8(block.offset) ||
-        !BitUtil::IsMultipleOf8(block.metadata_length) ||
-        !BitUtil::IsMultipleOf8(block.body_length)) {
-      return Status::Invalid("Unaligned block in IPC file");
-    }
-
-    // TODO(wesm): this breaks integration tests, see ARROW-3256
-    // DCHECK_EQ((*out)->body_length(), block.body_length);
-
-    ARROW_ASSIGN_OR_RAISE(auto message,
-                          ReadMessage(block.offset, block.metadata_length, file_));
+    ARROW_ASSIGN_OR_RAISE(auto message, arrow::ipc::ReadMessageFromBlock(block, file_));
     ++stats_.num_messages;
     return std::move(message);
   }
 
   Status ReadDictionaries() {
     // Read all the dictionaries
+    IpcReadContext context(&dictionary_memo_, options_, swap_endian_);
     for (int i = 0; i < num_dictionaries(); ++i) {
       ARROW_ASSIGN_OR_RAISE(auto message, ReadMessageFromBlock(GetDictionaryBlock(i)));
-
-      CHECK_HAS_BODY(*message);
-      ARROW_ASSIGN_OR_RAISE(auto reader, Buffer::GetReader(message->body()));
-      DictionaryKind kind;
-      IpcReadContext context(&dictionary_memo_, options_, swap_endian_);
-      RETURN_NOT_OK(ReadDictionary(*message->metadata(), context, &kind, reader.get()));
+      RETURN_NOT_OK(ReadOneDictionary(message.get(), context));
       ++stats_.num_dictionary_batches;
-      if (kind != DictionaryKind::New) {
-        return Status::Invalid(
-            "Unsupported dictionary replacement or "
-            "dictionary delta in IPC file");
-      }
     }
     return Status::OK();
   }
@@ -1173,6 +1271,88 @@ Result<std::shared_ptr<RecordBatchFileReader>> RecordBatchFileReader::Open(
   auto result = std::make_shared<RecordBatchFileReaderImpl>();
   RETURN_NOT_OK(result->Open(file, footer_offset, options));
   return result;
+}
+
+Future<IpcMessageGenerator::Item> IpcMessageGenerator::operator()() {
+  if (dictionary_index_ < state_->num_dictionaries()) {
+    auto block = FileBlockFromFlatbuffer(
+        state_->footer_->dictionaries()->Get(dictionary_index_++));
+    ARROW_ASSIGN_OR_RAISE(auto fut,
+                          executor_->Submit(&ReadMessageFromBlock, block, state_->file_));
+    return fut;
+  } else if (record_batch_index_ < state_->num_record_batches()) {
+    auto block = FileBlockFromFlatbuffer(
+        state_->footer_->recordBatches()->Get(record_batch_index_++));
+    ARROW_ASSIGN_OR_RAISE(auto fut,
+                          executor_->Submit(&ReadMessageFromBlock, block, state_->file_));
+    return fut;
+  }
+  return Future<Item>::MakeFinished(IterationTraits<Item>::End());
+}
+
+Future<IpcFileRecordBatchGenerator::Item> IpcFileRecordBatchGenerator::operator()() {
+  if (!read_dictionaries_.is_valid()) {
+    std::vector<Future<std::shared_ptr<Message>>> dictionary_messages(
+        state_->num_dictionaries());
+    for (int i = 0; i < state_->num_dictionaries(); i++) {
+      dictionary_messages[i] = message_generator_();
+    }
+    auto dictionary_messages_read = arrow::All(std::move(dictionary_messages));
+    // We may not have an executor; just run the continuation on the original pool in
+    // that case. Often OK since decoding a batch is cheap, unless lots of columns or
+    // compression are involved.
+    if (executor_) {
+      dictionary_messages_read = executor_->Transfer(dictionary_messages_read);
+    }
+    auto state = state_;
+    read_dictionaries_ = dictionary_messages_read.Then(
+        [state](const std::vector<Result<std::shared_ptr<Message>>>& messages)
+            -> Result<std::shared_ptr<Message>> {
+          std::vector<std::shared_ptr<Message>> dictionary_messages;
+          for (const auto& maybe_message : messages) {
+            ARROW_ASSIGN_OR_RAISE(auto message, maybe_message);
+            dictionary_messages.push_back(message);
+          }
+          return ReadDictionaries(state.get(), std::move(dictionary_messages));
+        });
+  }
+  if (index_ >= state_->num_record_batches()) {
+    return Future<Item>::MakeFinished(IterationTraits<Item>::End());
+  }
+  index_++;
+  // Must read dictionaries before reading any record batch
+  std::vector<Future<std::shared_ptr<Message>>> dependencies{message_generator_(),
+                                                             read_dictionaries_};
+  auto message_read = arrow::All(dependencies);
+  auto state = state_;
+  if (executor_) message_read = executor_->Transfer(message_read);
+  return message_read.Then(
+      [state](
+          const std::vector<Result<std::shared_ptr<Message>>>& messages) -> Result<Item> {
+        // Make sure dictionaries were read properly
+        RETURN_NOT_OK(messages[1]);
+        ARROW_ASSIGN_OR_RAISE(auto message, messages[0]);
+        return ReadRecordBatch(state.get(), message.get());
+      });
+}
+
+Result<std::shared_ptr<Message>> IpcFileRecordBatchGenerator::ReadDictionaries(
+    RecordBatchFileReaderImpl* state,
+    std::vector<std::shared_ptr<Message>> dictionary_messages) {
+  IpcReadContext context(&state->dictionary_memo_, state->options_, state->swap_endian_);
+  for (const auto& message : dictionary_messages) {
+    RETURN_NOT_OK(ReadOneDictionary(message.get(), context));
+  }
+  return nullptr;
+}
+
+Result<std::shared_ptr<RecordBatch>> IpcFileRecordBatchGenerator::ReadRecordBatch(
+    RecordBatchFileReaderImpl* state, Message* message) {
+  CHECK_HAS_BODY(*message);
+  ARROW_ASSIGN_OR_RAISE(auto reader, Buffer::GetReader(message->body()));
+  IpcReadContext context(&state->dictionary_memo_, state->options_, state->swap_endian_);
+  return ReadRecordBatchInternal(*message->metadata(), state->schema_,
+                                 state->field_inclusion_mask_, context, reader.get());
 }
 
 Status Listener::OnEOS() { return Status::OK(); }
