@@ -22,6 +22,7 @@
 
 #include "arrow/flight/platform.h"
 #include "arrow/util/config.h"
+#include "arrow/util/type_fwd.h"
 
 // Silence protobuf warnings
 #ifdef _MSC_VER
@@ -71,6 +72,10 @@ grpc::Status FlightDataSerialize(const FlightPayload& msg, grpc::ByteBuffer* out
 // protobuf without copying
 grpc::Status FlightDataDeserialize(grpc::ByteBuffer* buffer, FlightData* out);
 
+// Read internal::FlightData from grpc::ByteBuffer containing FlightData
+// protobuf without copying
+grpc::Status FlightDataDeserialize(grpc::ByteBuffer* buffer, Future<FlightData>* out);
+
 }  // namespace internal
 
 namespace protocol {
@@ -101,7 +106,8 @@ class SerializationTraits<arrow::flight::protocol::FlightData> {
 
   static Status Deserialize(ByteBuffer* buffer, MessageType* msg) {
     return arrow::flight::internal::FlightDataDeserialize(
-        buffer, reinterpret_cast<arrow::flight::internal::FlightData*>(msg));
+        buffer,
+        reinterpret_cast<arrow::Future<arrow::flight::internal::FlightData>*>(msg));
   }
 };
 

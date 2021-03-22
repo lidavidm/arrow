@@ -268,7 +268,7 @@ class SerialReadaheadGenerator {
         return maybe_next;
       }
       const auto& next = *maybe_next;
-      if (next == IterationTraits<T>::End()) {
+      if (IsIterationEnd(next)) {
         state_->finished_.store(true);
         return maybe_next;
       }
@@ -296,7 +296,7 @@ class ReadaheadGenerator {
         finished->store(true);
       } else {
         const auto& next = *next_result;
-        if (next == IterationTraits<T>::End()) {
+        if (IsIterationEnd(next)) {
           *finished = true;
         }
       }

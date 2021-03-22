@@ -45,7 +45,17 @@ struct IterationTraits {
   /// default this is NULLPTR since most iterators yield pointer types.
   /// Specialize IterationTraits if different end semantics are required.
   static T End() { return T(NULLPTR); }
+
+  /// \brief Checks to see if the value is a terminal value.
+  /// A method is used here since T is not neccesarily comparable in many
+  /// cases even though it has a distinct final value
+  static bool IsEnd(const T& val) { return val == End(); }
 };
+
+template <typename T>
+bool IsIterationEnd(const T& val) {
+  return IterationTraits<T>::IsEnd(val);
+}
 
 template <typename T>
 struct IterationTraits<util::optional<T>> {

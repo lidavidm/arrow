@@ -51,7 +51,9 @@
 #include "arrow/ipc/message.h"
 #include "arrow/ipc/writer.h"
 #include "arrow/util/bit_util.h"
+#include "arrow/util/future.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/thread_pool.h"
 
 static constexpr int64_t kInt32Max = std::numeric_limits<int32_t>::max();
 
@@ -100,7 +102,12 @@ class GrpcBuffer : public MutableBuffer {
     // These types are guaranteed by static assertions in gRPC to have the same
     // in-memory representation
 
-    auto buffer = *reinterpret_cast<grpc_byte_buffer**>(cpp_buf);
+    DCHECK(cpp_buf);
+    auto temp = reinterpret_cast<grpc_byte_buffer**>(cpp_buf);
+    DCHECK(temp);
+    DCHECK(*temp);
+    auto buffer = *temp;
+    DCHECK(buffer);
 
     // This part below is based on the Flatbuffers gRPC SerializationTraits in
     // flatbuffers/grpc.h
@@ -385,6 +392,25 @@ grpc::Status FlightDataDeserialize(ByteBuffer* buffer, FlightData* out) {
   return grpc::Status::OK;
 }
 
+grpc::Status FlightDataDeserialize(ByteBuffer* buffer, Future<FlightData>* out) {
+  auto buf = *buffer;  // Ensure we keep a strong reference to data
+  DCHECK(buf.Valid());
+  arrow::Result<Future<FlightData>> maybe_fut =
+      arrow::internal::GetCpuThreadPool()->Submit(
+          [buf]() mutable -> arrow::Result<FlightData> {
+            DCHECK(buf.Valid());
+            FlightData result;
+            auto status = FlightDataDeserialize(&buf, &result);
+            if (!status.ok()) {
+              return FromGrpcStatus(status);
+            }
+            return result;
+          });
+  GRPC_RETURN_NOT_OK(maybe_fut.status());
+  *out = maybe_fut.ValueOrDie();
+  return grpc::Status::OK;
+}
+
 ::arrow::Result<std::unique_ptr<ipc::Message>> FlightData::OpenMessage() {
   return ipc::Message::Open(metadata, body);
 }
@@ -432,25 +458,25 @@ bool WritePayload(const FlightPayload& payload,
                        grpc::WriteOptions());
 }
 
-bool ReadPayload(grpc::ClientReader<pb::FlightData>* reader, FlightData* data) {
+bool ReadPayload(grpc::ClientReader<pb::FlightData>* reader, Future<FlightData>* data) {
   // Pretend to be pb::FlightData and intercept in SerializationTraits
   return reader->Read(reinterpret_cast<pb::FlightData*>(data));
 }
 
 bool ReadPayload(grpc::ClientReaderWriter<pb::FlightData, pb::FlightData>* reader,
-                 FlightData* data) {
+                 Future<FlightData>* data) {
   // Pretend to be pb::FlightData and intercept in SerializationTraits
   return reader->Read(reinterpret_cast<pb::FlightData*>(data));
 }
 
 bool ReadPayload(grpc::ServerReaderWriter<pb::PutResult, pb::FlightData>* reader,
-                 FlightData* data) {
+                 Future<FlightData>* data) {
   // Pretend to be pb::FlightData and intercept in SerializationTraits
   return reader->Read(reinterpret_cast<pb::FlightData*>(data));
 }
 
 bool ReadPayload(grpc::ServerReaderWriter<pb::FlightData, pb::FlightData>* reader,
-                 FlightData* data) {
+                 Future<FlightData>* data) {
   // Pretend to be pb::FlightData and intercept in SerializationTraits
   return reader->Read(reinterpret_cast<pb::FlightData*>(data));
 }

@@ -47,6 +47,7 @@ struct TestInt {
 template <>
 struct IterationTraits<TestInt> {
   static TestInt End() { return TestInt(); }
+  static bool IsEnd(const TestInt& val) { return val.value == -999; }
 };
 
 struct TestStr {
