@@ -42,14 +42,18 @@ class FlightServer(pyarrow.flight.FlightServerBase):
         return (descriptor.descriptor_type.value, descriptor.command,
                 tuple(descriptor.path or tuple()))
 
-    def _make_flight_info(self, key, descriptor, table):
+    @property
+    def _location(self):
         if self.tls_certificates:
-            location = pyarrow.flight.Location.for_grpc_tls(
+            return pyarrow.flight.Location.for_grpc_tls(
                 self.host, self.port)
         else:
-            location = pyarrow.flight.Location.for_grpc_tcp(
+            return pyarrow.flight.Location.for_grpc_tcp(
                 self.host, self.port)
-        endpoints = [pyarrow.flight.FlightEndpoint(repr(key), [location]), ]
+
+    def _make_flight_info(self, key, descriptor, table):
+        endpoints = [pyarrow.flight.FlightEndpoint(
+            repr(key), [self._location])]
 
         mock_sink = pyarrow.MockOutputStream()
         stream_writer = pyarrow.RecordBatchStreamWriter(
@@ -108,6 +112,11 @@ class FlightServer(pyarrow.flight.FlightServerBase):
             # Shut down on background thread to avoid blocking current
             # request
             threading.Thread(target=self._shutdown).start()
+        elif action.type == "recursive":
+            client = pyarrow.flight.FlightClient(self._location)
+            action = pyarrow.flight.Action("healthcheck", b"")
+            for result in client.do_action(action):
+                yield result
         else:
             raise KeyError("Unknown action {!r}".format(action.type))
 

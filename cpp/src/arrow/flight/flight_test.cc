@@ -815,21 +815,21 @@ static thread_local std::string current_span_id = "";
 
 // A server middleware that stores the current span ID, in an
 // emulation of OpenTracing style distributed tracing.
-class TracingServerMiddleware : public ServerMiddleware {
+class MockTracingServerMiddleware : public ServerMiddleware {
  public:
-  explicit TracingServerMiddleware(const std::string& current_span_id)
+  explicit MockTracingServerMiddleware(const std::string& current_span_id)
       : span_id(current_span_id) {}
   void SendingHeaders(AddCallHeaders* outgoing_headers) override {}
   void CallCompleted(const Status& status) override {}
 
-  std::string name() const override { return "TracingServerMiddleware"; }
+  std::string name() const override { return "MockTracingServerMiddleware"; }
 
   std::string span_id;
 };
 
-class TracingServerMiddlewareFactory : public ServerMiddlewareFactory {
+class MockTracingServerMiddlewareFactory : public ServerMiddlewareFactory {
  public:
-  TracingServerMiddlewareFactory() {}
+  MockTracingServerMiddlewareFactory() {}
 
   Status StartCall(const CallInfo& info, const CallHeaders& incoming_headers,
                    std::shared_ptr<ServerMiddleware>* middleware) override {
@@ -837,7 +837,7 @@ class TracingServerMiddlewareFactory : public ServerMiddlewareFactory {
         incoming_headers.equal_range("x-tracing-span-id");
     if (iter_pair.first != iter_pair.second) {
       const util::string_view& value = (*iter_pair.first).second;
-      *middleware = std::make_shared<TracingServerMiddleware>(std::string(value));
+      *middleware = std::make_shared<MockTracingServerMiddleware>(std::string(value));
     }
     return Status::OK();
   }
@@ -1001,10 +1001,10 @@ class ReportContextTestServer : public FlightServerBase {
                   std::unique_ptr<ResultStream>* result) override {
     std::shared_ptr<Buffer> buf;
     const ServerMiddleware* middleware = context.GetMiddleware("tracing");
-    if (middleware == nullptr || middleware->name() != "TracingServerMiddleware") {
+    if (middleware == nullptr || middleware->name() != "MockTracingServerMiddleware") {
       buf = Buffer::FromString("");
     } else {
-      buf = Buffer::FromString(((const TracingServerMiddleware*)middleware)->span_id);
+      buf = Buffer::FromString(((const MockTracingServerMiddleware*)middleware)->span_id);
     }
     *result = std::unique_ptr<ResultStream>(new SimpleResultStream({Result{buf}}));
     return Status::OK();
@@ -1032,10 +1032,10 @@ class PropagatingTestServer : public FlightServerBase {
   Status DoAction(const ServerCallContext& context, const Action& action,
                   std::unique_ptr<ResultStream>* result) override {
     const ServerMiddleware* middleware = context.GetMiddleware("tracing");
-    if (middleware == nullptr || middleware->name() != "TracingServerMiddleware") {
+    if (middleware == nullptr || middleware->name() != "MockTracingServerMiddleware") {
       current_span_id = "";
     } else {
-      current_span_id = ((const TracingServerMiddleware*)middleware)->span_id;
+      current_span_id = ((const MockTracingServerMiddleware*)middleware)->span_id;
     }
 
     return client_->DoAction(action, result);
@@ -1096,7 +1096,7 @@ class TestCountingServerMiddleware : public ::testing::Test {
 class TestPropagatingMiddleware : public ::testing::Test {
  public:
   void SetUp() {
-    server_middleware_ = std::make_shared<TracingServerMiddlewareFactory>();
+    server_middleware_ = std::make_shared<MockTracingServerMiddlewareFactory>();
     second_client_middleware_ = std::make_shared<PropagatingClientMiddlewareFactory>();
     client_middleware_ = std::make_shared<PropagatingClientMiddlewareFactory>();
 
@@ -1149,7 +1149,7 @@ class TestPropagatingMiddleware : public ::testing::Test {
   std::unique_ptr<FlightClient> client_;
   std::unique_ptr<FlightServerBase> first_server_;
   std::unique_ptr<FlightServerBase> second_server_;
-  std::shared_ptr<TracingServerMiddlewareFactory> server_middleware_;
+  std::shared_ptr<MockTracingServerMiddlewareFactory> server_middleware_;
   std::shared_ptr<PropagatingClientMiddlewareFactory> second_client_middleware_;
   std::shared_ptr<PropagatingClientMiddlewareFactory> client_middleware_;
 };
