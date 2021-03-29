@@ -82,6 +82,7 @@
 #include "arrow/util/optional.h"
 #include "arrow/util/task_group.h"
 #include "arrow/util/thread_pool.h"
+#include "arrow/util/tracing_internal.h"
 #include "arrow/util/windows_fixup.h"
 
 namespace arrow {
@@ -676,12 +677,18 @@ Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
 Result<S3Model::GetObjectResult> GetObjectRange(Aws::S3::S3Client* client,
                                                 const S3Path& path, int64_t start,
                                                 int64_t length, void* out) {
+  auto tracer = arrow::internal::tracing::GetTracer();
+  auto span =
+      tracer->StartSpan("s3fs::GetObjectRange",
+                        {{"bucket", path.bucket}, {"key", path.key}, {"length", length}});
+  auto scope = tracer->WithActiveSpan(span);
   S3Model::GetObjectRequest req;
   req.SetBucket(ToAwsString(path.bucket));
   req.SetKey(ToAwsString(path.key));
   req.SetRange(ToAwsString(FormatRange(start, length)));
   req.SetResponseStreamFactory(AwsWriteableStreamFactory(out, length));
-  return OutcomeToResult(client->GetObject(req));
+  return arrow::internal::tracing::MarkSpan(OutcomeToResult(client->GetObject(req)),
+                                            span.get());
 }
 
 // A RandomAccessFile that reads from a S3 object

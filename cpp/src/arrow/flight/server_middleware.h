@@ -79,5 +79,26 @@ class ARROW_FLIGHT_EXPORT ServerMiddlewareFactory {
                            std::shared_ptr<ServerMiddleware>* middleware) = 0;
 };
 
+class ARROW_FLIGHT_EXPORT TracingServerMiddleware : public ServerMiddleware {
+ public:
+  constexpr static char kMiddlewareKey[] = "arrow::flight::TracingServerMiddleware";
+  struct Impl;
+
+  explicit TracingServerMiddleware(std::unique_ptr<Impl> impl);
+
+  std::string name() const override { return kMiddlewareKey; }
+  void SendingHeaders(AddCallHeaders* outgoing_headers) override;
+  void CallCompleted(const Status& status) override;
+
+  std::string GetTraceId() const;
+  std::string GetSpanId() const;
+
+ private:
+  std::unique_ptr<Impl> impl_;
+};
+
+ARROW_FLIGHT_EXPORT
+std::shared_ptr<ServerMiddlewareFactory> MakeTracingServerMiddlewareFactory();
+
 }  // namespace flight
 }  // namespace arrow

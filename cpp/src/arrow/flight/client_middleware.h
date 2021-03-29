@@ -69,5 +69,8 @@ class ARROW_FLIGHT_EXPORT ClientMiddlewareFactory {
                          std::unique_ptr<ClientMiddleware>* middleware) = 0;
 };
 
+ARROW_FLIGHT_EXPORT
+std::shared_ptr<ClientMiddlewareFactory> MakeTracingClientMiddlewareFactory();
+
 }  // namespace flight
 }  // namespace arrow

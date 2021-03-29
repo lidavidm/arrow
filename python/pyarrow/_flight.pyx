@@ -38,6 +38,15 @@ from pyarrow.includes.libarrow_flight cimport *
 from pyarrow.ipc import _get_legacy_format_default, _ReadPandasMixin
 import pyarrow.lib as lib
 
+try:
+    import opentelemetry
+    import opentelemetry.context
+    import opentelemetry.trace
+except ImportError:
+    _OPENTELEMETRY_AVAILABLE = False
+else:
+    _OPENTELEMETRY_AVAILABLE = True
+
 
 cdef CFlightCallOptions DEFAULT_CALL_OPTIONS
 
@@ -1070,6 +1079,9 @@ cdef class FlightClient(_Weakrefable):
             c_options.override_hostname = tobytes(override_hostname)
         if disable_server_verification is not None:
             c_options.disable_server_verification = disable_server_verification
+        if _OPENTELEMETRY_AVAILABLE:
+            c_options.middleware.push_back(
+                MakeTracingClientMiddlewareFactory())
         if middleware:
             for factory in middleware:
                 c_options.middleware.push_back(
@@ -1635,6 +1647,37 @@ cdef class ClientAuthSender(_Weakrefable):
         return result
 
 
+cdef object _set_active_span(const CServerCallContext& flight_context):
+    cdef:
+        CServerMiddleware* raw_instance
+        CTracingServerMiddleware* instance
+    if not _OPENTELEMETRY_AVAILABLE:
+        return None
+
+    raw_instance = flight_context.GetMiddleware(TRACING_SERVER_MIDDLEWARE_KEY)
+    if raw_instance == NULL:
+        return None
+
+    instance = <CTracingServerMiddleware*> raw_instance
+    span_context = opentelemetry.trace.SpanContext(
+        # trace/span IDs are hex-encoded 128-bit ints
+        trace_id=int(instance.GetTraceId(), 16),
+        span_id=int(instance.GetSpanId(), 16),
+        is_remote=True,
+        trace_flags=opentelemetry.trace.TraceFlags(),
+        trace_state=opentelemetry.trace.TraceState(),
+    )
+    context = opentelemetry.trace.set_span_in_context(
+        opentelemetry.trace.NonRecordingSpan(span_context))
+    return opentelemetry.context.attach(context)
+
+
+cdef void _unset_active_span(token) except *:
+    if token is None or not _OPENTELEMETRY_AVAILABLE:
+        return
+    opentelemetry.context.detach(token)
+
+
 cdef CStatus _data_stream_next(void* self, CFlightPayload* payload) except *:
     """Callback for implementing FlightDataStream in Python."""
     cdef:
@@ -1718,7 +1761,9 @@ cdef CStatus _list_flights(void* self, const CServerCallContext& context,
     cdef:
         vector[CFlightInfo] flights
 
+    token = None
     try:
+        token = _set_active_span(context)
         result = (<object> self).list_flights(ServerCallContext.wrap(context),
                                               c_criteria.expression)
         for info in result:
@@ -1730,6 +1775,8 @@ cdef CStatus _list_flights(void* self, const CServerCallContext& context,
         listing.reset(new CSimpleFlightListing(flights))
     except FlightError as flight_error:
         return (<FlightError> flight_error).to_status()
+    finally:
+        _unset_active_span(token)
     return CStatus_OK()
 
 
@@ -1741,12 +1788,16 @@ cdef CStatus _get_flight_info(void* self, const CServerCallContext& context,
         FlightDescriptor py_descriptor = \
             FlightDescriptor.__new__(FlightDescriptor)
     py_descriptor.descriptor = c_descriptor
+    token = None
     try:
+        token = _set_active_span(context)
         result = (<object> self).get_flight_info(
             ServerCallContext.wrap(context),
             py_descriptor)
     except FlightError as flight_error:
         return (<FlightError> flight_error).to_status()
+    finally:
+        _unset_active_span(token)
     if not isinstance(result, FlightInfo):
         raise TypeError("FlightServerBase.get_flight_info must return "
                         "a FlightInfo instance, but got {}".format(
@@ -1762,8 +1813,15 @@ cdef CStatus _get_schema(void* self, const CServerCallContext& context,
         FlightDescriptor py_descriptor = \
             FlightDescriptor.__new__(FlightDescriptor)
     py_descriptor.descriptor = c_descriptor
-    result = (<object> self).get_schema(ServerCallContext.wrap(context),
-                                        py_descriptor)
+    token = None
+    try:
+        token = _set_active_span(context)
+        result = (<object> self).get_schema(ServerCallContext.wrap(context),
+                                            py_descriptor)
+    except FlightError as flight_error:
+        return (<FlightError> flight_error).to_status()
+    finally:
+        _unset_active_span(token)
     if not isinstance(result, SchemaResult):
         raise TypeError("FlightServerBase.get_schema_info must return "
                         "a SchemaResult instance, but got {}".format(
@@ -1784,12 +1842,16 @@ cdef CStatus _do_put(void* self, const CServerCallContext& context,
     descriptor.descriptor = reader.get().descriptor()
     py_reader.reader.reset(reader.release())
     py_writer.writer.reset(writer.release())
+    token = None
     try:
+        token = _set_active_span(context)
         (<object> self).do_put(ServerCallContext.wrap(context), descriptor,
                                py_reader, py_writer)
-        return CStatus_OK()
     except FlightError as flight_error:
         return (<FlightError> flight_error).to_status()
+    finally:
+        _unset_active_span(token)
+    return CStatus_OK()
 
 
 cdef CStatus _do_get(void* self, const CServerCallContext& context,
@@ -1800,11 +1862,15 @@ cdef CStatus _do_get(void* self, const CServerCallContext& context,
         unique_ptr[CFlightDataStream] data_stream
 
     py_ticket = Ticket(ticket.ticket)
+    token = None
     try:
+        token = _set_active_span(context)
         result = (<object> self).do_get(ServerCallContext.wrap(context),
                                         py_ticket)
     except FlightError as flight_error:
         return (<FlightError> flight_error).to_status()
+    finally:
+        _unset_active_span(token)
     if not isinstance(result, FlightDataStream):
         raise TypeError("FlightServerBase.do_get must return "
                         "a FlightDataStream")
@@ -1828,12 +1894,16 @@ cdef CStatus _do_exchange(void* self, const CServerCallContext& context,
     descriptor.descriptor = reader.get().descriptor()
     py_reader.reader.reset(reader.release())
     py_writer.writer.reset(writer.release())
+    token = None
     try:
+        token = _set_active_span(context)
         (<object> self).do_exchange(ServerCallContext.wrap(context),
                                     descriptor, py_reader, py_writer)
-        return CStatus_OK()
     except FlightError as flight_error:
         return (<FlightError> flight_error).to_status()
+    finally:
+        _unset_active_span(token)
+    return CStatus_OK()
 
 
 cdef CStatus _do_action_result_next(
@@ -1864,11 +1934,15 @@ cdef CStatus _do_action(void* self, const CServerCallContext& context,
     cdef:
         function[cb_result_next] ptr = &_do_action_result_next
     py_action = Action(action.type, pyarrow_wrap_buffer(action.body))
+    token = None
     try:
+        token = _set_active_span(context)
         responses = (<object> self).do_action(ServerCallContext.wrap(context),
                                               py_action)
     except FlightError as flight_error:
         return (<FlightError> flight_error).to_status()
+    finally:
+        _unset_active_span(token)
     # Let the application return an iterator or anything convertible
     # into one
     result.reset(new CPyFlightResultStream(iter(responses), ptr))
@@ -1881,7 +1955,9 @@ cdef CStatus _list_actions(void* self, const CServerCallContext& context,
     cdef:
         CActionType action_type
     # Method should return a list of ActionTypes or similar tuple
+    token = None
     try:
+        token = _set_active_span(context)
         result = (<object> self).list_actions(ServerCallContext.wrap(context))
         for action in result:
             if not isinstance(action, tuple):
@@ -1892,6 +1968,8 @@ cdef CStatus _list_actions(void* self, const CServerCallContext& context,
             actions.push_back(action_type)
     except FlightError as flight_error:
         return (<FlightError> flight_error).to_status()
+    finally:
+        _unset_active_span(token)
     return CStatus_OK()
 
 
@@ -2238,7 +2316,11 @@ cdef class ServerMiddlewareFactory(_Weakrefable):
     def start_call(self, info, headers):
         """Called at the start of an RPC.
 
-        This must be thread-safe.
+        This must be thread-safe. This does not necessarily run in the
+        same thread as the RPC body itself (i.e. thread locals are not
+        guaranteed to be preserved). Any state that must be accessible
+        from the RPC body should be stored on the ServerMiddleware
+        itself.
 
         Parameters
         ----------
@@ -2275,6 +2357,11 @@ cdef class ServerMiddleware(_Weakrefable):
     def sending_headers(self):
         """A callback before headers are sent.
 
+        This does not necessarily run in the same thread as the RPC
+        body itself (i.e. thread locals are not guaranteed to be
+        preserved). Any state that must be accessible from the RPC
+        body should be stored on the ServerMiddleware itself.
+
         Returns
         -------
         headers : dict
@@ -2290,6 +2377,11 @@ cdef class ServerMiddleware(_Weakrefable):
 
     def call_completed(self, exception):
         """A callback when the call finishes.
+
+        This does not necessarily run in the same thread as the RPC
+        body itself (i.e. thread locals are not guaranteed to be
+        preserved). Any state that must be accessible from the RPC
+        body should be stored on the ServerMiddleware itself.
 
         Parameters
         ----------
@@ -2436,6 +2528,11 @@ cdef class FlightServerBase(_Weakrefable):
                 c_cert.pem_cert = tobytes(cert)
                 c_cert.pem_key = tobytes(key)
                 c_options.get().tls_certificates.push_back(c_cert)
+
+        if _OPENTELEMETRY_AVAILABLE:
+            c_middleware.first = TRACING_SERVER_MIDDLEWARE_KEY
+            c_middleware.second = MakeTracingServerMiddlewareFactory()
+            c_options.get().middleware.push_back(c_middleware)
 
         if middleware:
             py_middleware = _ServerMiddlewareFactoryWrapper(middleware)

@@ -148,11 +148,13 @@ set(ARROW_FLIGHT_SRCS
     client.cc
     client_cookie_middleware.cc
     client_header_internal.cc
+    client_middleware.cc
     internal.cc
     protocol_internal.cc
     serialization_internal.cc
     server.cc
     server_auth.cc
+    server_middleware.cc
     types.cc)
 
 add_arrow_lib(arrow_flight
@@ -168,6 +170,7 @@ add_arrow_lib(arrow_flight
               "$<$<COMPILE_LANGUAGE:CXX>:arrow/flight/pch.h>"
               DEPENDENCIES
               flight_grpc_gen
+              opentelemetry_ep-install-headers
               SHARED_LINK_FLAGS
               ${ARROW_VERSION_SCRIPT_FLAGS} # Defined in cpp/arrow/CMakeLists.txt
               SHARED_LINK_LIBS

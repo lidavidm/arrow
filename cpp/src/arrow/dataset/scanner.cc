@@ -36,6 +36,7 @@
 #include "arrow/util/logging.h"
 #include "arrow/util/task_group.h"
 #include "arrow/util/thread_pool.h"
+#include "arrow/util/tracing_internal.h"
 
 namespace arrow {
 namespace dataset {
@@ -504,10 +505,23 @@ Result<EnumeratedRecordBatchGenerator> FragmentToBatches(
 Result<AsyncGenerator<EnumeratedRecordBatchGenerator>> FragmentsToBatches(
     std::shared_ptr<AsyncScanner> scanner, FragmentGenerator fragment_gen) {
   auto enumerated_fragment_gen = MakeEnumeratedGenerator(std::move(fragment_gen));
+  auto parent_span = internal::tracing::GetTracer()->GetCurrentSpan();
   return MakeMappedGenerator<EnumeratedRecordBatchGenerator>(
       std::move(enumerated_fragment_gen),
-      [scanner](const Enumerated<std::shared_ptr<Fragment>>& fragment) {
-        return FragmentToBatches(scanner, fragment, scanner->options());
+      [parent_span, scanner](const Enumerated<std::shared_ptr<Fragment>>& fragment)
+          -> Result<EnumeratedRecordBatchGenerator> {
+        auto tracer = internal::tracing::GetTracer();
+        opentelemetry::trace::StartSpanOptions options;
+        options.parent = parent_span->GetContext();
+        auto span =
+            tracer->StartSpan("FragmentsToBatches::Fragment",
+                              {{"fragment", fragment.value->ToString()}}, options);
+        auto scope = tracer->WithActiveSpan(span);
+        ARROW_ASSIGN_OR_RAISE(auto batch_gen,
+                              FragmentToBatches(scanner, fragment, scanner->options()));
+        return internal::tracing::WrapAsyncGenerator(
+            std::move(batch_gen), std::move(span),
+            "FragmentsToBatches::Fragment::NextBatch");
       });
 }
 
@@ -577,6 +591,9 @@ Result<EnumeratedRecordBatchGenerator> AsyncScanner::ScanBatchesUnorderedAsync()
 
 Result<EnumeratedRecordBatchGenerator> AsyncScanner::ScanBatchesUnorderedAsync(
     internal::Executor* cpu_executor) {
+  auto tracer = internal::tracing::GetTracer();
+  auto span = tracer->StartSpan("AsyncScanner::ScanBatchesUnorderedAsync");
+  auto scope = tracer->WithActiveSpan(span);
   auto self = shared_from_this();
   ARROW_ASSIGN_OR_RAISE(auto fragment_gen, GetFragments());
   ARROW_ASSIGN_OR_RAISE(auto batch_gen_gen,
@@ -683,6 +700,9 @@ Future<> AsyncScanner::VisitBatchesAsync(std::function<Status(TaggedRecordBatch)
 
 Future<std::shared_ptr<Table>> AsyncScanner::ToTableAsync(
     internal::Executor* cpu_executor) {
+  auto tracer = internal::tracing::GetTracer();
+  auto span = tracer->StartSpan("AsyncScanner::ToTableAsync");
+  auto scope = tracer->WithActiveSpan(span);
   auto scan_options = scan_options_;
   ARROW_ASSIGN_OR_RAISE(auto positioned_batch_gen,
                         ScanBatchesUnorderedAsync(cpu_executor));
@@ -700,7 +720,7 @@ Future<std::shared_ptr<Table>> AsyncScanner::ToTableAsync(
       positioned_batch_gen, table_building_task);
 
   return DiscardAllFromAsyncGenerator(table_building_gen)
-      .Then([state, scan_options](const detail::Empty&) {
+      .Then([state, scan_options, span](const detail::Empty&) {
         return Table::FromRecordBatches(scan_options->projected_schema, state->Finish());
       });
 }

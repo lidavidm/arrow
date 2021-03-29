@@ -268,9 +268,20 @@ cdef extern from "arrow/flight/api.h" namespace "arrow" nogil:
     cdef cppclass CServerMiddleware" arrow::flight::ServerMiddleware":
         c_string name()
 
+    cdef cppclass CTracingServerMiddleware\
+            " arrow::flight::TracingServerMiddleware"(CServerMiddleware):
+        c_string GetTraceId()
+        c_string GetSpanId()
+
+    char* TRACING_SERVER_MIDDLEWARE_KEY \
+        "arrow::flight::TracingServerMiddleware::kMiddlewareKey"
+
     cdef cppclass CServerMiddlewareFactory\
             " arrow::flight::ServerMiddlewareFactory":
         pass
+
+    shared_ptr[CServerMiddlewareFactory] MakeTracingServerMiddlewareFactory\
+        "arrow::flight::MakeTracingServerMiddlewareFactory"()
 
     cdef cppclass CClientMiddleware" arrow::flight::ClientMiddleware":
         pass
@@ -278,6 +289,9 @@ cdef extern from "arrow/flight/api.h" namespace "arrow" nogil:
     cdef cppclass CClientMiddlewareFactory\
             " arrow::flight::ClientMiddlewareFactory":
         pass
+
+    shared_ptr[CClientMiddlewareFactory] MakeTracingClientMiddlewareFactory\
+        "arrow::flight::MakeTracingClientMiddlewareFactory"()
 
     cdef cppclass CFlightServerOptions" arrow::flight::FlightServerOptions":
         CFlightServerOptions(const CLocation& location)
