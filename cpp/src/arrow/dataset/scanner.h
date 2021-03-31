@@ -159,8 +159,12 @@ struct PositionedRecordBatch {
            record_batch_index == other.record_batch_index;
   }
 
-  static PositionedRecordBatch BeforeAny();
-  static PositionedRecordBatch AfterAny();
+  static PositionedRecordBatch BeforeAny() {
+    return PositionedRecordBatch{NULL, NULL, -1, -1, false, -1, false};
+  }
+  static PositionedRecordBatch AfterAny() {
+    return PositionedRecordBatch{NULL, NULL, -1, -1, true, -1, true};
+  }
 };
 
 }  // namespace dataset

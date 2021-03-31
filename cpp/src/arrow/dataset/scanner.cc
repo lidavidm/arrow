@@ -35,14 +35,6 @@ namespace arrow {
 
 namespace dataset {
 
-PositionedRecordBatch PositionedRecordBatch::BeforeAny() {
-  return PositionedRecordBatch{nullptr, nullptr, -1, -1, false, -1, false};
-}
-
-PositionedRecordBatch PositionedRecordBatch::AfterAny() {
-  return PositionedRecordBatch{nullptr, nullptr, -1, -1, true, -1, true};
-}
-
 std::vector<std::string> ScanOptions::MaterializedFields() const {
   std::vector<std::string> fields;
 
