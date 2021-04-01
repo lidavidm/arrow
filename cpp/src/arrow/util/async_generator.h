@@ -666,6 +666,7 @@ class SerialReadaheadGenerator {
   std::shared_ptr<State> state_;
 };
 
+/// \see MakeFromFuture
 template <typename T>
 class FutureFirstGenerator {
  public:
@@ -695,6 +696,12 @@ class FutureFirstGenerator {
   std::shared_ptr<State> state_;
 };
 
+/// \brief Transforms a Future<AsyncGenerator<T>> into an AsyncGenerator<T>
+/// that waits for the future to complete as part of the first item.
+///
+/// This generator is not async-reentrant (even if the generator yielded by future is)
+///
+/// This generator does not queue
 template <typename T>
 AsyncGenerator<T> MakeFromFuture(Future<AsyncGenerator<T>> future) {
   return FutureFirstGenerator<T>(std::move(future));
@@ -1058,6 +1065,12 @@ class MergedGenerator {
   std::shared_ptr<State> state_;
 };
 
+/// \brief Creates a wrapper around a vector of futures to expose them as an
+/// AsyncGenerator<T>
+///
+/// This generator is async reentrant
+///
+/// This generator takes in a vector of results and queues that vector
 template <typename T>
 AsyncGenerator<T> MakeGeneratorFromFutures(const std::vector<Future<T>> futures) {
   auto index = std::make_shared<std::size_t>(0);

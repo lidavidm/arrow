@@ -140,7 +140,6 @@ class ARROW_DS_EXPORT Dataset : public std::enable_shared_from_this<Dataset> {
   Future<FragmentVector> GetFragmentsAsync();
   Result<FragmentIterator> GetFragments() {
     auto fut = GetFragmentsAsync();
-    fut.Wait();
     ARROW_ASSIGN_OR_RAISE(auto fragments_vec, fut.result());
     return MakeVectorIterator(fragments_vec);
   }
@@ -179,30 +178,20 @@ class ARROW_DS_EXPORT Dataset : public std::enable_shared_from_this<Dataset> {
 /// The record batches must match the schema provided to the source at construction.
 class ARROW_DS_EXPORT InMemoryDataset : public Dataset {
  public:
-  class RecordBatchVectorFactory {
-   public:
-    virtual ~RecordBatchVectorFactory() = default;
-    virtual Result<RecordBatchVector> Get() const = 0;
-  };
-
-  InMemoryDataset(std::shared_ptr<Schema> schema,
-                  std::shared_ptr<RecordBatchVectorFactory> get_batches)
-      : Dataset(std::move(schema)), get_batches_(std::move(get_batches)) {}
-
-  // Convenience constructor taking a fixed list of batches
-  InMemoryDataset(std::shared_ptr<Schema> schema, RecordBatchVector batches);
-
-  explicit InMemoryDataset(std::shared_ptr<Table> table);
+  InMemoryDataset(std::shared_ptr<Schema> schema, RecordBatchVector batches)
+      : Dataset(std::move(schema)), batches_(std::move(batches)) {}
 
   std::string type_name() const override { return "in-memory"; }
 
   Result<std::shared_ptr<Dataset>> ReplaceSchema(
       std::shared_ptr<Schema> schema) const override;
 
+  static Result<std::shared_ptr<InMemoryDataset>> FromTable(std::shared_ptr<Table> table);
+
  protected:
   Future<FragmentVector> GetFragmentsImpl(Expression predicate) override;
 
-  std::shared_ptr<RecordBatchVectorFactory> get_batches_;
+  RecordBatchVector batches_;
 };
 
 /// \brief A Dataset wrapping child Datasets.

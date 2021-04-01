@@ -199,12 +199,12 @@ class ARROW_DS_EXPORT Scanner {
   Scanner(std::shared_ptr<Fragment> fragment, std::shared_ptr<ScanOptions> scan_options)
       : fragment_(std::move(fragment)), scan_options_(std::move(scan_options)) {}
 
-  /// \brief The Scan operator returns a stream of ScanTask futures. The caller is
+  /// \brief The Scan operator returns a stream of RecordBatch futures. The caller is
   /// responsible to dispatch/schedule said tasks. Tasks should be safe to run
   /// in a concurrent fashion and outlive the iterator.
   PositionedRecordBatchGenerator ScanUnorderedAsync();
 
-  /// \brief The scan tasks returned in this version will be
+  /// \brief The record batches returned in this version will be
   /// resequenced so they arrive in order.  This will introduce some latency.
   /// \see ScanUnorderedAsync
   PositionedRecordBatchGenerator ScanAsync();

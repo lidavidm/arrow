@@ -121,64 +121,34 @@ Future<FragmentVector> Dataset::GetFragmentsAsync(Expression predicate) {
                                    : FragmentVector{};
 }
 
-struct VectorRecordBatchVectorFactory : InMemoryDataset::RecordBatchVectorFactory {
-  explicit VectorRecordBatchVectorFactory(RecordBatchVector batches)
-      : batches_(std::move(batches)) {}
-
-  Result<RecordBatchVector> Get() const final { return batches_; }
-
-  RecordBatchVector batches_;
-};
-
-InMemoryDataset::InMemoryDataset(std::shared_ptr<Schema> schema,
-                                 RecordBatchVector batches)
-    : Dataset(std::move(schema)),
-      get_batches_(new VectorRecordBatchVectorFactory(std::move(batches))) {}
-
-struct TableRecordBatchVectorFactory : InMemoryDataset::RecordBatchVectorFactory {
-  explicit TableRecordBatchVectorFactory(std::shared_ptr<Table> table)
-      : table_(std::move(table)) {}
-
-  Result<RecordBatchVector> Get() const final {
-    auto reader = std::make_shared<TableBatchReader>(*table_);
-    auto table = table_;
-    auto iter = MakeFunctionIterator([reader, table] { return reader->Next(); });
-    return iter.ToVector();
-  }
-
-  std::shared_ptr<Table> table_;
-};
-
-InMemoryDataset::InMemoryDataset(std::shared_ptr<Table> table)
-    : Dataset(table->schema()),
-      get_batches_(new TableRecordBatchVectorFactory(std::move(table))) {}
+Result<std::shared_ptr<InMemoryDataset>> InMemoryDataset::FromTable(
+    std::shared_ptr<Table> table) {
+  auto reader = std::make_shared<TableBatchReader>(*table);
+  auto iter = MakeFunctionIterator([reader] { return reader->Next(); });
+  ARROW_ASSIGN_OR_RAISE(auto batches, iter.ToVector());
+  return std::make_shared<InMemoryDataset>(table->schema(), std::move(batches));
+}
 
 Result<std::shared_ptr<Dataset>> InMemoryDataset::ReplaceSchema(
     std::shared_ptr<Schema> schema) const {
   RETURN_NOT_OK(CheckProjectable(*schema_, *schema));
-  return std::make_shared<InMemoryDataset>(std::move(schema), get_batches_);
+  return std::make_shared<InMemoryDataset>(std::move(schema), std::move(batches_));
 }
 
 Future<FragmentVector> InMemoryDataset::GetFragmentsImpl(Expression) {
   auto schema = this->schema();
 
-  // FIXME Need auto here
-  std::function<Result<std::shared_ptr<Fragment>>(const std::shared_ptr<RecordBatch>&)>
-      create_fragment = [schema](const std::shared_ptr<RecordBatch>& batch)
-      -> Result<std::shared_ptr<Fragment>> {
+  FragmentVector fragments;
+  for (const auto& batch : batches_) {
     if (!batch->schema()->Equals(schema)) {
       return Status::TypeError("yielded batch had schema ", *batch->schema(),
                                " which did not match InMemorySource's: ", *schema);
     }
-
     RecordBatchVector batches{batch};
-    return std::make_shared<InMemoryFragment>(std::move(batches));
-  };
+    fragments.push_back(std::make_shared<InMemoryFragment>(std::move(batches)));
+  }
 
-  ARROW_ASSIGN_OR_RAISE(auto batches, get_batches_->Get());
-
-  return Future<FragmentVector>::MakeFinished(
-      internal::MaybeMapVector(std::move(create_fragment), batches));
+  return Future<FragmentVector>::MakeFinished(std::move(fragments));
 }
 
 Result<std::shared_ptr<UnionDataset>> UnionDataset::Make(std::shared_ptr<Schema> schema,

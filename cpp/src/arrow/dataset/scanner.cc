@@ -106,7 +106,6 @@ Future<FragmentVector> Scanner::GetFragmentsAsync() {
 
 Result<FragmentIterator> Scanner::GetFragments() {
   auto fut = GetFragmentsAsync();
-  fut.Wait();
   ARROW_ASSIGN_OR_RAISE(auto fragments_vec, fut.result());
   return MakeVectorIterator(fragments_vec);
 }
@@ -447,13 +446,8 @@ struct TableAssemblyState {
   }
 };
 
-struct TaggedRecordBatch {
-  std::shared_ptr<RecordBatch> record_batch;
-};
-
 Result<std::shared_ptr<Table>> Scanner::ToTable() {
   auto table_fut = ToTableAsync();
-  table_fut.Wait();
   ARROW_ASSIGN_OR_RAISE(auto table, table_fut.result());
   return table;
 }
