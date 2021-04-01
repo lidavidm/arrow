@@ -82,38 +82,15 @@ class IpcScanTask : public ScanTask {
       : ScanTask(std::move(options), fragment), source_(fragment->source()) {}
 
   Result<RecordBatchGenerator> ExecuteAsync() override {
-    struct Impl {
-      static Result<RecordBatchGenerator> Make(
-          const FileSource& source, std::vector<std::string> materialized_fields,
-          MemoryPool* pool) {
-        ARROW_ASSIGN_OR_RAISE(auto reader, OpenReader(source));
+    ARROW_ASSIGN_OR_RAISE(auto reader, OpenReader(source_));
 
-        auto options = default_read_options();
-        options.memory_pool = pool;
-        ARROW_ASSIGN_OR_RAISE(options.included_fields,
-                              GetIncludedFields(*reader->schema(), materialized_fields));
+    auto options = default_read_options();
+    options.memory_pool = options_->pool;
+    ARROW_ASSIGN_OR_RAISE(options.included_fields,
+                          GetIncludedFields(*reader->schema(), options_->MaterializedFields()));
 
-        ARROW_ASSIGN_OR_RAISE(reader, OpenReader(source, options));
-        RecordBatchGenerator generator = Impl{std::move(reader), 0};
-        return generator;
-      }
-
-      Future<std::shared_ptr<RecordBatch>> operator()() {
-        if (i_ == reader_->num_record_batches()) {
-          return AsyncGeneratorEnd<std::shared_ptr<RecordBatch>>();
-        }
-
-        // TODO(ARROW-11772) Once RBFR is async then switch over to that instead of this
-        // synchronous wrapper
-        return Future<std::shared_ptr<RecordBatch>>::MakeFinished(
-            reader_->ReadRecordBatch(i_++));
-      }
-
-      std::shared_ptr<ipc::RecordBatchFileReader> reader_;
-      int i_;
-    };
-
-    return Impl::Make(source_, options_->MaterializedFields(), options_->pool);
+    ARROW_ASSIGN_OR_RAISE(reader, OpenReader(source_, options));
+    return reader->GetRecordBatchGenerator();
   }
 
  private:
