@@ -981,6 +981,20 @@ static Result<std::unique_ptr<Message>> ReadMessageFromBlock(const FileBlock& bl
   return std::move(message);
 }
 
+static Future<std::shared_ptr<Message>> ReadMessageFromBlockAsync(
+    const FileBlock& block, io::RandomAccessFile* file, const io::IOContext& io_context) {
+  if (!BitUtil::IsMultipleOf8(block.offset) ||
+      !BitUtil::IsMultipleOf8(block.metadata_length) ||
+      !BitUtil::IsMultipleOf8(block.body_length)) {
+    return Status::Invalid("Unaligned block in IPC file");
+  }
+
+  // TODO(wesm): this breaks integration tests, see ARROW-3256
+  // DCHECK_EQ((*out)->body_length(), block.body_length);
+
+  return ReadMessageAsync(block.offset, block.metadata_length, file, io_context);
+}
+
 static Status ReadOneDictionary(Message* message, const IpcReadContext& context) {
   CHECK_HAS_BODY(*message);
   ARROW_ASSIGN_OR_RAISE(auto reader, Buffer::GetReader(message->body()));
@@ -996,12 +1010,12 @@ static Status ReadOneDictionary(Message* message, const IpcReadContext& context)
 
 class RecordBatchFileReaderImpl;
 
-/// An iterator of IPC messages (performs I/O for a record batch generator).
+/// A generator of IPC messages (performs I/O for a record batch generator).
 ///
 /// First all dictionary messages are yielded in order, then all record batch messages
 /// are yielded in order.
-Iterator<std::shared_ptr<Message>> MakeMessageIterator(
-    std::shared_ptr<RecordBatchFileReaderImpl> state);
+AsyncGenerator<std::shared_ptr<Message>> MakeMessageGenerator(
+    std::shared_ptr<RecordBatchFileReaderImpl> state, const io::IOContext& io_context);
 
 /// A generator of record batches.
 ///
@@ -1100,24 +1114,19 @@ class RecordBatchFileReaderImpl : public RecordBatchFileReader {
   Result<AsyncGenerator<std::shared_ptr<RecordBatch>>> GetRecordBatchGenerator(
       int readahead_messages, const io::IOContext& io_context,
       arrow::internal::Executor* executor) override {
-    if (readahead_messages < 1) {
-      return Status::Invalid("readahead_messages must be greater than 0");
-    }
     auto state = std::dynamic_pointer_cast<RecordBatchFileReaderImpl>(shared_from_this());
-    auto messages = MakeMessageIterator(state);
-    auto q_restart = std::max(1, readahead_messages / 2);
-    ARROW_ASSIGN_OR_RAISE(
-        auto message_generator,
-        MakeBackgroundGenerator(std::move(messages), io_context.executor(),
-                                readahead_messages, q_restart));
+    auto message_generator = MakeMessageGenerator(state, io_context);
+    if (readahead_messages > 0) {
+      message_generator = MakeReadaheadGenerator(message_generator, readahead_messages);
+    }
     return IpcFileRecordBatchGenerator(
         std::move(state), std::move(message_generator),
         executor ? executor : arrow::internal::GetCpuThreadPool());
   }
 
  private:
-  friend Iterator<std::shared_ptr<Message>> MakeMessageIterator(
-      std::shared_ptr<RecordBatchFileReaderImpl>);
+  friend AsyncGenerator<std::shared_ptr<Message>> MakeMessageGenerator(
+      std::shared_ptr<RecordBatchFileReaderImpl>, const io::IOContext&);
   friend class IpcFileRecordBatchGenerator;
 
   FileBlock GetRecordBatchBlock(int i) const {
@@ -1253,52 +1262,59 @@ Result<std::shared_ptr<RecordBatchFileReader>> RecordBatchFileReader::Open(
   return result;
 }
 
-Iterator<std::shared_ptr<Message>> MakeMessageIterator(
-    std::shared_ptr<RecordBatchFileReaderImpl> state) {
-  int dictionary_index = 0;
-  int record_batch_index = 0;
+AsyncGenerator<std::shared_ptr<Message>> MakeMessageGenerator(
+    std::shared_ptr<RecordBatchFileReaderImpl> state, const io::IOContext& io_context) {
+  struct Index {
+    int dictionary_index = 0;
+    int record_batch_index = 0;
+  };
 
-  return MakeFunctionIterator([=]() mutable -> Result<std::shared_ptr<Message>> {
-    if (dictionary_index < state->num_dictionaries()) {
+  // Generator is copyable, make sure copies share state
+  auto index = std::make_shared<Index>();
+  return [=]() mutable -> Future<std::shared_ptr<Message>> {
+    if (index->dictionary_index < state->num_dictionaries()) {
       auto block = FileBlockFromFlatbuffer(
-          state->footer_->dictionaries()->Get(dictionary_index++));
-      ARROW_ASSIGN_OR_RAISE(auto message,
-                            arrow::ipc::ReadMessageFromBlock(block, state->file_));
-      return std::move(message);
-    } else if (record_batch_index < state->num_record_batches()) {
+          state->footer_->dictionaries()->Get(index->dictionary_index++));
+      return ReadMessageFromBlockAsync(block, state->file_, io_context);
+    } else if (index->record_batch_index < state->num_record_batches()) {
       auto block = FileBlockFromFlatbuffer(
-          state->footer_->recordBatches()->Get(record_batch_index++));
-      ARROW_ASSIGN_OR_RAISE(auto message,
-                            arrow::ipc::ReadMessageFromBlock(block, state->file_));
-      return std::move(message);
+          state->footer_->recordBatches()->Get(index->record_batch_index++));
+      return ReadMessageFromBlockAsync(block, state->file_, io_context);
     }
     return IterationEnd<std::shared_ptr<Message>>();
-  });
+  };
 }
 
 Future<IpcFileRecordBatchGenerator::Item> IpcFileRecordBatchGenerator::operator()() {
   auto state = state_;
   auto message_generator = message_generator_;
   if (!read_dictionaries_.is_valid()) {
-    ARROW_ASSIGN_OR_RAISE(
-        read_dictionaries_, executor_->Submit([=]() -> Result<std::shared_ptr<Message>> {
-          // This is rather wasteful, TODO:
-          std::vector<std::shared_ptr<Message>> messages(state->num_dictionaries());
-          for (int i = 0; i < state->num_dictionaries(); i++) {
-            auto fut = message_generator();
-            ARROW_ASSIGN_OR_RAISE(messages[i], fut.result());
-          }
-          return ReadDictionaries(state.get(), std::move(messages));
-        }));
+    std::vector<Future<std::shared_ptr<Message>>> messages(state->num_dictionaries());
+    for (int i = 0; i < state->num_dictionaries(); i++) {
+      messages[i] = message_generator();
+    }
+    read_dictionaries_ =
+        executor_->Transfer(All(std::move(messages)))
+            .Then([=](const std::vector<Result<std::shared_ptr<Message>>> maybe_messages)
+                      -> Result<std::shared_ptr<Message>> {
+              std::vector<std::shared_ptr<Message>> messages(state->num_dictionaries());
+              for (size_t i = 0; i < messages.size(); i++) {
+                ARROW_ASSIGN_OR_RAISE(messages[i], maybe_messages[i]);
+              }
+              return ReadDictionaries(state.get(), std::move(messages));
+            });
   }
   if (index_ >= state_->num_record_batches()) {
     return Future<Item>::MakeFinished(IterationTraits<Item>::End());
   }
   index_++;
-  return executor_
-      ->Transfer(read_dictionaries_.Then(
-          [=](const std::shared_ptr<Message>&) { return message_generator(); }))
-      .Then([=](const std::shared_ptr<Message>& message) -> Result<Item> {
+  std::vector<Future<std::shared_ptr<Message>>> dependencies{read_dictionaries_,
+                                                             message_generator()};
+  return executor_->Transfer(All(dependencies))
+      .Then([=](const std::vector<Result<std::shared_ptr<Message>>> maybe_messages)
+                -> Result<Item> {
+        RETURN_NOT_OK(maybe_messages[0]);  // Make sure dictionaries were read
+        ARROW_ASSIGN_OR_RAISE(auto message, maybe_messages[1]);
         return ReadRecordBatch(state.get(), message.get());
       });
 }

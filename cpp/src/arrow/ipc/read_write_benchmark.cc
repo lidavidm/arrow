@@ -207,6 +207,9 @@ static void DecodeStream(benchmark::State& state) {  // NOLINT non-const referen
 #define READ_DATA_IN_MEMORY() auto input = std::make_shared<io::BufferReader>(buffer);
 #define READ_DATA_TEMP_FILE() \
   ASSIGN_OR_ABORT(auto input, io::ReadableFile::Open("/tmp/benchmark.arrow"));
+#define READ_DATA_MMAP_FILE()                                                    \
+  ASSIGN_OR_ABORT(auto input, io::MemoryMappedFile::Open("/tmp/benchmark.arrow", \
+                                                         io::FileMode::type::READ));
 
 #define READ_SYNC(NAME, GENERATE, READ)                                                 \
   static void NAME(benchmark::State& state) {                                           \
@@ -247,6 +250,7 @@ static void DecodeStream(benchmark::State& state) {  // NOLINT non-const referen
 
 READ_BENCHMARK(ReadFile, GENERATE_DATA_IN_MEMORY, READ_DATA_IN_MEMORY);
 READ_BENCHMARK(ReadTempFile, GENERATE_DATA_TEMP_FILE, READ_DATA_TEMP_FILE);
+READ_BENCHMARK(ReadMmapFile, GENERATE_DATA_TEMP_FILE, READ_DATA_MMAP_FILE);
 READ_BENCHMARK(ReadCompressedFile, GENERATE_COMPRESSED_DATA_IN_MEMORY,
                READ_DATA_IN_MEMORY);
 
