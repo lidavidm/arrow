@@ -181,7 +181,7 @@ class ARROW_EXPORT RecordBatchFileReader
   ///     batches. This is generally only a benefit for very wide and/or
   ///     compressed batches.
   virtual Result<AsyncGenerator<std::shared_ptr<RecordBatch>>> GetRecordBatchGenerator(
-      int readahead_messages = 16,
+      int readahead_messages = 0,
       const io::IOContext& io_context = io::default_io_context(),
       arrow::internal::Executor* executor = NULLPTR) = 0;
 };
