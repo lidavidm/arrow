@@ -254,7 +254,6 @@ class MappingGenerator {
 /// \brief Creates a generator that will apply the map function to each element of
 /// source.  The map function is not called on the end token.
 ///
-/// Note: This function makes a copy of `map` for each item
 /// Note: Errors returned from the `map` function will be propagated
 ///
 /// If the source generator is async-reentrant then this generator will be also
