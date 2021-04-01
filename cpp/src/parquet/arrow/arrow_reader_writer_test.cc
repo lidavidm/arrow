@@ -2349,58 +2349,40 @@ TEST(TestArrowReadWrite, GetRecordBatchGenerator) {
   ASSERT_OK(builder.Open(std::make_shared<BufferReader>(buffer)));
   ASSERT_OK(builder.properties(properties)->Build(&reader));
 
-  auto check_batches = [](const ::arrow::RecordBatchVector& batches, int num_columns,
-                          int num_rows) {
-    ASSERT_EQ(1, batches.size());
-    auto actual_batch = batches[0];
-    ASSERT_NE(actual_batch, nullptr);
-    ASSERT_EQ(actual_batch->num_columns(), num_columns);
-    ASSERT_EQ(actual_batch->num_rows(), num_rows);
+  auto check_batches = [](const std::shared_ptr<::arrow::RecordBatch>& batch,
+                          int num_columns, int num_rows) {
+    ASSERT_NE(batch, nullptr);
+    ASSERT_EQ(batch->num_columns(), num_columns);
+    ASSERT_EQ(batch->num_rows(), num_rows);
   };
   {
     ASSERT_OK_AND_ASSIGN(auto batch_generator,
-                         reader->GetRecordBatchGenerator({0, 1}, {0, 1}));
+                         arrow::FileReader::GetRecordBatchGenerator(
+                             std::make_shared<BufferReader>(buffer), {0, 1}, {0, 1}));
     auto fut1 = batch_generator();
     auto fut2 = batch_generator();
     auto fut3 = batch_generator();
-    ASSERT_OK_AND_ASSIGN(
-        ::arrow::util::optional<::arrow::RecordBatchVector> maybe_batches1,
-        fut1.result());
-    ASSERT_OK_AND_ASSIGN(
-        ::arrow::util::optional<::arrow::RecordBatchVector> maybe_batches2,
-        fut2.result());
-    ASSERT_OK_AND_ASSIGN(
-        ::arrow::util::optional<::arrow::RecordBatchVector> maybe_batches3,
-        fut3.result());
-    ASSERT_EQ(true, maybe_batches1.has_value());
-    ASSERT_EQ(true, maybe_batches2.has_value());
-    ASSERT_EQ(false, maybe_batches3.has_value());
-
-    check_batches(maybe_batches1.value(), num_columns, row_group_size);
-    check_batches(maybe_batches2.value(), num_columns, row_group_size);
+    ASSERT_OK_AND_ASSIGN(auto batch1, fut1.result());
+    ASSERT_OK_AND_ASSIGN(auto batch2, fut2.result());
+    ASSERT_OK_AND_ASSIGN(auto batch3, fut3.result());
+    ASSERT_EQ(batch3, nullptr);
+    check_batches(batch1, num_columns, row_group_size);
+    check_batches(batch2, num_columns, row_group_size);
   }
   {
     // No columns case
     ASSERT_OK_AND_ASSIGN(auto batch_generator,
-                         reader->GetRecordBatchGenerator({0, 1}, {}));
+                         arrow::FileReader::GetRecordBatchGenerator(
+                             std::make_shared<BufferReader>(buffer), {0, 1}, {}));
     auto fut1 = batch_generator();
     auto fut2 = batch_generator();
     auto fut3 = batch_generator();
-    ASSERT_OK_AND_ASSIGN(
-        ::arrow::util::optional<::arrow::RecordBatchVector> maybe_batches1,
-        fut1.result());
-    ASSERT_OK_AND_ASSIGN(
-        ::arrow::util::optional<::arrow::RecordBatchVector> maybe_batches2,
-        fut2.result());
-    ASSERT_OK_AND_ASSIGN(
-        ::arrow::util::optional<::arrow::RecordBatchVector> maybe_batches3,
-        fut3.result());
-    ASSERT_EQ(true, maybe_batches1.has_value());
-    ASSERT_EQ(true, maybe_batches2.has_value());
-    ASSERT_EQ(false, maybe_batches3.has_value());
-
-    check_batches(maybe_batches1.value(), 0, row_group_size);
-    check_batches(maybe_batches2.value(), 0, row_group_size);
+    ASSERT_OK_AND_ASSIGN(auto batch1, fut1.result());
+    ASSERT_OK_AND_ASSIGN(auto batch2, fut2.result());
+    ASSERT_OK_AND_ASSIGN(auto batch3, fut3.result());
+    ASSERT_EQ(batch3, nullptr);
+    check_batches(batch1, 0, row_group_size);
+    check_batches(batch2, 0, row_group_size);
   }
 }
 
@@ -2773,7 +2755,7 @@ TEST(ArrowReadWrite, Decimal256) {
 
   auto type = ::arrow::decimal256(8, 4);
 
-  const char* json = R"(["1.0000", null, "-1.2345", "-1000.5678", 
+  const char* json = R"(["1.0000", null, "-1.2345", "-1000.5678",
                          "-9999.9999", "9999.9999"])";
   auto array = ::arrow::ArrayFromJSON(type, json);
   auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});

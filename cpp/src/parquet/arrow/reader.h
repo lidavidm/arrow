@@ -177,21 +177,18 @@ class PARQUET_EXPORT FileReader {
       const std::vector<int>& row_group_indices, const std::vector<int>& column_indices,
       std::unique_ptr<::arrow::RecordBatchReader>* out) = 0;
 
-  /// \brief Return a generator of record batch vectors, where each vector represents
-  ///     the contents of a row group from row_group_indices, whose columns are selected
-  ///     by column_indices.
-  ///
-  /// An empty optional indicates the end of the generator.
-  ///
-  /// Note that the ordering in row_group_indices and column_indices matter. FileReaders
-  /// must outlive their generators.
+  /// \brief Return a generator of record batches.
   ///
   /// \returns error Result if either row_group_indices or column_indices contains an
   ///     invalid index
-  virtual ::arrow::Result<
-      ::arrow::AsyncGenerator<::arrow::util::optional<::arrow::RecordBatchVector>>>
-  GetRecordBatchGenerator(const std::vector<int>& row_group_indices,
-                          const std::vector<int>& column_indices) = 0;
+  static ::arrow::Result<::arrow::AsyncGenerator<std::shared_ptr<::arrow::RecordBatch>>>
+  GetRecordBatchGenerator(
+      std::shared_ptr<::arrow::io::RandomAccessFile> source,
+      const std::vector<int> row_group_indices, const std::vector<int> column_indices,
+      ::arrow::MemoryPool* pool = ::arrow::default_memory_pool(),
+      const ReaderProperties properties = default_reader_properties(),
+      const ArrowReaderProperties arrow_properties = default_arrow_reader_properties(),
+      ::arrow::internal::Executor* executor = NULLPTR);
 
   ::arrow::Status GetRecordBatchReader(const std::vector<int>& row_group_indices,
                                        const std::vector<int>& column_indices,
