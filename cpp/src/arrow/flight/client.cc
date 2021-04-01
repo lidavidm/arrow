@@ -69,7 +69,10 @@ const char* kWriteSizeDetailTypeId = "flight::FlightWriteSizeStatusDetail";
 FlightCallOptions::FlightCallOptions()
     : timeout(-1),
       read_options(ipc::IpcReadOptions::Defaults()),
-      write_options(ipc::IpcWriteOptions::Defaults()) {}
+      write_options(ipc::IpcWriteOptions::Defaults()) {
+        write_options.codec = util::Codec::Create(Compression::ZSTD).ValueOrDie();
+//        write_options.use_threads = false;
+      }
 
 const char* FlightWriteSizeStatusDetail::type_id() const {
   return kWriteSizeDetailTypeId;
@@ -667,6 +670,16 @@ class GrpcStreamWriter : public FlightStreamWriter {
     RETURN_NOT_OK(CheckStarted());
     app_metadata_ = app_metadata;
     return batch_writer_->WriteRecordBatch(batch);
+  }
+
+  Status __Prepare(const RecordBatch& batch, ipc::IpcPayload* payload) override {
+    RETURN_NOT_OK(CheckStarted());
+    app_metadata_ = nullptr;
+    return batch_writer_->__Prepare(batch, payload);
+  }
+
+  Status __Write(const ipc::IpcPayload& payload) override {
+    return batch_writer_->__Write(payload);
   }
 
   Status DoneWriting() override {

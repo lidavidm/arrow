@@ -1002,6 +1002,26 @@ class ARROW_EXPORT IpcFormatWriter : public RecordBatchWriter {
     return Status::OK();
   }
 
+  Status __Prepare(const RecordBatch& batch, IpcPayload* payload) override {
+    if (!batch.schema()->Equals(schema_, false /* check_metadata */)) {
+      return Status::Invalid("Tried to write record batch with different schema");
+    }
+
+    RETURN_NOT_OK(CheckStarted());
+
+    RETURN_NOT_OK(WriteDictionaries(batch));
+
+    payload->Reset();
+    RETURN_NOT_OK(GetRecordBatchPayload(batch, options_, payload));
+    return Status::OK();
+  }
+
+  Status __Write(const IpcPayload& payload) override {
+    RETURN_NOT_OK(WritePayload(payload));
+    ++stats_.num_record_batches;
+    return Status::OK();
+  }
+
   Status WriteTable(const Table& table, int64_t max_chunksize) override {
     if (is_file_format_ && options_.unify_dictionaries) {
       ARROW_ASSIGN_OR_RAISE(auto unified_table,

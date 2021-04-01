@@ -58,6 +58,13 @@ struct IpcPayload {
   std::shared_ptr<Buffer> metadata;
   std::vector<std::shared_ptr<Buffer>> body_buffers;
   int64_t body_length = 0;
+
+  void Reset() {
+    type = MessageType::NONE;
+    metadata = nullptr;
+    body_buffers.resize(0);
+    body_length = 0;
+  }
 };
 
 struct WriteStats {
@@ -88,6 +95,12 @@ class ARROW_EXPORT RecordBatchWriter {
   /// \param[in] batch the record batch to write to the stream
   /// \return Status
   virtual Status WriteRecordBatch(const RecordBatch& batch) = 0;
+  virtual Status __Prepare(const RecordBatch& batch, IpcPayload* payload) {
+    return Status::NotImplemented("");
+  }
+  virtual Status __Write(const IpcPayload& payload) {
+    return Status::NotImplemented("");
+  }
 
   /// \brief Write possibly-chunked table by creating sequence of record batches
   /// \param[in] table table to write

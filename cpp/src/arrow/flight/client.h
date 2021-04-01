@@ -148,6 +148,13 @@ class ARROW_FLIGHT_EXPORT FlightStreamWriter : public MetadataRecordBatchWriter 
   /// this. This differs from closing the stream because this writer
   /// may represent only one half of a readable and writable stream.
   virtual Status DoneWriting() = 0;
+
+  virtual Status __Prepare(const RecordBatch& batch, ipc::IpcPayload* payload) {
+    return Status::NotImplemented("");
+  }
+  virtual Status __Write(const ipc::IpcPayload& payload) {
+    return Status::NotImplemented("");
+  }
 };
 
 #ifdef _MSC_VER

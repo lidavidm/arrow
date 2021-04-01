@@ -237,18 +237,57 @@ arrow::Result<PerformanceResult> RunDoPutTest(FlightClient* client,
   int64_t num_bytes = 0;
   std::unique_ptr<FlightStreamWriter> writer;
   std::unique_ptr<FlightMetadataReader> reader;
+
+#define INTERLEAVE_PREPARE_AND_SEND  // !!!! uncomment to exercise old code path
+
+// tested on skylake server with two numa nodes, 16 cpus each.
+// - #stream = 1, see stable improvment of both bandwidth (1200 -> 1700) and latency (90 -> 70)
+// - #stream >= 4, no improvment, the benefit is hidden by parallel stream processing
+//
+// test command:
+// $ OMP_NUM_THREADS=4 numactl --membind=1 --cpunodebind=1 release/arrow-flight-benchmark --num_streams 1 --num_threads 1 --test_put
+// note: OMP_NUM_THREADS control #threads to do zstd compression
+
   RETURN_NOT_OK(client->DoPut(call_options, FlightDescriptor{},
                               batches[0].batch->schema(), &writer, &reader));
-  for (size_t i = 0; i < batches.size(); i++) {
+#ifdef INTERLEAVE_PREPARE_AND_SEND
+  int cur = 0;
+  ipc::IpcPayload payload[2];
+  auto prepare_payload = [&](std::shared_ptr<arrow::RecordBatch> batch, int cur) { return writer->__Prepare(*batch, &payload[cur]); };
+  Future<> task;
+  // thread pool with one worker to prepare next payload
+  ARROW_ASSIGN_OR_RAISE(auto pool, ThreadPool::Make(1));
+  ARROW_ASSIGN_OR_RAISE(task, pool->Submit(prepare_payload, batches[0].batch, cur));
+  num_records += batches[0].batch->num_rows();
+  num_bytes += batches[0].bytes;
+  const size_t start_index = 1;
+#else
+  const size_t start_index = 0;
+#endif
+  for (size_t i = start_index; i < batches.size(); i++) {
     auto batch = batches[i];
     auto is_last = i == (batches.size() - 1);
     if (is_last) {
+#ifdef INTERLEAVE_PREPARE_AND_SEND
+      RETURN_NOT_OK(task.status());
+      RETURN_NOT_OK(writer->__Write(payload[cur]));
+#endif
       RETURN_NOT_OK(writer->WriteRecordBatch(*batch.batch));
       num_records += batch.batch->num_rows();
       num_bytes += batch.bytes;
     } else {
       timer.Start();
+#ifdef INTERLEAVE_PREPARE_AND_SEND
+      // wait for payload ready
+      RETURN_NOT_OK(task.status());
+      // prepare next playload in another thread
+      cur = 1 - cur;
+      ARROW_ASSIGN_OR_RAISE(task, pool->Submit(prepare_payload, batch.batch, cur));
+      // send ready payload
+      RETURN_NOT_OK(writer->__Write(payload[1 - cur]));
+#else
       RETURN_NOT_OK(writer->WriteRecordBatch(*batch.batch));
+#endif
       stats->AddLatency(timer.Stop());
       num_records += batch.batch->num_rows();
       num_bytes += batch.bytes;
