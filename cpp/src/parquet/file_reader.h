@@ -130,6 +130,9 @@ class PARQUET_EXPORT ParquetFileReader {
                               const ::arrow::io::IOContext& ctx,
                               const ::arrow::io::CacheOptions& options);
 
+  ::arrow::Future<> WhenBuffered(const std::vector<int>& row_groups,
+                                 const std::vector<int>& column_indices) const;
+
  private:
   // Holds a pointer to an instance of Contents implementation
   std::unique_ptr<Contents> contents_;

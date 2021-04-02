@@ -2331,6 +2331,61 @@ TEST(TestArrowReadWrite, GetRecordBatchReaderNoColumns) {
   ASSERT_EQ(actual_batch->num_rows(), num_rows);
 }
 
+TEST(TestArrowReadWrite, GetRecordBatchGenerator) {
+  ArrowReaderProperties properties = default_arrow_reader_properties();
+  const int num_rows = 1024;
+  const int row_group_size = 512;
+  const int num_columns = 2;
+
+  std::shared_ptr<Table> table;
+  ASSERT_NO_FATAL_FAILURE(MakeDoubleTable(num_columns, num_rows, 1, &table));
+
+  std::shared_ptr<Buffer> buffer;
+  ASSERT_NO_FATAL_FAILURE(WriteTableToBuffer(table, row_group_size,
+                                             default_arrow_writer_properties(), &buffer));
+
+  std::unique_ptr<FileReader> reader;
+  FileReaderBuilder builder;
+  ASSERT_OK(builder.Open(std::make_shared<BufferReader>(buffer)));
+  ASSERT_OK(builder.properties(properties)->Build(&reader));
+
+  auto check_batches = [](const std::shared_ptr<::arrow::RecordBatch>& batch,
+                          int num_columns, int num_rows) {
+    ASSERT_NE(batch, nullptr);
+    ASSERT_EQ(batch->num_columns(), num_columns);
+    ASSERT_EQ(batch->num_rows(), num_rows);
+  };
+  {
+    ASSERT_OK_AND_ASSIGN(auto batch_generator,
+                         arrow::FileReader::GetRecordBatchGenerator(
+                             std::make_shared<BufferReader>(buffer), {0, 1}, {0, 1}));
+    auto fut1 = batch_generator();
+    auto fut2 = batch_generator();
+    auto fut3 = batch_generator();
+    ASSERT_OK_AND_ASSIGN(auto batch1, fut1.result());
+    ASSERT_OK_AND_ASSIGN(auto batch2, fut2.result());
+    ASSERT_OK_AND_ASSIGN(auto batch3, fut3.result());
+    ASSERT_EQ(batch3, nullptr);
+    check_batches(batch1, num_columns, row_group_size);
+    check_batches(batch2, num_columns, row_group_size);
+  }
+  {
+    // No columns case
+    ASSERT_OK_AND_ASSIGN(auto batch_generator,
+                         arrow::FileReader::GetRecordBatchGenerator(
+                             std::make_shared<BufferReader>(buffer), {0, 1}, {}));
+    auto fut1 = batch_generator();
+    auto fut2 = batch_generator();
+    auto fut3 = batch_generator();
+    ASSERT_OK_AND_ASSIGN(auto batch1, fut1.result());
+    ASSERT_OK_AND_ASSIGN(auto batch2, fut2.result());
+    ASSERT_OK_AND_ASSIGN(auto batch3, fut3.result());
+    ASSERT_EQ(batch3, nullptr);
+    check_batches(batch1, 0, row_group_size);
+    check_batches(batch2, 0, row_group_size);
+  }
+}
+
 TEST(TestArrowReadWrite, ScanContents) {
   const int num_columns = 20;
   const int num_rows = 1000;
@@ -2700,7 +2755,7 @@ TEST(ArrowReadWrite, Decimal256) {
 
   auto type = ::arrow::decimal256(8, 4);
 
-  const char* json = R"(["1.0000", null, "-1.2345", "-1000.5678", 
+  const char* json = R"(["1.0000", null, "-1.2345", "-1000.5678",
                          "-9999.9999", "9999.9999"])";
   auto array = ::arrow::ArrayFromJSON(type, json);
   auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});

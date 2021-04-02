@@ -252,6 +252,7 @@ class GeneratorTestFixture : public ::testing::TestWithParam<bool> {
     }
   }
 };
+
 template <typename T>
 class ManualIteratorControl {
  public:
@@ -699,17 +700,21 @@ TEST_P(BackgroundGeneratorTestFixture, BadResult) {
   ASSERT_FINISHES_OK_AND_EQ(TestInt(0), generator());
   // Have not yet restarted so next results should always be valid
   ASSERT_FINISHES_OK_AND_EQ(TestInt(1), generator());
-  ASSERT_FINISHES_OK_AND_EQ(TestInt(2), generator());
-  // Next two results may or may not be valid.  If the reader thread is fast it will
-  // grab the invalid item and clear out the next two results.  If the reader thread
-  // is slow we will grab them first.
+  // Next three results may or may not be valid.
+  // The typical case is the call for TestInt(2) restarts a full queue and then maybe
+  // TestInt(3) and TestInt(4) arrive quickly enough to not get pre-empted or maybe
+  // they don't.
+  //
+  // A more bizarre, but possible, case is the checking thread falls behind the producer
+  // thread just so and TestInt(1) arrives and is delivered but before the call for
+  // TestInt(2) happens the background reader reads 2, 3, 4, and 5[err] into the queue so
+  // the queue never fills up and even TestInt(2) is preempted.
   bool invalid_encountered = false;
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < 3; i++) {
     auto next_fut = generator();
-    next_fut.Wait();
     auto next_result = next_fut.result();
     if (next_result.ok()) {
-      ASSERT_EQ(TestInt(i + 3), next_result.ValueUnsafe());
+      ASSERT_EQ(TestInt(i + 2), next_result.ValueUnsafe());
     } else {
       invalid_encountered = true;
       break;
