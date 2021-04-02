@@ -1001,17 +1001,16 @@ class RowGroupGenerator {
     int row_group = row_groups_[index_++];
     std::vector<int> column_indices = column_indices_;
     auto reader = arrow_reader_;
-    auto executor = executor_;
     if (!reader->properties().pre_buffer()) {
-      return SubmitRead(executor, reader, row_group, column_indices);
+      return SubmitRead(executor_, reader, row_group, column_indices);
     }
     BEGIN_PARQUET_CATCH_EXCEPTIONS
-    return reader->parquet_reader()
-        ->WhenBuffered({row_group}, column_indices)
-        .Then([=](const ::arrow::Result<::arrow::detail::Empty>& s)
-                  -> ::arrow::Future<Item> {
+    auto ready = reader->parquet_reader()->WhenBuffered({row_group}, column_indices);
+    if (executor_) ready = executor_->Transfer(ready);
+    return ready.Then(
+        [=](const ::arrow::Result<::arrow::detail::Empty>& s) -> ::arrow::Result<Item> {
           RETURN_NOT_OK(s);
-          return SubmitRead(executor, reader, row_group, column_indices);
+          return ReadOneRowGroup(reader, row_group, column_indices);
         });
     END_PARQUET_CATCH_EXCEPTIONS
   }
@@ -1020,6 +1019,8 @@ class RowGroupGenerator {
   static ::arrow::Future<Item> SubmitRead(::arrow::internal::Executor* executor,
                                           FileReaderImpl* self, const int row_group,
                                           const std::vector<int>& column_indices) {
+    // N.B. this isn't really async because pre-buffer isn't enabled
+    // (would need refactoring reader entirely to make it read async natively)
     if (!executor) {
       return Future<Item>::MakeFinished(ReadOneRowGroup(self, row_group, column_indices));
     }
