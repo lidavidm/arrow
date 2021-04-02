@@ -203,6 +203,36 @@ Future<> ReadRangeCache::Wait() {
   return AllComplete(futures);
 }
 
+Future<> ReadRangeCache::WaitFor(std::vector<ReadRange> ranges) {
+  auto end = std::remove_if(ranges.begin(), ranges.end(),
+                            [](const ReadRange& range) { return range.length == 0; });
+  ranges.resize(end - ranges.begin());
+  // Sort in reverse position order
+  std::sort(ranges.begin(), ranges.end(),
+            [](const ReadRange& a, const ReadRange& b) { return a.offset > b.offset; });
+
+  std::vector<Future<>> futures;
+  for (const auto& entry : impl_->entries) {
+    bool include = false;
+    while (!ranges.empty()) {
+      const auto& next = ranges.back();
+      if (next.offset >= entry.range.offset &&
+          next.offset + next.length <= entry.range.offset + entry.range.length) {
+        include = true;
+        ranges.pop_back();
+      } else {
+        break;
+      }
+    }
+    if (include) futures.emplace_back(entry.future);
+    if (ranges.empty()) break;
+  }
+  if (!ranges.empty()) {
+    return Status::Invalid("Given ranges were not previously requested for caching");
+  }
+  return AllComplete(futures);
+}
+
 }  // namespace internal
 }  // namespace io
 }  // namespace arrow

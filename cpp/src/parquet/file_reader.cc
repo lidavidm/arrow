@@ -267,6 +267,21 @@ class SerializedFile : public ParquetFileReader::Contents {
     return cached_source_->Wait();
   }
 
+  ::arrow::Future<> WhenBuffered(const std::vector<int>& row_groups,
+                                 const std::vector<int>& column_indices) const {
+    if (!cached_source_) {
+      throw ParquetException("Must call PreBuffer before WhenBuffered");
+    }
+    std::vector<::arrow::io::ReadRange> ranges;
+    for (int row : row_groups) {
+      for (int col : column_indices) {
+        ranges.push_back(
+            ComputeColumnChunkRange(file_metadata_.get(), source_size_, row, col));
+      }
+    }
+    return cached_source_->WaitFor(ranges);
+  }
+
   void ParseMetaData() {
     if (source_size_ == 0) {
       throw ParquetInvalidOrCorruptedFileException("Parquet file size is 0 bytes");
@@ -595,6 +610,14 @@ std::shared_ptr<RowGroupReader> ParquetFileReader::RowGroup(int i) {
   SerializedFile* file =
       ::arrow::internal::checked_cast<SerializedFile*>(contents_.get());
   return file->PreBuffer(row_groups, column_indices, ctx, options);
+}
+
+::arrow::Future<> ParquetFileReader::WhenBuffered(
+    const std::vector<int>& row_groups, const std::vector<int>& column_indices) const {
+  // Access private methods here
+  SerializedFile* file =
+      ::arrow::internal::checked_cast<SerializedFile*>(contents_.get());
+  return file->WhenBuffered(row_groups, column_indices);
 }
 
 // ----------------------------------------------------------------------

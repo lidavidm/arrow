@@ -971,24 +971,14 @@ Status FileReaderImpl::GetRecordBatchReader(const std::vector<int>& row_groups,
   return Status::OK();
 }
 
-/// A generator of Parquet readers, each of which has been pre-buffered to load
-/// a particular row group.
 class FileReaderGenerator {
  public:
   using Item = std::shared_ptr<FileReader>;
 
-  FileReaderGenerator(::arrow::MemoryPool* pool,
-                      const std::shared_ptr<::arrow::io::RandomAccessFile>& source,
-                      const std::shared_ptr<FileMetaData>& metadata,
+  FileReaderGenerator(std::shared_ptr<FileReader> arrow_reader,
                       const std::vector<int>& row_group_indices,
-                      const std::vector<int>& column_indices,
-                      const ReaderProperties& properties,
-                      const ArrowReaderProperties& arrow_properties)
-      : pool_(pool),
-        source_(source),
-        properties_(properties),
-        arrow_properties_(arrow_properties),
-        metadata_(metadata),
+                      const std::vector<int>& column_indices)
+      : arrow_reader_(std::move(arrow_reader)),
         row_group_indices_(row_group_indices),
         column_indices_(column_indices),
         index_(0) {}
@@ -997,45 +987,39 @@ class FileReaderGenerator {
     if (index_ >= row_group_indices_.size()) {
       return ::arrow::Future<Item>::MakeFinished(::arrow::IterationEnd<Item>());
     }
-    struct {
-      std::unique_ptr<ParquetFileReader> reader;
-      ::arrow::MemoryPool* pool;
-      ArrowReaderProperties arrow_properties;
-      ::arrow::Result<Item> operator()(const ::arrow::Result<::arrow::detail::Empty>& s) {
-        RETURN_NOT_OK(s);
-        std::unique_ptr<FileReader> out;
-        RETURN_NOT_OK(FileReader::Make(pool, std::move(reader), arrow_properties, &out));
-        return std::move(out);
-      }
-    } Continuation;
-    Continuation.pool = pool_;
-    Continuation.arrow_properties = arrow_properties_;
     BEGIN_PARQUET_CATCH_EXCEPTIONS
-    Continuation.reader = ParquetFileReader::Open(source_, properties_, metadata_);
-    return Continuation.reader
-        ->PreBuffer({row_group_indices_[index_++]}, column_indices_,
-                    arrow_properties_.io_context(), arrow_properties_.cache_options())
-        .Then(std::move(Continuation));
+    auto arrow_reader = arrow_reader_;
+    return arrow_reader->parquet_reader()
+        ->WhenBuffered({row_group_indices_[index_++]}, column_indices_)
+        .Then([arrow_reader](const ::arrow::Result<::arrow::detail::Empty>& s)
+                  -> ::arrow::Result<Item> {
+          RETURN_NOT_OK(s);
+          return arrow_reader;
+        });
     END_PARQUET_CATCH_EXCEPTIONS
   }
 
-  static ::arrow::AsyncGenerator<Item> Make(
+  static ::arrow::Result<::arrow::AsyncGenerator<Item>> Make(
       ::arrow::MemoryPool* pool,
       const std::shared_ptr<::arrow::io::RandomAccessFile>& source,
       const std::shared_ptr<FileMetaData>& metadata,
       const std::vector<int>& row_group_indices, const std::vector<int>& column_indices,
       const ReaderProperties& properties, const ArrowReaderProperties& arrow_properties) {
-    auto state = std::make_shared<FileReaderGenerator>(pool, source, metadata,
-                                                       row_group_indices, column_indices,
-                                                       properties, arrow_properties);
+    std::unique_ptr<ParquetFileReader> reader;
+    BEGIN_PARQUET_CATCH_EXCEPTIONS
+    reader = ParquetFileReader::Open(source, properties, metadata);
+    reader->PreBuffer(row_group_indices, column_indices, arrow_properties.io_context(),
+                      arrow_properties.cache_options());
+    END_PARQUET_CATCH_EXCEPTIONS
+    std::unique_ptr<FileReader> arrow_reader;
+    RETURN_NOT_OK(
+        FileReader::Make(pool, std::move(reader), arrow_properties, &arrow_reader));
+    auto state = std::make_shared<FileReaderGenerator>(std::move(arrow_reader),
+                                                       row_group_indices, column_indices);
     return [state]() { return (*state)(); };
   }
 
-  ::arrow::MemoryPool* pool_;
-  std::shared_ptr<::arrow::io::RandomAccessFile> source_;
-  ReaderProperties properties_;
-  ArrowReaderProperties arrow_properties_;
-  std::shared_ptr<FileMetaData> metadata_;
+  std::shared_ptr<FileReader> arrow_reader_;
   std::vector<int> row_group_indices_;
   std::vector<int> column_indices_;
   size_t index_;
@@ -1119,9 +1103,10 @@ FileReader::GetRecordBatchGenerator(std::shared_ptr<::arrow::io::RandomAccessFil
         metadata = ParquetFileReader::Open(source, properties)->metadata();
         END_PARQUET_CATCH_EXCEPTIONS
         RETURN_NOT_OK(BoundsCheck(*metadata, row_group_indices, column_indices));
-        auto reader_generator =
+        ARROW_ASSIGN_OR_RAISE(
+            auto reader_generator,
             FileReaderGenerator::Make(pool, source, metadata, row_group_indices,
-                                      column_indices, properties, arrow_properties);
+                                      column_indices, properties, arrow_properties));
         ::arrow::AsyncGenerator<
             ::arrow::AsyncGenerator<std::shared_ptr<::arrow::RecordBatch>>>
             row_group_generator = RowGroupGenerator(
