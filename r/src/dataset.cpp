@@ -395,6 +395,15 @@ std::shared_ptr<arrow::Table> dataset___Scanner__ToTable(
   return ValueOrStop(scanner->ToTable());
 }
 
+// TODO (ARROW-11782) Remove calls to Scan()
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+
 // [[dataset::export]]
 std::shared_ptr<arrow::Table> dataset___Scanner__head(
     const std::shared_ptr<ds::Scanner>& scanner, int n) {
@@ -423,6 +432,24 @@ cpp11::list dataset___Scanner__Scan(const std::shared_ptr<ds::Scanner>& scanner)
   for (auto st : it) {
     scan_task = ValueOrStop(st);
     out.push_back(scan_task);
+  }
+
+  return arrow::r::to_r_list(out);
+}
+
+#if !(defined(_WIN32) || defined(__CYGWIN__))
+#pragma GCC diagnostic pop
+#elif _MSC_VER
+#pragma warning(pop)
+#endif
+
+// [[dataset::export]]
+cpp11::list dataset___Scanner__ScanBatches(const std::shared_ptr<ds::Scanner>& scanner) {
+  auto it = ValueOrStop(scanner->ScanBatches());
+  std::vector<std::shared_ptr<arrow::RecordBatch>> out;
+  for (auto maybe_positioned_batch : it) {
+    auto positioned_batch = ValueOrStop(maybe_positioned_batch);
+    out.push_back(positioned_batch.record_batch);
   }
 
   return arrow::r::to_r_list(out);

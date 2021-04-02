@@ -110,7 +110,7 @@ Future<> VisitAsyncGenerator(AsyncGenerator<T> generator,
 /// \brief Waits for an async generator to complete, discarding results.
 template <typename T>
 Future<> DiscardAllFromAsyncGenerator(AsyncGenerator<T> generator) {
-  std::function<Status(T)> visitor = [](...) { return Status::OK(); };
+  std::function<Status(T)> visitor = [](const T& val) { return Status::OK(); };
   return VisitAsyncGenerator(generator, visitor);
 }
 
@@ -254,7 +254,6 @@ class MappingGenerator {
 /// \brief Creates a generator that will apply the map function to each element of
 /// source.  The map function is not called on the end token.
 ///
-/// Note: This function makes a copy of `map` for each item
 /// Note: Errors returned from the `map` function will be propagated
 ///
 /// If the source generator is async-reentrant then this generator will be also
@@ -278,6 +277,32 @@ template <typename T, typename V>
 AsyncGenerator<V> MakeMappedGenerator(AsyncGenerator<T> source_generator,
                                       std::function<Future<V>(const T&)> map) {
   return MappingGenerator<T, V>(std::move(source_generator), std::move(map));
+}
+template <typename T, typename MapFunc,
+          typename V = decltype(std::declval<MapFunc>()(std::declval<T>())),
+          typename E = typename std::enable_if<!V::ValueType>::type>
+AsyncGenerator<V> MakeMappedGenerator(AsyncGenerator<T> source_generator,
+                                      MapFunc map_fn) {
+  std::function<V(const T&)> map_fn_wrapper = map_fn;
+  return MakeMappedGenerator(std::move(source_generator), std::move(map_fn_wrapper));
+}
+template <typename T, typename MapFunc,
+          typename VR = decltype(std::declval<MapFunc>()(std::declval<T>())),
+          typename V = typename VR::ValueType>
+AsyncGenerator<V> MakeMappedGenerator(AsyncGenerator<T> source_generator,
+                                      MapFunc map_fn) {
+  std::function<Result<V>(const T&)> map_fn_wrapper = map_fn;
+  return MakeMappedGenerator(std::move(source_generator), std::move(map_fn_wrapper));
+}
+template <typename T, typename MapFunc,
+          typename VR = decltype(std::declval<MapFunc>()(std::declval<T>())),
+          typename V = typename VR::ValueType>
+// FIXME, find way to make this overload, need SFINAE to distinguish between Result
+// and Future (both of which have ValueType defined)
+AsyncGenerator<V> MakeMappedGeneratorAsync(AsyncGenerator<T> source_generator,
+                                           MapFunc map_fn) {
+  std::function<Future<V>(const T&)> map_fn_wrapper = map_fn;
+  return MakeMappedGenerator(std::move(source_generator), std::move(map_fn_wrapper));
 }
 
 /// \see MakeSequencingGenerator
@@ -640,6 +665,47 @@ class SerialReadaheadGenerator {
   std::shared_ptr<State> state_;
 };
 
+/// \see MakeFromFuture
+template <typename T>
+class FutureFirstGenerator {
+ public:
+  explicit FutureFirstGenerator(Future<AsyncGenerator<T>> future)
+      : state_(std::make_shared<State>(std::move(future))) {}
+
+  Future<T> operator()() {
+    if (state_->source_) {
+      return state_->source_();
+    } else {
+      auto state = state_;
+      return state_->future_.Then([state](const AsyncGenerator<T>& source) {
+        state->source_ = source;
+        return state->source_();
+      });
+    }
+  }
+
+ private:
+  struct State {
+    explicit State(Future<AsyncGenerator<T>> future) : future_(future), source_() {}
+
+    Future<AsyncGenerator<T>> future_;
+    AsyncGenerator<T> source_;
+  };
+
+  std::shared_ptr<State> state_;
+};
+
+/// \brief Transforms a Future<AsyncGenerator<T>> into an AsyncGenerator<T>
+/// that waits for the future to complete as part of the first item.
+///
+/// This generator is not async-reentrant (even if the generator yielded by future is)
+///
+/// This generator does not queue
+template <typename T>
+AsyncGenerator<T> MakeFromFuture(Future<AsyncGenerator<T>> future) {
+  return FutureFirstGenerator<T>(std::move(future));
+}
+
 /// \brief Creates a generator that will pull from the source into a queue.  Unlike
 /// MakeReadaheadGenerator this will not pull reentrantly from the source.
 ///
@@ -998,6 +1064,25 @@ class MergedGenerator {
   std::shared_ptr<State> state_;
 };
 
+/// \brief Creates a wrapper around a vector of futures to expose them as an
+/// AsyncGenerator<T>
+///
+/// This generator is async reentrant
+///
+/// This generator takes in a vector of results and queues that vector
+template <typename T>
+AsyncGenerator<T> MakeGeneratorFromFutures(const std::vector<Future<T>> futures) {
+  auto index = std::make_shared<std::size_t>(0);
+  auto futures_ptr = std::make_shared<std::vector<Future<T>>>(futures);
+  return [index, futures_ptr]() {
+    if (*index >= futures_ptr->size()) {
+      return AsyncGeneratorEnd<T>();
+    }
+    auto next_index = (*index)++;
+    return (*futures_ptr)[next_index];
+  };
+}
+
 /// \brief Creates a generator that takes in a stream of generators and pulls from up to
 /// max_subscriptions at a time
 ///
@@ -1027,6 +1112,65 @@ AsyncGenerator<T> MakeMergedGenerator(AsyncGenerator<AsyncGenerator<T>> source,
 template <typename T>
 AsyncGenerator<T> MakeConcatenatedGenerator(AsyncGenerator<AsyncGenerator<T>> source) {
   return MergedGenerator<T>(std::move(source), 1);
+}
+
+template <typename T>
+struct Enumerated {
+  util::optional<T> value;
+  int index;
+  bool last;
+};
+
+template <typename T>
+struct IterationTraits<Enumerated<T>> {
+  static Enumerated<T> End() { return Enumerated<T>{{}, -1, false}; }
+  static bool IsEnd(const Enumerated<T>& val) { return !val.value.has_value(); }
+};
+
+template <typename T>
+class EnumeratingGenerator {
+ public:
+  EnumeratingGenerator(AsyncGenerator<T> source, T initial_value)
+      : state_(std::make_shared<State>(std::move(source), std::move(initial_value))) {}
+
+  Future<Enumerated<T>> operator()() {
+    if (state_->finished) {
+      return AsyncGeneratorEnd<Enumerated<T>>();
+    } else {
+      auto state = state_;
+      return state->source().Then([state](const T& next) {
+        auto finished = IsIterationEnd<T>(next);
+        auto prev = Enumerated<T>{state->prev_value, state->prev_index, finished};
+        state->prev_value = next;
+        state->prev_index++;
+        state->finished = finished;
+        return prev;
+      });
+    }
+  }
+
+ private:
+  struct State {
+    State(AsyncGenerator<T> source, T initial_value)
+        : source(std::move(source)), prev_value(std::move(initial_value)), prev_index(0) {
+      finished = IsIterationEnd<T>(prev_value);
+    }
+
+    AsyncGenerator<T> source;
+    T prev_value;
+    int prev_index;
+    bool finished;
+  };
+
+  std::shared_ptr<State> state_;
+};
+
+template <typename T>
+AsyncGenerator<Enumerated<T>> MakeEnumeratedGenerator(AsyncGenerator<T> source) {
+  return FutureFirstGenerator<Enumerated<T>>(
+      source().Then([source](const T& initial_value) -> AsyncGenerator<Enumerated<T>> {
+        return EnumeratingGenerator<T>(std::move(source), initial_value);
+      }));
 }
 
 /// \see MakeTransferredGenerator
