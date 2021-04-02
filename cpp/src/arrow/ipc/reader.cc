@@ -992,7 +992,8 @@ static Future<std::shared_ptr<Message>> ReadMessageFromBlockAsync(
   // TODO(wesm): this breaks integration tests, see ARROW-3256
   // DCHECK_EQ((*out)->body_length(), block.body_length);
 
-  return ReadMessageAsync(block.offset, block.metadata_length, file, io_context);
+  return ReadMessageAsync(block.offset, block.metadata_length, block.body_length, file,
+                          io_context);
 }
 
 static Status ReadOneDictionary(Message* message, const IpcReadContext& context) {
