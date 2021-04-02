@@ -179,16 +179,14 @@ class PARQUET_EXPORT FileReader {
 
   /// \brief Return a generator of record batches.
   ///
+  /// The FileReader must outlive the generator.
+  ///
   /// \returns error Result if either row_group_indices or column_indices contains an
   ///     invalid index
-  static ::arrow::Result<::arrow::AsyncGenerator<std::shared_ptr<::arrow::RecordBatch>>>
-  GetRecordBatchGenerator(
-      std::shared_ptr<::arrow::io::RandomAccessFile> source,
-      const std::vector<int> row_group_indices, const std::vector<int> column_indices,
-      ::arrow::MemoryPool* pool = ::arrow::default_memory_pool(),
-      const ReaderProperties properties = default_reader_properties(),
-      const ArrowReaderProperties arrow_properties = default_arrow_reader_properties(),
-      ::arrow::internal::Executor* executor = NULLPTR);
+  virtual ::arrow::Result<::arrow::AsyncGenerator<std::shared_ptr<::arrow::RecordBatch>>>
+  GetRecordBatchGenerator(const std::vector<int> row_group_indices,
+                          const std::vector<int> column_indices,
+                          ::arrow::internal::Executor* executor = NULLPTR) = 0;
 
   ::arrow::Status GetRecordBatchReader(const std::vector<int>& row_group_indices,
                                        const std::vector<int>& column_indices,

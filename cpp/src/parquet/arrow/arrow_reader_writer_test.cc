@@ -2357,8 +2357,7 @@ TEST(TestArrowReadWrite, GetRecordBatchGenerator) {
   };
   {
     ASSERT_OK_AND_ASSIGN(auto batch_generator,
-                         arrow::FileReader::GetRecordBatchGenerator(
-                             std::make_shared<BufferReader>(buffer), {0, 1}, {0, 1}));
+                         reader->GetRecordBatchGenerator({0, 1}, {0, 1}));
     auto fut1 = batch_generator();
     auto fut2 = batch_generator();
     auto fut3 = batch_generator();
@@ -2372,8 +2371,7 @@ TEST(TestArrowReadWrite, GetRecordBatchGenerator) {
   {
     // No columns case
     ASSERT_OK_AND_ASSIGN(auto batch_generator,
-                         arrow::FileReader::GetRecordBatchGenerator(
-                             std::make_shared<BufferReader>(buffer), {0, 1}, {}));
+                         reader->GetRecordBatchGenerator({0, 1}, {0, 1}));
     auto fut1 = batch_generator();
     auto fut2 = batch_generator();
     auto fut3 = batch_generator();
