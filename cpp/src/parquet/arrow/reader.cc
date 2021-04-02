@@ -1060,8 +1060,9 @@ FileReaderImpl::GetRecordBatchGenerator(const std::vector<int> row_group_indices
   RETURN_NOT_OK(BoundsCheck(row_group_indices, column_indices));
   if (reader_properties_.pre_buffer()) {
     BEGIN_PARQUET_CATCH_EXCEPTIONS
-    reader_->PreBuffer(row_group_indices, column_indices, reader_properties_.io_context(),
-                       reader_properties_.cache_options());
+    ARROW_UNUSED(reader_->PreBuffer(row_group_indices, column_indices,
+                                    reader_properties_.io_context(),
+                                    reader_properties_.cache_options()));
     END_PARQUET_CATCH_EXCEPTIONS
   }
   ::arrow::AsyncGenerator<::arrow::AsyncGenerator<std::shared_ptr<::arrow::RecordBatch>>>
