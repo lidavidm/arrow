@@ -54,21 +54,14 @@ using parquet::arrow::StatisticsAsScalars;
 /// \brief A ScanTask backed by a parquet file and a RowGroup within a parquet file.
 class ParquetScanTask : public ScanTask {
  public:
-  ParquetScanTask(int row_group, std::vector<int> column_projection,
+  ParquetScanTask(std::vector<int> row_groups, std::vector<int> column_projection,
                   std::shared_ptr<parquet::arrow::FileReader> reader,
-                  std::shared_ptr<std::once_flag> pre_buffer_once,
-                  std::vector<int> pre_buffer_row_groups, arrow::io::IOContext io_context,
-                  arrow::io::CacheOptions cache_options,
                   std::shared_ptr<ScanOptions> options,
                   std::shared_ptr<Fragment> fragment)
       : ScanTask(std::move(options), std::move(fragment)),
-        row_group_(row_group),
+        row_groups_(row_groups),
         column_projection_(std::move(column_projection)),
-        reader_(std::move(reader)),
-        pre_buffer_once_(std::move(pre_buffer_once)),
-        pre_buffer_row_groups_(std::move(pre_buffer_row_groups)),
-        io_context_(io_context),
-        cache_options_(cache_options) {}
+        reader_(std::move(reader)) {}
 
   Result<RecordBatchGenerator> ExecuteAsync() override {
     // The construction of parquet's RecordBatchReader is deferred here to
@@ -78,56 +71,25 @@ class ParquetScanTask : public ScanTask {
     // The memory and IO incurred by the RecordBatchReader is allocated only
     // when Execute is called.
     struct GetNextBatch {
-      Result<std::shared_ptr<RecordBatch>> operator()() const {
-        return record_batch_reader->Next();
+      Future<std::shared_ptr<RecordBatch>> operator()() {
+        return generator();
       }
 
-      // The RecordBatchIterator must hold a reference to the FileReader;
+      // The generator must hold a reference to the FileReader;
       // since it must outlive the wrapped RecordBatchReader
       std::shared_ptr<parquet::arrow::FileReader> file_reader;
-      std::unique_ptr<RecordBatchReader> record_batch_reader;
+      RecordBatchGenerator generator;
     };
     auto next_batch = std::make_shared<GetNextBatch>();
-
-    RETURN_NOT_OK(EnsurePreBuffered());
     next_batch->file_reader = reader_;
-    RETURN_NOT_OK(reader_->GetRecordBatchReader({row_group_}, column_projection_,
-                                                &next_batch->record_batch_reader));
-    // TODO(ARROW-11843)
-    RecordBatchGenerator batch_generator = [next_batch]() { return (*next_batch)(); };
-    return batch_generator;
-  }
-
-  // Ensure that pre-buffering has been applied to the underlying Parquet reader
-  // exactly once (if needed). If we instead set pre_buffer on in the Arrow
-  // reader properties, each scan task will try to separately pre-buffer, which
-  // will lead to crashes as they trample the Parquet file reader's internal
-  // state. Instead, pre-buffer once at the file level. This also has the
-  // advantage that we can coalesce reads across row groups.
-  Status EnsurePreBuffered() {
-    if (pre_buffer_once_) {
-      BEGIN_PARQUET_CATCH_EXCEPTIONS
-      std::call_once(*pre_buffer_once_, [this]() {
-        // Ignore the future here - don't wait for pre-buffering (the reader itself will
-        // block as necessary)
-        ARROW_UNUSED(reader_->parquet_reader()->PreBuffer(
-            pre_buffer_row_groups_, column_projection_, io_context_, cache_options_));
-      });
-      END_PARQUET_CATCH_EXCEPTIONS
-    }
-    return Status::OK();
+    ARROW_ASSIGN_OR_RAISE(next_batch->generator, reader_->GetRecordBatchGenerator(row_groups_, column_projection_));
+    return [next_batch]() { return (*next_batch)(); };
   }
 
  private:
-  int row_group_;
+  std::vector<int> row_groups_;
   std::vector<int> column_projection_;
   std::shared_ptr<parquet::arrow::FileReader> reader_;
-  // Pre-buffering state. pre_buffer_once will be nullptr if no pre-buffering is
-  // to be done. We assume all scan tasks have the same column projection.
-  std::shared_ptr<std::once_flag> pre_buffer_once_;
-  std::vector<int> pre_buffer_row_groups_;
-  arrow::io::IOContext io_context_;
-  arrow::io::CacheOptions cache_options_;
 };
 
 static parquet::ReaderProperties MakeReaderProperties(
@@ -149,6 +111,9 @@ static parquet::ArrowReaderProperties MakeArrowReaderProperties(
   for (const std::string& name : format.reader_options.dict_columns) {
     auto column_index = metadata.schema()->ColumnIndex(name);
     properties.set_read_dictionary(column_index, true);
+  }
+  if (format.reader_options.pre_buffer) {
+    properties.set_pre_buffer(true);
   }
   return properties;
 }
@@ -357,20 +322,9 @@ Future<ScanTaskVector> ParquetFileFormat::ScanFile(
   }
 
   auto column_projection = InferColumnProjection(*reader, *options);
-  ScanTaskVector tasks(row_groups.size());
-
-  std::shared_ptr<std::once_flag> pre_buffer_once = nullptr;
-  if (reader_options.pre_buffer) {
-    pre_buffer_once = std::make_shared<std::once_flag>();
-  }
-
-  for (size_t i = 0; i < row_groups.size(); ++i) {
-    tasks[i] = std::make_shared<ParquetScanTask>(
-        row_groups[i], column_projection, reader, pre_buffer_once, row_groups,
-        reader_options.io_context, reader_options.cache_options, options, fragment);
-  }
-
-  return Future<ScanTaskVector>::MakeFinished(std::move(tasks));
+  auto task = std::make_shared<ParquetScanTask>(
+      std::move(row_groups), std::move(column_projection), reader, options, fragment);
+  return Future<ScanTaskVector>::MakeFinished(ScanTaskVector{task});
 }
 
 Result<std::shared_ptr<ParquetFileFragment>> ParquetFileFormat::MakeFragment(
