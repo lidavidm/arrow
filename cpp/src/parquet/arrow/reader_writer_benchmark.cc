@@ -567,7 +567,7 @@ static void BM_ReadMultipleRowGroupsGenerator(::benchmark::State& state) {
                         std::make_shared<::arrow::io::BufferReader>(buffer), rgs, {0}));
     auto fut = ::arrow::CollectAsyncGenerator(generator);
     ASSIGN_OR_ABORT(auto batches, fut.result());
-    ASSIGN_OR_ABORT(auto table, ::arrow::Table::FromRecordBatches(std::move(batches)));
+    ASSIGN_OR_ABORT(auto actual, ::arrow::Table::FromRecordBatches(std::move(batches)));
   }
   SetBytesProcessed<true, Int64Type>(state);
 }
