@@ -1120,9 +1120,8 @@ class RecordBatchFileReaderImpl : public RecordBatchFileReader {
     if (readahead_messages > 0) {
       message_generator = MakeReadaheadGenerator(message_generator, readahead_messages);
     }
-    return IpcFileRecordBatchGenerator(
-        std::move(state), std::move(message_generator),
-        executor ? executor : arrow::internal::GetCpuThreadPool());
+    return IpcFileRecordBatchGenerator(std::move(state), std::move(message_generator),
+                                       executor);
   }
 
  private:
@@ -1294,16 +1293,17 @@ Future<IpcFileRecordBatchGenerator::Item> IpcFileRecordBatchGenerator::operator(
     for (int i = 0; i < state->num_dictionaries(); i++) {
       messages[i] = message_generator();
     }
-    read_dictionaries_ =
-        executor_->Transfer(All(std::move(messages)))
-            .Then([=](const std::vector<Result<std::shared_ptr<Message>>> maybe_messages)
-                      -> Result<std::shared_ptr<Message>> {
-              std::vector<std::shared_ptr<Message>> messages(state->num_dictionaries());
-              for (size_t i = 0; i < messages.size(); i++) {
-                ARROW_ASSIGN_OR_RAISE(messages[i], maybe_messages[i]);
-              }
-              return ReadDictionaries(state.get(), std::move(messages));
-            });
+    auto read_messages = All(std::move(messages));
+    if (executor_) read_messages = executor_->Transfer(read_messages);
+    read_dictionaries_ = read_messages.Then(
+        [=](const std::vector<Result<std::shared_ptr<Message>>> maybe_messages)
+            -> Result<std::shared_ptr<Message>> {
+          std::vector<std::shared_ptr<Message>> messages(state->num_dictionaries());
+          for (size_t i = 0; i < messages.size(); i++) {
+            ARROW_ASSIGN_OR_RAISE(messages[i], maybe_messages[i]);
+          }
+          return ReadDictionaries(state.get(), std::move(messages));
+        });
   }
   if (index_ >= state_->num_record_batches()) {
     return Future<Item>::MakeFinished(IterationTraits<Item>::End());
@@ -1311,9 +1311,11 @@ Future<IpcFileRecordBatchGenerator::Item> IpcFileRecordBatchGenerator::operator(
   index_++;
   std::vector<Future<std::shared_ptr<Message>>> dependencies{read_dictionaries_,
                                                              message_generator()};
-  return executor_->Transfer(All(dependencies))
-      .Then([=](const std::vector<Result<std::shared_ptr<Message>>> maybe_messages)
-                -> Result<Item> {
+  auto read_messages = All(dependencies);
+  if (executor_) read_messages = executor_->Transfer(read_messages);
+  return read_messages.Then(
+      [=](const std::vector<Result<std::shared_ptr<Message>>> maybe_messages)
+          -> Result<Item> {
         RETURN_NOT_OK(maybe_messages[0]);  // Make sure dictionaries were read
         ARROW_ASSIGN_OR_RAISE(auto message, maybe_messages[1]);
         return ReadRecordBatch(state.get(), message.get());
