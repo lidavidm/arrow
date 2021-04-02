@@ -1051,10 +1051,13 @@ class RowGroupGenerator {
     // Always spawn CPU work on the CPU pool instead of doing it synchronously in the case
     // that the I/O future has already completed
     return reader_generator_().Then([=](std::shared_ptr<FileReader> reader) {
-      return ::arrow::DeferNotOk(executor->Submit([=]() -> ::arrow::Result<Item> {
-        auto self = static_cast<FileReaderImpl*>(reader.get());
-        return ReadOneRowGroup(self, row_group, column_indices);
-      }));
+      auto self = static_cast<FileReaderImpl*>(reader.get());
+      if (!executor) {
+        return Future<Item>::MakeFinished(
+            ReadOneRowGroup(self, row_group, column_indices));
+      }
+      return ::arrow::DeferNotOk(
+          executor->Submit(ReadOneRowGroup, self, row_group, column_indices));
     });
   }
 
@@ -1109,10 +1112,8 @@ FileReader::GetRecordBatchGenerator(std::shared_ptr<::arrow::io::RandomAccessFil
                                       column_indices, properties, arrow_properties));
         ::arrow::AsyncGenerator<
             ::arrow::AsyncGenerator<std::shared_ptr<::arrow::RecordBatch>>>
-            row_group_generator = RowGroupGenerator(
-                std::move(reader_generator),
-                executor ? executor : ::arrow::internal::GetCpuThreadPool(),
-                row_group_indices, column_indices);
+            row_group_generator = RowGroupGenerator(std::move(reader_generator), executor,
+                                                    row_group_indices, column_indices);
         return ::arrow::MakeConcatenatedGenerator(row_group_generator);
       });
   return ::arrow::DeferNotOk(future).result();
