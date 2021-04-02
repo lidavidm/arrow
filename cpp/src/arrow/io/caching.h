@@ -103,6 +103,9 @@ class ARROW_EXPORT ReadRangeCache {
   /// \brief Wait until all ranges added so far have been cached.
   Future<> Wait();
 
+  /// \brief Wait until all given ranges have been cached.
+  Future<> WaitFor(std::vector<ReadRange> ranges);
+
  protected:
   struct Impl;
   std::unique_ptr<Impl> impl_;
