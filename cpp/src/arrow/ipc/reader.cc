@@ -1287,11 +1287,10 @@ AsyncGenerator<std::shared_ptr<Message>> MakeMessageGenerator(
 
 Future<IpcFileRecordBatchGenerator::Item> IpcFileRecordBatchGenerator::operator()() {
   auto state = state_;
-  auto message_generator = message_generator_;
   if (!read_dictionaries_.is_valid()) {
     std::vector<Future<std::shared_ptr<Message>>> messages(state->num_dictionaries());
     for (int i = 0; i < state->num_dictionaries(); i++) {
-      messages[i] = message_generator();
+      messages[i] = message_generator_();
     }
     auto read_messages = All(std::move(messages));
     if (executor_) read_messages = executor_->Transfer(read_messages);
@@ -1310,7 +1309,7 @@ Future<IpcFileRecordBatchGenerator::Item> IpcFileRecordBatchGenerator::operator(
   }
   index_++;
   std::vector<Future<std::shared_ptr<Message>>> dependencies{read_dictionaries_,
-                                                             message_generator()};
+                                                             message_generator_()};
   auto read_messages = All(dependencies);
   if (executor_) read_messages = executor_->Transfer(read_messages);
   return read_messages.Then(
