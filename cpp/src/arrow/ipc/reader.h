@@ -149,6 +149,26 @@ class ARROW_EXPORT RecordBatchFileReader
       const std::shared_ptr<io::RandomAccessFile>& file, int64_t footer_offset,
       const IpcReadOptions& options = IpcReadOptions::Defaults());
 
+  /// \brief Open a file asynchronously (owns the file).
+  static Future<std::shared_ptr<RecordBatchFileReader>> OpenAsync(
+      const std::shared_ptr<io::RandomAccessFile>& file,
+      const IpcReadOptions& options = IpcReadOptions::Defaults());
+
+  /// \brief Open a file asynchronously (borrows the file).
+  static Future<std::shared_ptr<RecordBatchFileReader>> OpenAsync(
+      io::RandomAccessFile* file,
+      const IpcReadOptions& options = IpcReadOptions::Defaults());
+
+  /// \brief Open a file asynchronously (owns the file).
+  static Future<std::shared_ptr<RecordBatchFileReader>> OpenAsync(
+      const std::shared_ptr<io::RandomAccessFile>& file, int64_t footer_offset,
+      const IpcReadOptions& options = IpcReadOptions::Defaults());
+
+  /// \brief Open a file asynchronously (borrows the file).
+  static Future<std::shared_ptr<RecordBatchFileReader>> OpenAsync(
+      io::RandomAccessFile* file, int64_t footer_offset,
+      const IpcReadOptions& options = IpcReadOptions::Defaults());
+
   /// \brief The schema read from the file
   virtual std::shared_ptr<Schema> schema() const = 0;
 
