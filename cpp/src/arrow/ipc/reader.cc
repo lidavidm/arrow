@@ -1098,6 +1098,30 @@ class RecordBatchFileReaderImpl : public RecordBatchFileReader {
     return Status::OK();
   }
 
+  Future<> OpenAsync(const std::shared_ptr<io::RandomAccessFile>& file,
+                     int64_t footer_offset, const IpcReadOptions& options) {
+    owned_file_ = file;
+    return OpenAsync(file.get(), footer_offset, options);
+  }
+
+  Future<> OpenAsync(io::RandomAccessFile* file, int64_t footer_offset,
+                     const IpcReadOptions& options) {
+    file_ = file;
+    options_ = options;
+    footer_offset_ = footer_offset;
+    auto cpu_executor = ::arrow::internal::GetCpuThreadPool();
+    auto self = std::dynamic_pointer_cast<RecordBatchFileReaderImpl>(shared_from_this());
+    return ReadFooterAsync(cpu_executor)
+        .Then([self, options](...) -> Result<detail::Empty> {
+          // Get the schema and record any observed dictionaries
+          RETURN_NOT_OK(UnpackSchemaMessage(
+              self->footer_->schema(), options, &self->dictionary_memo_, &self->schema_,
+              &self->out_schema_, &self->field_inclusion_mask_, &self->swap_endian_));
+          ++self->stats_.num_messages;
+          return detail::Empty();
+        });
+  }
+
   std::shared_ptr<Schema> schema() const override { return out_schema_; }
 
   std::shared_ptr<const KeyValueMetadata> metadata() const override { return metadata_; }
@@ -1141,6 +1165,11 @@ class RecordBatchFileReaderImpl : public RecordBatchFileReader {
   }
 
   Status ReadFooter() {
+    auto fut = ReadFooterAsync(/*executor=*/nullptr);
+    return fut.status();
+  }
+
+  Future<> ReadFooterAsync(arrow::internal::Executor* executor) {
     const int32_t magic_size = static_cast<int>(strlen(kArrowMagicBytes));
 
     if (footer_offset_ <= magic_size * 2 + 4) {
@@ -1148,45 +1177,53 @@ class RecordBatchFileReaderImpl : public RecordBatchFileReader {
     }
 
     int file_end_size = static_cast<int>(magic_size + sizeof(int32_t));
-    ARROW_ASSIGN_OR_RAISE(auto buffer,
-                          file_->ReadAt(footer_offset_ - file_end_size, file_end_size));
+    auto self = std::dynamic_pointer_cast<RecordBatchFileReaderImpl>(shared_from_this());
+    auto read_magic = file_->ReadAsync(footer_offset_ - file_end_size, file_end_size);
+    if (executor) read_magic = executor->Transfer(std::move(read_magic));
+    return read_magic
+        .Then([=](const std::shared_ptr<Buffer>& buffer)
+                  -> Future<std::shared_ptr<Buffer>> {
+          const int64_t expected_footer_size = magic_size + sizeof(int32_t);
+          if (buffer->size() < expected_footer_size) {
+            return Status::Invalid("Unable to read ", expected_footer_size,
+                                   "from end of file");
+          }
 
-    const int64_t expected_footer_size = magic_size + sizeof(int32_t);
-    if (buffer->size() < expected_footer_size) {
-      return Status::Invalid("Unable to read ", expected_footer_size, "from end of file");
-    }
+          if (memcmp(buffer->data() + sizeof(int32_t), kArrowMagicBytes, magic_size)) {
+            return Status::Invalid("Not an Arrow file");
+          }
 
-    if (memcmp(buffer->data() + sizeof(int32_t), kArrowMagicBytes, magic_size)) {
-      return Status::Invalid("Not an Arrow file");
-    }
+          int32_t footer_length = BitUtil::FromLittleEndian(
+              *reinterpret_cast<const int32_t*>(buffer->data()));
 
-    int32_t footer_length =
-        BitUtil::FromLittleEndian(*reinterpret_cast<const int32_t*>(buffer->data()));
+          if (footer_length <= 0 ||
+              footer_length > self->footer_offset_ - magic_size * 2 - 4) {
+            return Status::Invalid("File is smaller than indicated metadata size");
+          }
 
-    if (footer_length <= 0 || footer_length > footer_offset_ - magic_size * 2 - 4) {
-      return Status::Invalid("File is smaller than indicated metadata size");
-    }
+          // Now read the footer
+          auto read_footer = self->file_->ReadAsync(
+              self->footer_offset_ - footer_length - file_end_size, footer_length);
+          if (executor) read_footer = executor->Transfer(std::move(read_footer));
+          return read_footer;
+        })
+        .Then([=](const std::shared_ptr<Buffer>& buffer) -> Result<detail::Empty> {
+          self->footer_buffer_ = buffer;
+          const auto data = self->footer_buffer_->data();
+          const auto size = self->footer_buffer_->size();
+          if (!internal::VerifyFlatbuffers<flatbuf::Footer>(data, size)) {
+            return Status::IOError("Verification of flatbuffer-encoded Footer failed.");
+          }
+          self->footer_ = flatbuf::GetFooter(data);
 
-    // Now read the footer
-    ARROW_ASSIGN_OR_RAISE(
-        footer_buffer_,
-        file_->ReadAt(footer_offset_ - footer_length - file_end_size, footer_length));
-
-    const auto data = footer_buffer_->data();
-    const auto size = footer_buffer_->size();
-    if (!internal::VerifyFlatbuffers<flatbuf::Footer>(data, size)) {
-      return Status::IOError("Verification of flatbuffer-encoded Footer failed.");
-    }
-    footer_ = flatbuf::GetFooter(data);
-
-    auto fb_metadata = footer_->custom_metadata();
-    if (fb_metadata != nullptr) {
-      std::shared_ptr<KeyValueMetadata> md;
-      RETURN_NOT_OK(internal::GetKeyValueMetadata(fb_metadata, &md));
-      metadata_ = std::move(md);  // const-ify
-    }
-
-    return Status::OK();
+          auto fb_metadata = self->footer_->custom_metadata();
+          if (fb_metadata != nullptr) {
+            std::shared_ptr<KeyValueMetadata> md;
+            RETURN_NOT_OK(internal::GetKeyValueMetadata(fb_metadata, &md));
+            self->metadata_ = std::move(md);  // const-ify
+          }
+          return detail::Empty();
+        });
   }
 
   int num_dictionaries() const {
@@ -1246,6 +1283,35 @@ Result<std::shared_ptr<RecordBatchFileReader>> RecordBatchFileReader::Open(
   auto result = std::make_shared<RecordBatchFileReaderImpl>();
   RETURN_NOT_OK(result->Open(file, footer_offset, options));
   return result;
+}
+
+Future<std::shared_ptr<RecordBatchFileReader>> RecordBatchFileReader::OpenAsync(
+    const std::shared_ptr<io::RandomAccessFile>& file, const IpcReadOptions& options) {
+  ARROW_ASSIGN_OR_RAISE(int64_t footer_offset, file->GetSize());
+  return OpenAsync(std::move(file), footer_offset, options);
+}
+
+Future<std::shared_ptr<RecordBatchFileReader>> RecordBatchFileReader::OpenAsync(
+    io::RandomAccessFile* file, const IpcReadOptions& options) {
+  ARROW_ASSIGN_OR_RAISE(int64_t footer_offset, file->GetSize());
+  return OpenAsync(file, footer_offset, options);
+}
+
+Future<std::shared_ptr<RecordBatchFileReader>> RecordBatchFileReader::OpenAsync(
+    const std::shared_ptr<io::RandomAccessFile>& file, int64_t footer_offset,
+    const IpcReadOptions& options) {
+  auto result = std::make_shared<RecordBatchFileReaderImpl>();
+  return result->OpenAsync(file, footer_offset, options)
+      .Then(
+          [=](...) -> Result<std::shared_ptr<RecordBatchFileReader>> { return result; });
+}
+
+Future<std::shared_ptr<RecordBatchFileReader>> RecordBatchFileReader::OpenAsync(
+    io::RandomAccessFile* file, int64_t footer_offset, const IpcReadOptions& options) {
+  auto result = std::make_shared<RecordBatchFileReaderImpl>();
+  return result->OpenAsync(file, footer_offset, options)
+      .Then(
+          [=](...) -> Result<std::shared_ptr<RecordBatchFileReader>> { return result; });
 }
 
 Future<IpcFileRecordBatchGenerator::Item> IpcFileRecordBatchGenerator::operator()() {

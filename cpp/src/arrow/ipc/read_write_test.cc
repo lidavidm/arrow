@@ -1017,21 +1017,27 @@ struct FileGeneratorWriterHelper : public FileWriterHelper {
     AsyncGenerator<std::shared_ptr<RecordBatch>> generator;
 
     {
-      ARROW_ASSIGN_OR_RAISE(auto reader, RecordBatchFileReader::Open(
-                                             buf_reader.get(), footer_offset_, options));
+      auto fut =
+          RecordBatchFileReader::OpenAsync(buf_reader.get(), footer_offset_, options);
+      RETURN_NOT_OK(fut.status());
+      EXPECT_FINISHES_OK_AND_ASSIGN(auto reader, fut);
       EXPECT_EQ(num_batches_written_, reader->num_record_batches());
       // Generator's lifetime is independent of the reader's
       ARROW_ASSIGN_OR_RAISE(generator, reader->GetRecordBatchGenerator());
     }
 
+    // Generator is async-reentrant
+    std::vector<Future<std::shared_ptr<RecordBatch>>> futures;
     for (int i = 0; i < num_batches_written_; ++i) {
-      auto future = generator();
-      EXPECT_FINISHES_OK_AND_ASSIGN(auto batch, future);
-      out_batches->push_back(batch);
+      futures.push_back(generator());
     }
     auto fut = generator();
     EXPECT_FINISHES_OK_AND_ASSIGN(auto extra_read, fut);
     EXPECT_EQ(nullptr, extra_read);
+    for (auto& future : futures) {
+      EXPECT_FINISHES_OK_AND_ASSIGN(auto batch, future);
+      out_batches->push_back(batch);
+    }
 
     // The generator doesn't track stats.
     EXPECT_EQ(nullptr, out_stats);
