@@ -1111,15 +1111,14 @@ class RecordBatchFileReaderImpl : public RecordBatchFileReader {
     footer_offset_ = footer_offset;
     auto cpu_executor = ::arrow::internal::GetCpuThreadPool();
     auto self = std::dynamic_pointer_cast<RecordBatchFileReaderImpl>(shared_from_this());
-    return ReadFooterAsync(cpu_executor)
-        .Then([self, options](...) -> Result<detail::Empty> {
-          // Get the schema and record any observed dictionaries
-          RETURN_NOT_OK(UnpackSchemaMessage(
-              self->footer_->schema(), options, &self->dictionary_memo_, &self->schema_,
-              &self->out_schema_, &self->field_inclusion_mask_, &self->swap_endian_));
-          ++self->stats_.num_messages;
-          return detail::Empty();
-        });
+    return ReadFooterAsync(cpu_executor).Then([self, options](...) -> Status {
+      // Get the schema and record any observed dictionaries
+      RETURN_NOT_OK(UnpackSchemaMessage(
+          self->footer_->schema(), options, &self->dictionary_memo_, &self->schema_,
+          &self->out_schema_, &self->field_inclusion_mask_, &self->swap_endian_));
+      ++self->stats_.num_messages;
+      return Status::OK();
+    });
   }
 
   std::shared_ptr<Schema> schema() const override { return out_schema_; }
@@ -1207,7 +1206,7 @@ class RecordBatchFileReaderImpl : public RecordBatchFileReader {
           if (executor) read_footer = executor->Transfer(std::move(read_footer));
           return read_footer;
         })
-        .Then([=](const std::shared_ptr<Buffer>& buffer) -> Result<detail::Empty> {
+        .Then([=](const std::shared_ptr<Buffer>& buffer) -> Status {
           self->footer_buffer_ = buffer;
           const auto data = self->footer_buffer_->data();
           const auto size = self->footer_buffer_->size();
@@ -1222,7 +1221,7 @@ class RecordBatchFileReaderImpl : public RecordBatchFileReader {
             RETURN_NOT_OK(internal::GetKeyValueMetadata(fb_metadata, &md));
             self->metadata_ = std::move(md);  // const-ify
           }
-          return detail::Empty();
+          return Status::OK();
         });
   }
 
