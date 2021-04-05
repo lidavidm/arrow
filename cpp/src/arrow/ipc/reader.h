@@ -149,6 +149,26 @@ class ARROW_EXPORT RecordBatchFileReader
       const std::shared_ptr<io::RandomAccessFile>& file, int64_t footer_offset,
       const IpcReadOptions& options = IpcReadOptions::Defaults());
 
+  /// \brief Open a file asynchronously (owns the file).
+  static Future<std::shared_ptr<RecordBatchFileReader>> OpenAsync(
+      const std::shared_ptr<io::RandomAccessFile>& file,
+      const IpcReadOptions& options = IpcReadOptions::Defaults());
+
+  /// \brief Open a file asynchronously (borrows the file).
+  static Future<std::shared_ptr<RecordBatchFileReader>> OpenAsync(
+      io::RandomAccessFile* file,
+      const IpcReadOptions& options = IpcReadOptions::Defaults());
+
+  /// \brief Open a file asynchronously (owns the file).
+  static Future<std::shared_ptr<RecordBatchFileReader>> OpenAsync(
+      const std::shared_ptr<io::RandomAccessFile>& file, int64_t footer_offset,
+      const IpcReadOptions& options = IpcReadOptions::Defaults());
+
+  /// \brief Open a file asynchronously (borrows the file).
+  static Future<std::shared_ptr<RecordBatchFileReader>> OpenAsync(
+      io::RandomAccessFile* file, int64_t footer_offset,
+      const IpcReadOptions& options = IpcReadOptions::Defaults());
+
   /// \brief The schema read from the file
   virtual std::shared_ptr<Schema> schema() const = 0;
 
@@ -174,14 +194,12 @@ class ARROW_EXPORT RecordBatchFileReader
 
   /// \brief Get a reentrant generator of record batches.
   ///
-  /// \param[in] readahead_messages The number of messages to read ahead.
   /// \param[in] io_context The IOContext to use (controls which thread pool
   ///     is used for I/O).
   /// \param[in] executor Optionally, an executor to use for decoding record
   ///     batches. This is generally only a benefit for very wide and/or
   ///     compressed batches.
   virtual Result<AsyncGenerator<std::shared_ptr<RecordBatch>>> GetRecordBatchGenerator(
-      int readahead_messages = 0,
       const io::IOContext& io_context = io::default_io_context(),
       arrow::internal::Executor* executor = NULLPTR) = 0;
 };
