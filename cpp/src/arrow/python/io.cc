@@ -26,6 +26,7 @@
 #include "arrow/io/memory.h"
 #include "arrow/memory_pool.h"
 #include "arrow/status.h"
+#include "arrow/util/future.h"
 #include "arrow/util/logging.h"
 
 #include "arrow/python/common.h"
@@ -263,6 +264,14 @@ Result<std::shared_ptr<Buffer>> PyReadableFile::ReadAt(int64_t position, int64_t
     RETURN_NOT_OK(Seek(position));
     return Read(nbytes);
   });
+}
+
+Future<std::shared_ptr<Buffer>> PyReadableFile::ReadAsync(const io::IOContext&,
+                                                          int64_t position,
+                                                          int64_t nbytes) {
+  // Can't use a thread because we may deadlock over the GIL if the caller of ReadAsync
+  // is holding it
+  return ReadAt(position, nbytes);
 }
 
 Result<int64_t> PyReadableFile::GetSize() {

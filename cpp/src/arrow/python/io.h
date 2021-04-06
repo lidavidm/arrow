@@ -48,6 +48,9 @@ class ARROW_PYTHON_EXPORT PyReadableFile : public io::RandomAccessFile {
   // Thread-safe version
   Result<std::shared_ptr<Buffer>> ReadAt(int64_t position, int64_t nbytes) override;
 
+  Future<std::shared_ptr<Buffer>> ReadAsync(const io::IOContext&, int64_t position,
+                                            int64_t nbytes) override;
+
   Result<int64_t> GetSize() override;
 
   Status Seek(int64_t position) override;
