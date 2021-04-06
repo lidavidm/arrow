@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -33,7 +34,7 @@ namespace io {
 
 CacheOptions CacheOptions::Defaults() {
   return CacheOptions{internal::ReadRangeCache::kDefaultHoleSizeLimit,
-                      internal::ReadRangeCache::kDefaultRangeSizeLimit};
+                      internal::ReadRangeCache::kDefaultRangeSizeLimit, false};
 }
 
 CacheOptions CacheOptions::MakeFromNetworkMetrics(int64_t time_to_first_byte_millis,
@@ -117,7 +118,7 @@ CacheOptions CacheOptions::MakeFromNetworkMetrics(int64_t time_to_first_byte_mil
                                       (1 - ideal_bandwidth_utilization_frac))));
   DCHECK_GT(range_size_limit, 0) << "Computed range_size_limit must be > 0";
 
-  return {hole_size_limit, range_size_limit};
+  return {hole_size_limit, range_size_limit, false};
 }
 
 namespace internal {
@@ -150,11 +151,42 @@ struct ReadRangeCache::Impl {
       entries = std::move(new_entries);
     }
   }
+
+  virtual std::unique_lock<std::mutex> TakeGuard() {
+    return std::unique_lock<std::mutex>();
+  }
+
+  virtual Future<std::shared_ptr<Buffer>> GetFuture(RangeCacheEntry* entry) {
+    return entry->future;
+  }
+
+  virtual RangeCacheEntry Cache(const ReadRange& range) {
+    return {range, file->ReadAsync(ctx, range.offset, range.length)};
+  }
+};
+
+struct ReadRangeCache::LazyImpl : public ReadRangeCache::Impl {
+  std::mutex entry_mutex;
+
+  std::unique_lock<std::mutex> TakeGuard() override {
+    return std::unique_lock<std::mutex>(entry_mutex);
+  }
+
+  Future<std::shared_ptr<Buffer>> GetFuture(RangeCacheEntry* entry) override {
+    if (!entry->future.is_valid()) {
+      entry->future = file->ReadAsync(ctx, entry->range.offset, entry->range.length);
+    }
+    return entry->future;
+  }
+
+  RangeCacheEntry Cache(const ReadRange& range) override {
+    return {range, Future<std::shared_ptr<Buffer>>()};
+  }
 };
 
 ReadRangeCache::ReadRangeCache(std::shared_ptr<RandomAccessFile> file, IOContext ctx,
                                CacheOptions options)
-    : impl_(new Impl()) {
+    : impl_(options.lazy ? new LazyImpl() : new Impl()) {
   impl_->file = std::move(file);
   impl_->ctx = std::move(ctx);
   impl_->options = options;
@@ -168,8 +200,7 @@ Status ReadRangeCache::Cache(std::vector<ReadRange> ranges) {
   std::vector<RangeCacheEntry> entries;
   entries.reserve(ranges.size());
   for (const auto& range : ranges) {
-    auto fut = impl_->file->ReadAsync(impl_->ctx, range.offset, range.length);
-    entries.push_back({range, std::move(fut)});
+    entries.push_back(impl_->Cache(range));
   }
 
   impl_->AddEntries(std::move(entries));
@@ -188,17 +219,20 @@ Result<std::shared_ptr<Buffer>> ReadRangeCache::Read(ReadRange range) {
       [](const RangeCacheEntry& entry, const ReadRange& range) {
         return entry.range.offset + entry.range.length < range.offset + range.length;
       });
+  std::unique_lock<std::mutex> guard = impl_->TakeGuard();
   if (it != impl_->entries.end() && it->range.Contains(range)) {
-    ARROW_ASSIGN_OR_RAISE(auto buf, it->future.result());
+    auto fut = impl_->GetFuture(&*it);
+    ARROW_ASSIGN_OR_RAISE(auto buf, fut.result());
     return SliceBuffer(std::move(buf), range.offset - it->range.offset, range.length);
   }
   return Status::Invalid("ReadRangeCache did not find matching cache entry");
 }
 
 Future<> ReadRangeCache::Wait() {
+  std::unique_lock<std::mutex> guard = impl_->TakeGuard();
   std::vector<Future<>> futures;
-  for (const auto& entry : impl_->entries) {
-    futures.emplace_back(entry.future);
+  for (auto& entry : impl_->entries) {
+    futures.emplace_back(impl_->GetFuture(&entry));
   }
   return AllComplete(futures);
 }
@@ -211,8 +245,9 @@ Future<> ReadRangeCache::WaitFor(std::vector<ReadRange> ranges) {
   std::sort(ranges.begin(), ranges.end(),
             [](const ReadRange& a, const ReadRange& b) { return a.offset > b.offset; });
 
+  std::unique_lock<std::mutex> guard = impl_->TakeGuard();
   std::vector<Future<>> futures;
-  for (const auto& entry : impl_->entries) {
+  for (auto& entry : impl_->entries) {
     bool include = false;
     while (!ranges.empty()) {
       const auto& next = ranges.back();
@@ -224,7 +259,7 @@ Future<> ReadRangeCache::WaitFor(std::vector<ReadRange> ranges) {
         break;
       }
     }
-    if (include) futures.emplace_back(entry.future);
+    if (include) futures.emplace_back(impl_->GetFuture(&entry));
     if (ranges.empty()) break;
   }
   if (!ranges.empty()) {

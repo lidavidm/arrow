@@ -17,6 +17,8 @@
 
 #include "parquet/exception.h"
 
+#include <cstring>
+
 namespace parquet {
 
 std::ostream& operator<<(std::ostream& os, const ParquetException& exception) {
@@ -33,7 +35,8 @@ ParquetInvalidOrCorruptedFileStatusDetail::Instance() {
 bool ParquetInvalidOrCorruptedFileStatusDetail::Unwrap(
     const std::shared_ptr<StatusDetail>& detail) {
   if (!detail) return false;
-  return detail->type_id() == kParquetInvalidOrCorruptedFileStatusDetailTypeId;
+  return std::strcmp(kParquetInvalidOrCorruptedFileStatusDetailTypeId,
+                     detail->type_id()) == 0;
 }
 
 }  // namespace parquet
