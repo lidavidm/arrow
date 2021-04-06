@@ -59,15 +59,15 @@
     ARROW_UNUSED(_s);                                           \
   } while (0)
 
-#define PARQUET_THROW_NOT_OK(s)                                                \
-  do {                                                                         \
-    ::arrow::Status _s = ::arrow::internal::GenericToStatus(s);                \
-    if (!_s.ok()) {                                                            \
-      if (ParquetInvalidOrCorruptedFileStatusDetail::Unwrap(_s.detail())) {    \
-        throw ::parquet::ParquetInvalidOrCorruptedFileException(_s.message()); \
-      }                                                                        \
-      throw ::parquet::ParquetStatusException(std::move(_s));                  \
-    }                                                                          \
+#define PARQUET_THROW_NOT_OK(s)                                                        \
+  do {                                                                                 \
+    ::arrow::Status _s = ::arrow::internal::GenericToStatus(s);                        \
+    if (!_s.ok()) {                                                                    \
+      if (::parquet::ParquetInvalidOrCorruptedFileStatusDetail::Unwrap(_s.detail())) { \
+        throw ::parquet::ParquetInvalidOrCorruptedFileException(_s.message());         \
+      }                                                                                \
+      throw ::parquet::ParquetStatusException(std::move(_s));                          \
+    }                                                                                  \
   } while (0)
 
 #define PARQUET_ASSIGN_OR_THROW_IMPL(status_name, lhs, rexpr) \
