@@ -22,6 +22,8 @@
 
 #include "arrow/io/file.h"
 #include "arrow/testing/gtest_compat.h"
+#include "arrow/testing/gtest_util.h"
+#include "arrow/util/io_util.h"
 
 #include "parquet/column_reader.h"
 #include "parquet/column_writer.h"
@@ -237,7 +239,9 @@ TEST_P(TestDecryptionConfiguration, TestDecryption) {
     CheckResults(file_name, decryption_config_num, encryption_config_num);
   }
   // Delete temporary test file.
-  ASSERT_EQ(std::remove(file_name.c_str()), 0);
+  ASSERT_OK_AND_ASSIGN(auto path,
+                       ::arrow::internal::PlatformFilename::FromString(file_name));
+  ASSERT_OK(::arrow::internal::DeleteFile(path));
 
   // Decrypt parquet file that resides in parquet-testing/data directory.
   file_name = data_file(param_file_name);
