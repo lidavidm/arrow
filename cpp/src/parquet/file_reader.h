@@ -74,6 +74,11 @@ class PARQUET_EXPORT ParquetFileReader {
         const ReaderProperties& props = default_reader_properties(),
         std::shared_ptr<FileMetaData> metadata = NULLPTR);
 
+    static ::arrow::Future<std::unique_ptr<Contents>> OpenAsync(
+        std::shared_ptr<::arrow::io::RandomAccessFile> source,
+        const ReaderProperties& props = default_reader_properties(),
+        std::shared_ptr<FileMetaData> metadata = NULLPTR);
+
     virtual ~Contents() = default;
     // Perform any cleanup associated with the file contents
     virtual void Close() = 0;
@@ -95,6 +100,13 @@ class PARQUET_EXPORT ParquetFileReader {
   // interfaces.
   static std::unique_ptr<ParquetFileReader> OpenFile(
       const std::string& path, bool memory_map = true,
+      const ReaderProperties& props = default_reader_properties(),
+      std::shared_ptr<FileMetaData> metadata = NULLPTR);
+
+  // Asynchronously open a file reader from an Arrow file object.
+  // Does not throw - all errors are reported through the Future.
+  static ::arrow::Future<std::unique_ptr<ParquetFileReader>> OpenAsync(
+      std::shared_ptr<::arrow::io::RandomAccessFile> source,
       const ReaderProperties& props = default_reader_properties(),
       std::shared_ptr<FileMetaData> metadata = NULLPTR);
 
