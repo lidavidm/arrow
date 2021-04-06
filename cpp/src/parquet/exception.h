@@ -149,7 +149,8 @@ class ParquetInvalidOrCorruptedFileException : public ParquetStatusException {
 
 static const char kParquetInvalidOrCorruptedFileStatusDetailTypeId[] =
     "parquet::ParquetInvalidOrCorruptedFileStatusDetail";
-class ParquetInvalidOrCorruptedFileStatusDetail : public ::arrow::StatusDetail {
+class PARQUET_EXPORT ParquetInvalidOrCorruptedFileStatusDetail
+    : public ::arrow::StatusDetail {
  public:
   const char* type_id() const { return kParquetInvalidOrCorruptedFileStatusDetailTypeId; }
   std::string ToString() const { return "ParquetInvalidOrCorruptedFileException"; }
@@ -163,15 +164,15 @@ void ThrowNotOk(StatusReturnBlock&& b) {
 }
 
 #define BEGIN_PARQUET_CATCH_EXCEPTIONS try {
-#define END_PARQUET_CATCH_EXCEPTIONS                                      \
-  }                                                                       \
-  catch (const ::parquet::ParquetInvalidOrCorruptedFileException& e) {    \
-    return ::arrow::Status::FromDetailAndArgs(                            \
-        ::arrow::StatusCode::IOError,                                     \
-        ParquetInvalidOrCorruptedFileStatusDetail::Instance(), e.what()); \
-  }                                                                       \
-  catch (const ::parquet::ParquetException& e) {                          \
-    return ::arrow::Status::IOError(e.what());                            \
+#define END_PARQUET_CATCH_EXCEPTIONS                                                 \
+  }                                                                                  \
+  catch (const ::parquet::ParquetInvalidOrCorruptedFileException& e) {               \
+    return ::arrow::Status::FromDetailAndArgs(                                       \
+        ::arrow::StatusCode::IOError,                                                \
+        ::parquet::ParquetInvalidOrCorruptedFileStatusDetail::Instance(), e.what()); \
+  }                                                                                  \
+  catch (const ::parquet::ParquetException& e) {                                     \
+    return ::arrow::Status::IOError(e.what());                                       \
   }
 
 }  // namespace parquet
