@@ -24,4 +24,16 @@ std::ostream& operator<<(std::ostream& os, const ParquetException& exception) {
   return os;
 }
 
+std::shared_ptr<::arrow::StatusDetail>
+ParquetInvalidOrCorruptedFileStatusDetail::Instance() {
+  static auto instance = std::make_shared<ParquetInvalidOrCorruptedFileStatusDetail>();
+  return instance;
+}
+
+bool ParquetInvalidOrCorruptedFileStatusDetail::Unwrap(
+    const std::shared_ptr<StatusDetail>& detail) {
+  if (!detail) return false;
+  return detail->type_id() == kParquetInvalidOrCorruptedFileStatusDetailTypeId;
+}
+
 }  // namespace parquet

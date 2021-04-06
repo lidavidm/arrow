@@ -59,12 +59,15 @@
     ARROW_UNUSED(_s);                                           \
   } while (0)
 
-#define PARQUET_THROW_NOT_OK(s)                                 \
-  do {                                                          \
-    ::arrow::Status _s = ::arrow::internal::GenericToStatus(s); \
-    if (!_s.ok()) {                                             \
-      throw ::parquet::ParquetStatusException(std::move(_s));   \
-    }                                                           \
+#define PARQUET_THROW_NOT_OK(s)                                                \
+  do {                                                                         \
+    ::arrow::Status _s = ::arrow::internal::GenericToStatus(s);                \
+    if (!_s.ok()) {                                                            \
+      if (ParquetInvalidOrCorruptedFileStatusDetail::Unwrap(_s.detail())) {    \
+        throw ::parquet::ParquetInvalidOrCorruptedFileException(_s.message()); \
+      }                                                                        \
+      throw ::parquet::ParquetStatusException(std::move(_s));                  \
+    }                                                                          \
   } while (0)
 
 #define PARQUET_ASSIGN_OR_THROW_IMPL(status_name, lhs, rexpr) \
@@ -144,16 +147,31 @@ class ParquetInvalidOrCorruptedFileException : public ParquetStatusException {
                                                         std::forward<Args>(args)...)) {}
 };
 
+static const char kParquetInvalidOrCorruptedFileStatusDetailTypeId[] =
+    "parquet::ParquetInvalidOrCorruptedFileStatusDetail";
+class ParquetInvalidOrCorruptedFileStatusDetail : public ::arrow::StatusDetail {
+ public:
+  const char* type_id() const { return kParquetInvalidOrCorruptedFileStatusDetailTypeId; }
+  std::string ToString() const { return "ParquetInvalidOrCorruptedFileException"; }
+  static std::shared_ptr<::arrow::StatusDetail> Instance();
+  static bool Unwrap(const std::shared_ptr<StatusDetail>& detail);
+};
+
 template <typename StatusReturnBlock>
 void ThrowNotOk(StatusReturnBlock&& b) {
   PARQUET_THROW_NOT_OK(b());
 }
 
 #define BEGIN_PARQUET_CATCH_EXCEPTIONS try {
-#define END_PARQUET_CATCH_EXCEPTIONS             \
-  }                                              \
-  catch (const ::parquet::ParquetException& e) { \
-    return ::arrow::Status::IOError(e.what());   \
+#define END_PARQUET_CATCH_EXCEPTIONS                                      \
+  }                                                                       \
+  catch (const ::parquet::ParquetInvalidOrCorruptedFileException& e) {    \
+    return ::arrow::Status::FromDetailAndArgs(                            \
+        ::arrow::StatusCode::IOError,                                     \
+        ParquetInvalidOrCorruptedFileStatusDetail::Instance(), e.what()); \
+  }                                                                       \
+  catch (const ::parquet::ParquetException& e) {                          \
+    return ::arrow::Status::IOError(e.what());                            \
   }
 
 }  // namespace parquet
