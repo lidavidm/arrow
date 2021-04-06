@@ -644,7 +644,6 @@ std::unique_ptr<ParquetFileReader> ParquetFileReader::OpenFile(
   return Open(std::move(source), props, std::move(metadata));
 }
 
-// TODO: this is a massive pain to use as an API
 ::arrow::Future<std::unique_ptr<ParquetFileReader>> ParquetFileReader::OpenAsync(
     std::shared_ptr<::arrow::io::RandomAccessFile> source, const ReaderProperties& props,
     std::shared_ptr<FileMetaData> metadata) {

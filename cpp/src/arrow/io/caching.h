@@ -34,17 +34,19 @@ struct ARROW_EXPORT CacheOptions {
   static constexpr double kDefaultIdealBandwidthUtilizationFrac = 0.9;
   static constexpr int64_t kDefaultMaxIdealRequestSizeMib = 64;
 
-  /// /brief The maximum distance in bytes between two consecutive
+  /// \brief The maximum distance in bytes between two consecutive
   ///   ranges; beyond this value, ranges are not combined
   int64_t hole_size_limit;
-  /// /brief The maximum size in bytes of a combined range; if
+  /// \brief The maximum size in bytes of a combined range; if
   ///   combining two consecutive ranges would produce a range of a
   ///   size greater than this, they are not combined
   int64_t range_size_limit;
+  /// \brief A lazy cache does not perform any I/O until requested.
+  bool lazy;
 
   bool operator==(const CacheOptions& other) const {
     return hole_size_limit == other.hole_size_limit &&
-           range_size_limit == other.range_size_limit;
+           range_size_limit == other.range_size_limit && lazy == other.lazy;
   }
 
   /// \brief Construct CacheOptions from network storage metrics (e.g. S3).
@@ -108,6 +110,8 @@ class ARROW_EXPORT ReadRangeCache {
 
  protected:
   struct Impl;
+  struct LazyImpl;
+
   std::unique_ptr<Impl> impl_;
 };
 
