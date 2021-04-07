@@ -140,6 +140,8 @@ struct ReadRangeCache::Impl {
   // Ordered by offset (so as to find a matching region by binary search)
   std::vector<RangeCacheEntry> entries;
 
+  virtual ~Impl() = default;
+
   // Add new entries, themselves ordered by offset
   void AddEntries(std::vector<RangeCacheEntry> new_entries) {
     if (entries.size() > 0) {
@@ -167,6 +169,8 @@ struct ReadRangeCache::Impl {
 
 struct ReadRangeCache::LazyImpl : public ReadRangeCache::Impl {
   std::mutex entry_mutex;
+
+  virtual ~LazyImpl() = default;
 
   std::unique_lock<std::mutex> TakeGuard() override {
     return std::unique_lock<std::mutex>(entry_mutex);
