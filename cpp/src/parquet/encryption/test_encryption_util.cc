@@ -284,6 +284,7 @@ void FileEncryptor::EncryptFile(
 
   // Close the ParquetFileWriter
   file_writer->Close();
+  PARQUET_THROW_NOT_OK(out_file->Close());
 
   return;
 }  // namespace test

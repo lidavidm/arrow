@@ -734,7 +734,8 @@ TEST(CacheOptions, Basics) {
                   const double expected_range_size_limit_MiB) -> void {
     const CacheOptions expected = {
         static_cast<int64_t>(std::round(expected_hole_size_limit_MiB * 1024 * 1024)),
-        static_cast<int64_t>(std::round(expected_range_size_limit_MiB * 1024 * 1024))};
+        static_cast<int64_t>(std::round(expected_range_size_limit_MiB * 1024 * 1024)),
+        false};
     ASSERT_EQ(actual, expected);
   };
 
