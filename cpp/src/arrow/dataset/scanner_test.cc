@@ -18,6 +18,8 @@
 #include "arrow/dataset/scanner.h"
 
 #include <memory>
+#include <ostream>
+#include <sstream>
 
 #include <gmock/gmock.h>
 
@@ -320,6 +322,64 @@ TEST_P(TestScanner, TakeIndices) {
   }
 }
 
+class CountRowsOnlyFragment : public InMemoryFragment {
+ public:
+  using InMemoryFragment::InMemoryFragment;
+
+  Result<Future<int64_t>> CountRows(Expression predicate,
+                                    std::shared_ptr<ScanOptions>) override {
+    if (FieldsInExpression(predicate).size() > 0) return Status::NotImplemented("");
+    int64_t sum = 0;
+    for (const auto& batch : record_batches_) {
+      sum += batch->num_rows();
+    }
+    return Future<int64_t>::MakeFinished(sum);
+  }
+  Result<ScanTaskIterator> Scan(std::shared_ptr<ScanOptions> options) override {
+    return Status::Invalid("Don't scan me!");
+  }
+};
+
+TEST_P(TestScanner, CountRows) {
+  const auto items_per_batch = GetParam().items_per_batch;
+  const auto num_batches = GetParam().num_batches;
+  const auto num_datasets = GetParam().num_child_datasets;
+  SetSchema({field("i32", int32()), field("f64", float64())});
+  ArrayVector arrays(2);
+  ArrayFromVector<Int32Type>(
+      internal::Iota<int32_t>(static_cast<int32_t>(items_per_batch)), &arrays[0]);
+  ArrayFromVector<DoubleType>(
+      internal::Iota<double>(static_cast<double>(items_per_batch)), &arrays[1]);
+  auto batch = RecordBatch::Make(schema_, items_per_batch, arrays);
+  auto scanner = MakeScanner(batch);
+
+  ASSERT_OK_AND_ASSIGN(auto rows, scanner->CountRows());
+  ASSERT_EQ(rows, num_datasets * num_batches * items_per_batch);
+
+  ASSERT_OK_AND_ASSIGN(options_->filter,
+                       greater_equal(field_ref("i32"), literal(64)).Bind(*schema_));
+  ASSERT_OK_AND_ASSIGN(rows, scanner->CountRows());
+  ASSERT_EQ(rows, num_datasets * num_batches * (items_per_batch - 64));
+}
+
+TEST_P(TestScanner, CountRowsWithMetadata) {
+  SetSchema({field("i32", int32()), field("f64", float64())});
+  auto batch = ConstantArrayGenerator::Zeroes(GetParam().items_per_batch, schema_);
+  RecordBatchVector batches = {batch, batch, batch, batch};
+  ScannerBuilder builder(schema_, std::make_shared<CountRowsOnlyFragment>(batches),
+                         options_);
+  ASSERT_OK(builder.UseAsync(GetParam().use_async));
+  ASSERT_OK(builder.UseThreads(GetParam().use_threads));
+  ASSERT_OK_AND_ASSIGN(auto scanner, builder.Finish());
+  ASSERT_OK_AND_EQ(4 * batch->num_rows(), scanner->CountRows());
+
+  ASSERT_OK(builder.Filter(equal(field_ref("i32"), literal(5))));
+  ASSERT_OK_AND_ASSIGN(scanner, builder.Finish());
+  // Scanner should fall back on reading data and hit the error
+  EXPECT_RAISES_WITH_MESSAGE_THAT(Invalid, ::testing::HasSubstr("Don't scan me!"),
+                                  scanner->CountRows());
+}
+
 class FailingFragment : public InMemoryFragment {
  public:
   using InMemoryFragment::InMemoryFragment;
@@ -507,7 +567,10 @@ TEST_P(TestScanner, Head) {
 }
 
 INSTANTIATE_TEST_SUITE_P(TestScannerThreading, TestScanner,
-                         ::testing::ValuesIn(TestScannerParams::Values()));
+                         ::testing::ValuesIn(TestScannerParams::Values()),
+                         [](const ::testing::TestParamInfo<TestScannerParams>& info) {
+                           return std::to_string(info.index) + info.param.ToString();
+                         });
 
 class TestScannerBuilder : public ::testing::Test {
   void SetUp() override {

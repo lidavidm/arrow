@@ -32,6 +32,7 @@
 #include "arrow/ipc/writer.h"
 #include "arrow/record_batch.h"
 #include "arrow/table.h"
+#include "arrow/testing/future_util.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/util.h"
 #include "arrow/util/key_value_metadata.h"
@@ -89,6 +90,7 @@ TEST_F(TestIpcFileFormat, InspectFailureWithRelevantError) {
 }
 TEST_F(TestIpcFileFormat, Inspect) { TestInspect(); }
 TEST_F(TestIpcFileFormat, IsSupported) { TestIsSupported(); }
+TEST_F(TestIpcFileFormat, CountRows) { TestCountRows(); }
 
 class TestIpcFileSystemDataset : public testing::Test,
                                  public WriteFileSystemDatasetMixin {

@@ -52,6 +52,10 @@ Result<std::shared_ptr<Schema>> Fragment::ReadPhysicalSchema() {
   return physical_schema_;
 }
 
+Result<Future<int64_t>> Fragment::CountRows(Expression, std::shared_ptr<ScanOptions>) {
+  return Status::NotImplemented("Cannot count rows for this fragment with only metadata");
+}
+
 Result<std::shared_ptr<Schema>> InMemoryFragment::ReadPhysicalSchemaImpl() {
   return physical_schema_;
 }

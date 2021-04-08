@@ -27,6 +27,7 @@
 #include "arrow/io/memory.h"
 #include "arrow/record_batch.h"
 #include "arrow/table.h"
+#include "arrow/testing/future_util.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/util.h"
 #include "arrow/type.h"
@@ -218,6 +219,8 @@ TEST_F(TestParquetFileFormat, WriteRecordBatchReaderCustomOptions) {
   AssertSchemaEqual(Schema({field("ts", timestamp(coerce_timestamps_to))}),
                     *actual_schema);
 }
+
+TEST_F(TestParquetFileFormat, CountRows) { TestCountRows(); }
 
 class TestParquetFileSystemDataset : public WriteFileSystemDatasetMixin,
                                      public testing::Test {
