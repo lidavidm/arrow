@@ -378,7 +378,7 @@ uint32_t CheckFooterLength(const std::shared_ptr<Buffer>& footer_buffer,
   uint32_t footer_len = ::arrow::util::SafeLoadAs<uint32_t>(
       reinterpret_cast<const uint8_t*>(footer_buffer->data()) + footer_read_size -
       kFooterSize);
-  if (kFooterSize + footer_len > source_size) {
+  if (footer_len > source_size - kFooterSize) {
     throw ParquetInvalidOrCorruptedFileException(
         "Parquet file size is ", source_size,
         " bytes, smaller than the size reported by footer's (", footer_len, "bytes)");
