@@ -191,6 +191,9 @@ struct ARROW_FLIGHT_EXPORT FlightDescriptor {
 
   bool Equals(const FlightDescriptor& other) const;
 
+  bool is_command() const;
+  bool is_path() const;
+
   /// \brief Get a human-readable form of this descriptor.
   std::string ToString() const;
 
@@ -382,6 +385,9 @@ class ARROW_FLIGHT_EXPORT FlightInfo {
                                         const FlightDescriptor& descriptor,
                                         const std::vector<FlightEndpoint>& endpoints,
                                         int64_t total_records, int64_t total_bytes);
+  static arrow::Result<std::unique_ptr<FlightInfo>> MakeUnique(
+      const Schema& schema, FlightDescriptor descriptor,
+      std::vector<FlightEndpoint> endpoints, int64_t total_records, int64_t total_bytes);
 
   /// \brief Deserialize the Arrow schema of the dataset, to be passed
   /// to each call to DoGet. Populate any dictionary encoded fields

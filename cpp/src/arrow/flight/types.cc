@@ -27,6 +27,7 @@
 #include "arrow/ipc/reader.h"
 #include "arrow/status.h"
 #include "arrow/table.h"
+#include "arrow/util/make_unique.h"
 #include "arrow/util/uri.h"
 
 namespace arrow {
@@ -98,6 +99,9 @@ bool FlightDescriptor::Equals(const FlightDescriptor& other) const {
       return false;
   }
 }
+
+bool FlightDescriptor::is_command() const { return type == CMD; }
+bool FlightDescriptor::is_path() const { return type == PATH; }
 
 std::string FlightDescriptor::ToString() const {
   std::stringstream ss;
@@ -182,6 +186,18 @@ arrow::Result<FlightInfo> FlightInfo::Make(const Schema& schema,
   data.total_bytes = total_bytes;
   RETURN_NOT_OK(internal::SchemaToString(schema, &data.schema));
   return FlightInfo(data);
+}
+
+arrow::Result<std::unique_ptr<FlightInfo>> FlightInfo::MakeUnique(
+    const Schema& schema, FlightDescriptor descriptor,
+    std::vector<FlightEndpoint> endpoints, int64_t total_records, int64_t total_bytes) {
+  FlightInfo::Data data;
+  data.descriptor = std::move(descriptor);
+  data.endpoints = std::move(endpoints);
+  data.total_records = total_records;
+  data.total_bytes = total_bytes;
+  RETURN_NOT_OK(internal::SchemaToString(schema, &data.schema));
+  return arrow::internal::make_unique<FlightInfo>(std::move(data));
 }
 
 Status FlightInfo::GetSchema(ipc::DictionaryMemo* dictionary_memo,

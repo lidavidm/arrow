@@ -1,0 +1,424 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ * <p>
+ * http://www.apache.org/licenses/LICENSE-2.0
+ * <p>
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+syntax = "proto3";
+
+option java_package = "org.apache.arrow.flight.sql.impl";
+package arrow.flight.protocol.sql;
+
+/*
+ * FlightSQL: a protocol for exposing SQL-like functionality over Arrow Flight.
+ */
+
+// Metadata Actions
+//
+// All messages here are for use with Flight DoAction.
+// Serialized ActionXXXRequest messages are used as the "body" field of a Action.
+// Serialized ActionXXXResult messages are used as the "body" field of a Result.
+
+// GetSqlInfo: Request metadata about the SQL dialect implemented by the server.
+//
+// The Action type must be "GetSqlInfo".
+
+/*
+ * The result of a "GetSqlInfo" action.
+ *
+ * Keys and values are modeled after ODBC's SQLGetInfo() function. This information is intended
+ * to provide FlightSQL clients with basic information about supported SQL syntax and features.
+ *
+ * This is not an exhaustive list and more information may be added in future releases, including
+ * more syntax, supported functions, type conversion support, etc.
+ *
+ * Some values are provided at the top level instead, as direct message fields.
+ *
+ * FlightSQL supports the following information types:
+ * 1. Server Information
+ * 2. SQL Syntax Information
+ * 3. Custom Information
+ */
+message ActionGetSqlInfoResult {
+  // 1. Server: basic information about the server.
+  ServerInfo server_info = 1;
+
+  /*
+   * 2. SQL Syntax: information about supported SQL syntax and features.
+   *
+   * Values are encoded in a map. Implementations are not required to return any of the keys
+   * below. They may not return implementation-defined keys, but clients should prepared to
+   * communicate with a server that implements newer or older revisions of FlightSQL and hence
+   * may return deprecated or unknown keys. The keys and expected value types are as follows:
+   *
+   * SQL_DDL_CATALOG : integer_bitmask
+   * Indicates whether the server supports CREATE (flag SQL_DI_CREATE) and DROP (flag
+   * SQL_DI_DROP) of catalogs.
+   * In a SQL environment, a catalog is a collection of schemas.
+   * This property does not have a direct ODBC equivalent.
+   *
+   * SQL_DDL_SCHEMA : integer_bitmask
+   * Indicates whether the server supports CREATE (flag SQL_DI_CREATE) and DROP (flag
+   * SQL_DI_DROP) of schemas.
+   * In a SQL environment, a schema is a collection of tables, views, indexes etc.
+   * This property does not have a direct ODBC equivalent.
+   *
+   * SQL_DDL_TABLE : integer_bitmask
+   * Indicates whether the server supports CREATE (flag SQL_DI_CREATE) and DROP (flag
+   * SQL_DI_DROP) of tables.
+   * In a SQL environment, a table is a collection of rows of information. Each row of information
+   * may have one or more columns of data.
+   * This property does not have a direct ODBC equivalent.
+   *
+   * SQL_IDENTIFIER_CASE : integer_value
+   * Indicates the case sensitivity of catalog, table and schema names. Value must be one of the
+   * constants SQL_IC_UPPER, SQL_IC_LOWER, SQL_IC_SENSITIVE, SQL_IC_MIXED.
+   *
+   * SQL_IDENTIFIER_QUOTE_CHAR : string_value
+   * Indicates the supported character(s) used to surround a delimited identifier.
+   *
+   * SQL_QUOTED_IDENTIFIER_CASE : integer_value
+   * Indicates case sensitivity of quoted identifiers. Value must be one of the
+   * constants SQL_IC_UPPER, SQL_IC_LOWER, SQL_IC_SENSITIVE, SQL_IC_MIXED.
+   */
+  map<string, GetSqlInfoValue> flight_sql_info = 2;
+
+  // 3. Custom Information: implementation-defined properties.
+  //
+  // Implementations should prefix keys with an identifier to avoid collisions with other
+  // implementations.
+  map<string, GetSqlInfoValue> custom_info = 3;
+}
+
+// Basic information about the server.
+message ServerInfo {
+  // The name of the server.
+  string name = 1;
+  // The native version of the server.
+  string version = 2;
+  // The Arrow format version of the server.
+  string arrow_format_version = 3;
+  // The Arrow library version of the server.
+  string arrow_library_version = 4;
+  // Indicates whether the server is read only.
+  bool read_only = 5;
+}
+
+/*
+ * Wrapper for values returned in ActionGetSqlInfoResult.
+ */
+message GetSqlInfoValue {
+  oneof value {
+    string string_value = 1;
+    int32 integer_value = 2;
+    int32 integer_bitmask = 3;
+  }
+}
+
+// Enums used for ServerInfo values. These enums are not directly referenced; instead their
+// values are encoded as bitfields in the integer_bitmask field in GetSqlInfoValue, or as
+// integers in the integer_value field.
+enum SqlInfoDdl {
+  SQL_DI_NONE = 0;
+  SQL_DI_CREATE = 1;
+  SQL_DI_DROP = 2;
+  // Next value is 4
+}
+enum SqlInfoIdentifierCase {
+  SQL_IC_UPPER = 0;
+  SQL_IC_LOWER = 1;
+  SQL_IC_SENSITIVE = 2;
+  SQL_IC_MIXED = 3;
+}
+
+/*
+ * Request message for the "GetCatalogs" action.
+ *
+ * Requests a list of catalogs available in the server.
+ */
+message ActionGetCatalogsRequest {
+  /*
+   * Specifies the order of result values.
+   */
+  ResultsOrder order = 1;
+}
+
+/*
+ * The result of a "GetCatalogs" action.
+ */
+message ActionGetCatalogsResult {
+  repeated string catalog = 1;
+}
+
+/*
+ * Request message for the "GetSchemas" action.
+ *
+ * Requests a list of schemas available in the server.
+ */
+message ActionGetSchemasRequest {
+  /*
+   * Specifies the order of result values with precedence:
+   *  - catalog
+   *  - schema
+   */
+  ResultsOrder order = 1;
+
+  /*
+   * Specifies the Catalog to search for schemas.
+   * If omitted, then schemas for all catalogs are searched.
+   */
+  string catalog = 2;
+
+  /*
+   * Specifies a filter pattern for schemas to search for.
+   * When no schema_filter_pattern is provided, the pattern will not be used to narrow the search.
+   * In the pattern string, two special characters can be used to denote matching rules:
+   *    - "%" means to match any substring with 0 or more characters.
+   *    - "_" means to match any one character.
+   */
+  string schema_filter_pattern = 3;
+}
+
+/*
+ * The result of a "GetSchemas" action.
+ */
+message ActionGetSchemasResult {
+  string catalog = 1;
+  string schema = 2;
+}
+
+/*
+ * Request message for the "GetTables" action.
+ *
+ * Requests a list of tables available in the server.
+ */
+message ActionGetTablesRequest {
+  /*
+   * Specifies the order of result values with precedence:
+   *  - catalog
+   *  - schema
+   *  - table_type
+   *  - table
+   */
+  ResultsOrder order = 1;
+
+  // Specifies the Catalog to search for schemas.
+  string catalog = 2;
+
+  /* Specifies a filter pattern for schemas to search for.
+   * When no schema_filter_pattern is provided, the pattern will not be used to narrow the search.
+   * In the pattern string, two special characters can be used to denote matching rules:
+   *    - "%" means to match any substring with 0 or more characters.
+   *    - "_" means to match any one character.
+   */
+  string schema_filter_pattern = 3;
+
+  /* Specifies a filter pattern for tables to search for.
+   * When no schema_filter_pattern is provided, the pattern will not be used to narrow the search.
+   * In the pattern string, two special characters can be used to denote matching rules:
+   *    - "%" means to match any substring with 0 or more characters.
+   *    - "_" means to match any one character.
+   */
+  string table_name_filter_pattern = 4;
+
+  // Specifies literal table types to search for.
+  //
+  // When no types are provided, tables of all types will be returned. Otherwise, tables of any
+  // given type will be returned.
+  repeated string table_types = 5;
+
+  // Specifies if the schema should be returned for found tables.
+  bool include_schema = 6;
+}
+
+/*
+ * The result of a "GetTables" action.
+ */
+message ActionGetTablesResult {
+  string catalog = 1;
+  string schema = 2;
+  string table = 3;
+  string table_type = 4;
+
+  // If include_schema was set in the request, this is the Arrow schema of the table to be
+  // returned, as described in Schema.fbs::Schema, serialized as an IPC message.
+  bytes table_schema = 5;
+}
+
+/*
+ * The result of a "GetTableTypes" action.
+ */
+message ActionGetTableTypesResult {
+  /*
+   * A possible table type. E.g. table (regular data table), view, system table etc.
+   *
+   * The possible values are implementation-defined.
+   */
+  repeated string table_type = 1;
+}
+
+// SQL Execution Actions
+//
+// All messages here are for use with Flight DoAction.
+// Serialized ActionXXXRequest messages are used as the "body" field of a Action.
+// Serialized ActionXXXResult messages are used as the "body" field of a Result.
+
+/*
+ * Request message for the "GetPreparedStatement" action.
+ *
+ * Creates a new prepared statement server-side. Once the application is done with the prepared
+ * statement, it must follow up with a ClosePreparedStatement action.
+ */
+message ActionGetPreparedStatementRequest {
+  // The valid SQL string to get a prepared statement for.
+  string query = 1;
+}
+
+/*
+ * The result of a "GetPreparedStatement" action.
+ */
+message ActionGetPreparedStatementResult {
+  // Opaque implementation-defined handle for the prepared statement on the server.
+  bytes prepared_statement_handle = 1;
+
+  // If the given query generates a result set, this is the Arrow schema of the results to be
+  // returned, as described in Schema.fbs::Schema, serialized as an IPC message.
+  bytes dataset_schema = 2;
+
+  // If the given query contained parameters, this is the Arrow schema of the expected
+  // parameters, as described in Schema.fbs::Schema, serialized as an IPC message.
+  bytes parameter_schema = 3;
+}
+
+/*
+ * Request message for the "ClosePreparedStatement" action.
+ *
+ * Closes server resources associated with the prepared statement handle.
+ */
+message ActionClosePreparedStatementRequest {
+  // Opaque handle for the prepared statement on the server.
+  string prepared_statement_handle = 1;
+}
+
+
+// SQL Execution Messages
+//
+// Serialized CommandXXX messages are wrapped in a Command message, then used as the "cmd" field of a FlightDescriptor.
+
+/*
+ * Execute an ad-hoc SQL query that returns a table of results.
+ *
+ * Valid for the following RPC calls:
+ *  - GetSchema: return the schema of the query.
+ *  - GetFlightInfo: execute the query. In this case, the application should follow with a DoGet call.
+ */
+message CommandStatementQuery {
+  // The SQL query.
+  string query = 1;
+}
+
+/*
+ * Execute a prepared statement that returns a table of results.
+ *
+ * Must be preceded with a GetPreparedStatement action.
+ *
+ * Valid for the following RPC calls:
+ *  - DoPut: bind parameter values.
+ *  - GetFlightInfo: execute the prepared statement instance.
+ *
+ * The sequence of requests must be as follows:
+ * 1. DoAction with a GetPreparedStatement payload
+ * 2. DoPut with a CommandPreparedStatementQuery payload, with the prepared_statement_handle
+ *    returned from the server previously
+ * 3. GetFlightInfo with the same payload.
+ * 4. DoGet for each endpoint returned from the previous step.
+ */
+message CommandPreparedStatementQuery {
+  // Unique identifier for the instance of the prepared statement to execute.
+  bytes client_execution_handle = 1;
+  // Opaque handle for the prepared statement on the server.
+  bytes prepared_statement_handle = 2;
+}
+
+/*
+ * Execute an ad-hoc SQL query that does not return a table of results.
+ *
+ * Valid for the following RPC calls:
+ *  - DoPut: execute the query. In this case, the server should return exactly one DoPutUpdateResult message.
+ */
+message CommandStatementUpdate {
+  // The SQL query.
+  string query = 1;
+}
+
+/*
+ * Execute a prepared statement that does not return a table of results.
+ *
+ * Must be preceded with a GetPreparedStatement action.
+ *
+ * Valid for the following RPC calls:
+ *  - DoPut: bind parameter values and execute the query.
+ */
+message CommandPreparedStatementUpdate {
+  // Unique identifier for the instance of the prepared statement to execute.
+  bytes client_execution_handle = 1;
+  // Opaque handle for the prepared statement on the server.
+  bytes prepared_statement_handle = 2;
+}
+
+/*
+ * A top-level variant that wraps all the possible commands.
+ */
+message Command {
+  oneof command {
+    CommandStatementQuery statement_query = 1;
+    CommandPreparedStatementQuery prepared_statement_query = 2;
+    CommandStatementUpdate statement_update = 3;
+    CommandPreparedStatementUpdate prepared_statement_update = 4;
+  }
+}
+
+// Miscellaneous Messages
+
+/*
+ * If the client calls DoPut after CommandStatementUpdate or CommandPreparedStatementUpdate, this
+ * message is used as the "app_metadata" field of the returned PutResult.
+ */
+message DoPutUpdateResult {
+  // The number of records updated. A return value of -1 represents
+  // an unknown updated record count.
+  int64 record_count = 1;
+}
+
+/*
+ * Helper message for clients to specify a result ordering in metadata actions.
+ */
+message ResultsOrder {
+  enum Order {
+    // Protobuf pattern, not used.
+    ORDER_UNKNOWN = 0;
+
+    // No ordering enforcement.
+    ORDER_UNORDERED = 1;
+
+    // Order results by ascending value order.
+    ORDER_ASCENDING = 2;
+
+    // Order results by descending value order.
+    ORDER_DESCENDING = 3;
+  }
+
+  Order order = 1;
+}

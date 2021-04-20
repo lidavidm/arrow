@@ -37,24 +37,26 @@ endif()
 # TODO(wesm): Protobuf shared vs static linking
 
 set(FLIGHT_PROTO_PATH "${ARROW_SOURCE_DIR}/../format")
-set(FLIGHT_PROTO ${ARROW_SOURCE_DIR}/../format/Flight.proto)
+set(FLIGHT_PROTO "${FLIGHT_PROTO_PATH}/Flight.proto" "${FLIGHT_PROTO_PATH}/FlightSql.proto")
 
 set(FLIGHT_GENERATED_PROTO_FILES "${CMAKE_CURRENT_BINARY_DIR}/Flight.pb.cc"
                                  "${CMAKE_CURRENT_BINARY_DIR}/Flight.pb.h"
                                  "${CMAKE_CURRENT_BINARY_DIR}/Flight.grpc.pb.cc"
-                                 "${CMAKE_CURRENT_BINARY_DIR}/Flight.grpc.pb.h")
+                                 "${CMAKE_CURRENT_BINARY_DIR}/Flight.grpc.pb.h"
+                                 "${CMAKE_CURRENT_BINARY_DIR}/FlightSql.pb.cc"
+                                 "${CMAKE_CURRENT_BINARY_DIR}/FlightSql.pb.h")
 
 set(PROTO_DEPENDS ${FLIGHT_PROTO} ${ARROW_PROTOBUF_LIBPROTOBUF} gRPC::grpc_cpp_plugin)
 
 add_custom_command(OUTPUT ${FLIGHT_GENERATED_PROTO_FILES}
                    COMMAND ${ARROW_PROTOBUF_PROTOC} "-I${FLIGHT_PROTO_PATH}"
-                           "--cpp_out=${CMAKE_CURRENT_BINARY_DIR}" "${FLIGHT_PROTO}"
+                           "--cpp_out=${CMAKE_CURRENT_BINARY_DIR}" ${FLIGHT_PROTO}
                    DEPENDS ${PROTO_DEPENDS} ARGS
                    COMMAND ${ARROW_PROTOBUF_PROTOC}
                            "-I${FLIGHT_PROTO_PATH}"
                            "--grpc_out=${CMAKE_CURRENT_BINARY_DIR}"
                            "--plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
-                           "${FLIGHT_PROTO}")
+                           ${FLIGHT_PROTO})
 
 set_source_files_properties(${FLIGHT_GENERATED_PROTO_FILES} PROPERTIES GENERATED TRUE)
 
@@ -153,7 +155,11 @@ set(ARROW_FLIGHT_SRCS
     serialization_internal.cc
     server.cc
     server_auth.cc
-    types.cc)
+    sql_client.cc
+    sql_producer.cc
+    sql_types.cc
+    types.cc
+    "${CMAKE_CURRENT_BINARY_DIR}/FlightSql.pb.cc")
 
 add_arrow_lib(arrow_flight
               CMAKE_PACKAGE_NAME
