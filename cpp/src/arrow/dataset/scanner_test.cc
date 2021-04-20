@@ -322,24 +322,6 @@ TEST_P(TestScanner, TakeIndices) {
   }
 }
 
-class CountRowsOnlyFragment : public InMemoryFragment {
- public:
-  using InMemoryFragment::InMemoryFragment;
-
-  Result<Future<int64_t>> CountRows(Expression predicate,
-                                    std::shared_ptr<ScanOptions>) override {
-    if (FieldsInExpression(predicate).size() > 0) return Status::NotImplemented("");
-    int64_t sum = 0;
-    for (const auto& batch : record_batches_) {
-      sum += batch->num_rows();
-    }
-    return Future<int64_t>::MakeFinished(sum);
-  }
-  Result<ScanTaskIterator> Scan(std::shared_ptr<ScanOptions> options) override {
-    return Status::Invalid("Don't scan me!");
-  }
-};
-
 TEST_P(TestScanner, CountRows) {
   const auto items_per_batch = GetParam().items_per_batch;
   const auto num_batches = GetParam().num_batches;
@@ -362,12 +344,72 @@ TEST_P(TestScanner, CountRows) {
   ASSERT_EQ(rows, num_datasets * num_batches * (items_per_batch - 64));
 }
 
+class CountRowsOnlyFragment : public InMemoryFragment {
+ public:
+  using InMemoryFragment::InMemoryFragment;
+
+  Result<Future<int64_t>> CountRows(Expression predicate,
+                                    std::shared_ptr<ScanOptions>) override {
+    if (FieldsInExpression(predicate).size() > 0) return Status::NotImplemented("");
+    int64_t sum = 0;
+    for (const auto& batch : record_batches_) {
+      sum += batch->num_rows();
+    }
+    return Future<int64_t>::MakeFinished(sum);
+  }
+  Result<ScanTaskIterator> Scan(std::shared_ptr<ScanOptions>) override {
+    return Status::Invalid("Don't scan me!");
+  }
+  Result<RecordBatchGenerator> ScanBatchesAsync(
+      const std::shared_ptr<ScanOptions>&) override {
+    return Status::Invalid("Don't scan me!");
+  }
+};
+
+class ScanOnlyFragment : public InMemoryFragment {
+ public:
+  using InMemoryFragment::InMemoryFragment;
+
+  Result<Future<int64_t>> CountRows(Expression predicate,
+                                    std::shared_ptr<ScanOptions>) override {
+    return Status::NotImplemented("");
+  }
+  Result<ScanTaskIterator> Scan(std::shared_ptr<ScanOptions> options) override {
+    auto self = shared_from_this();
+    ScanTaskVector tasks{
+        std::make_shared<InMemoryScanTask>(record_batches_, options, self)};
+    return MakeVectorIterator(std::move(tasks));
+  }
+  Result<RecordBatchGenerator> ScanBatchesAsync(
+      const std::shared_ptr<ScanOptions>&) override {
+    return MakeVectorGenerator(record_batches_);
+  }
+};
+
+// Ensure the pipeline does not break on an empty batch
+TEST_P(TestScanner, CountRowsEmpty) {
+  SetSchema({field("i32", int32()), field("f64", float64())});
+  auto empty_batch = ConstantArrayGenerator::Zeroes(0, schema_);
+  auto batch = ConstantArrayGenerator::Zeroes(GetParam().items_per_batch, schema_);
+  RecordBatchVector batches = {empty_batch, batch};
+  ScannerBuilder builder(
+      std::make_shared<FragmentDataset>(
+          schema_, FragmentVector{std::make_shared<ScanOnlyFragment>(batches)}),
+      options_);
+  ASSERT_OK(builder.UseAsync(GetParam().use_async));
+  ASSERT_OK(builder.UseThreads(GetParam().use_threads));
+  ASSERT_OK_AND_ASSIGN(auto scanner, builder.Finish());
+  ASSERT_OK_AND_EQ(batch->num_rows(), scanner->CountRows());
+}
+
 TEST_P(TestScanner, CountRowsWithMetadata) {
   SetSchema({field("i32", int32()), field("f64", float64())});
   auto batch = ConstantArrayGenerator::Zeroes(GetParam().items_per_batch, schema_);
   RecordBatchVector batches = {batch, batch, batch, batch};
-  ScannerBuilder builder(schema_, std::make_shared<CountRowsOnlyFragment>(batches),
-                         options_);
+  ScannerBuilder builder(
+      std::make_shared<FragmentDataset>(
+          schema_, FragmentVector{std::make_shared<CountRowsOnlyFragment>(batches)}),
+      options_);
   ASSERT_OK(builder.UseAsync(GetParam().use_async));
   ASSERT_OK(builder.UseThreads(GetParam().use_threads));
   ASSERT_OK_AND_ASSIGN(auto scanner, builder.Finish());
