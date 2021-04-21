@@ -207,7 +207,9 @@ Result<RecordBatchGenerator> IpcFileFormat::ScanBatchesAsync(
   };
   auto open_generator = [](std::shared_ptr<ipc::RecordBatchFileReader> reader)
       -> Result<RecordBatchGenerator> { return reader->GetRecordBatchGenerator(); };
-  return MakeFromFuture(open_reader.Then(reopen_reader).Then(open_generator));
+  return MakeReadaheadGenerator(
+      MakeFromFuture(open_reader.Then(reopen_reader).Then(open_generator)),
+      options->batch_readahead);
 }
 
 //
