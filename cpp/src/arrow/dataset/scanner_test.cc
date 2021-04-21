@@ -18,7 +18,6 @@
 #include "arrow/dataset/scanner.h"
 
 #include <memory>
-#include <ostream>
 
 #include <gmock/gmock.h>
 
@@ -41,32 +40,17 @@ using testing::IsEmpty;
 namespace arrow {
 namespace dataset {
 
-struct TestScannerParams {
-  bool use_async;
-  bool use_threads;
-  int num_child_datasets;
-  int num_batches;
-  int items_per_batch;
-
-  static std::vector<TestScannerParams> Values() {
-    std::vector<TestScannerParams> values;
-    for (int sync = 0; sync < 2; sync++) {
-      for (int use_threads = 0; use_threads < 2; use_threads++) {
-        values.push_back(
-            {static_cast<bool>(sync), static_cast<bool>(use_threads), 1, 1, 1024});
-        values.push_back(
-            {static_cast<bool>(sync), static_cast<bool>(use_threads), 2, 16, 1024});
-      }
+static std::vector<TestScannerParams> ParamValues() {
+  std::vector<TestScannerParams> values;
+  for (int sync = 0; sync < 2; sync++) {
+    for (int use_threads = 0; use_threads < 2; use_threads++) {
+      values.push_back(
+          {static_cast<bool>(sync), static_cast<bool>(use_threads), 1, 1, 1024});
+      values.push_back(
+          {static_cast<bool>(sync), static_cast<bool>(use_threads), 2, 16, 1024});
     }
-    return values;
   }
-};
-
-std::ostream& operator<<(std::ostream& out, const TestScannerParams& params) {
-  out << (params.use_async ? "async-" : "sync-")
-      << (params.use_threads ? "threaded-" : "serial-") << params.num_child_datasets
-      << "d-" << params.num_batches << "b-" << params.items_per_batch << "i";
-  return out;
+  return values;
 }
 
 class TestScanner : public DatasetFixtureMixinWithParam<TestScannerParams> {
@@ -92,8 +76,7 @@ class TestScanner : public DatasetFixtureMixinWithParam<TestScannerParams> {
 
   void AssertScannerEqualsRepetitionsOf(
       std::shared_ptr<Scanner> scanner, std::shared_ptr<RecordBatch> batch,
-      const int64_t total_batches = GetParam().num_child_datasets *
-                                    GetParam().num_batches) {
+      const int64_t total_batches = GetParam().total_batches()) {
     auto expected = ConstantArrayGenerator::Repeat(total_batches, batch);
 
     // Verifies that the unified BatchReader is equivalent to flattening all the
@@ -103,8 +86,7 @@ class TestScanner : public DatasetFixtureMixinWithParam<TestScannerParams> {
 
   void AssertScanBatchesEqualRepetitionsOf(
       std::shared_ptr<Scanner> scanner, std::shared_ptr<RecordBatch> batch,
-      const int64_t total_batches = GetParam().num_child_datasets *
-                                    GetParam().num_batches) {
+      const int64_t total_batches = GetParam().total_batches()) {
     auto expected = ConstantArrayGenerator::Repeat(total_batches, batch);
 
     AssertScanBatchesEquals(expected.get(), scanner.get());
@@ -112,8 +94,7 @@ class TestScanner : public DatasetFixtureMixinWithParam<TestScannerParams> {
 
   void AssertScanBatchesUnorderedEqualRepetitionsOf(
       std::shared_ptr<Scanner> scanner, std::shared_ptr<RecordBatch> batch,
-      const int64_t total_batches = GetParam().num_child_datasets *
-                                    GetParam().num_batches) {
+      const int64_t total_batches = GetParam().total_batches()) {
     auto expected = ConstantArrayGenerator::Repeat(total_batches, batch);
 
     AssertScanBatchesUnorderedEquals(expected.get(), scanner.get(), 1);
@@ -457,8 +438,6 @@ TEST_P(TestScanner, ScanBatchesFailure) {
 
 TEST_P(TestScanner, Head) {
   auto batch_size = GetParam().items_per_batch;
-  auto num_batches = GetParam().num_batches;
-  auto num_datasets = GetParam().num_child_datasets;
   SetSchema({field("i32", int32()), field("f64", float64())});
   auto batch = ConstantArrayGenerator::Zeroes(batch_size, schema_);
 
@@ -477,7 +456,7 @@ TEST_P(TestScanner, Head) {
   ASSERT_OK_AND_ASSIGN(actual, scanner->Head(1));
   AssertTablesEqual(*expected, *actual);
 
-  if (num_batches > 1) {
+  if (GetParam().num_batches > 1) {
     ASSERT_OK_AND_ASSIGN(expected,
                          Table::FromRecordBatches(schema_, {batch, batch->Slice(0, 1)}));
     ASSERT_OK_AND_ASSIGN(actual, scanner->Head(batch_size + 1));
@@ -485,17 +464,17 @@ TEST_P(TestScanner, Head) {
   }
 
   ASSERT_OK_AND_ASSIGN(expected, scanner->ToTable());
-  ASSERT_OK_AND_ASSIGN(actual, scanner->Head(batch_size * num_batches * num_datasets));
+  ASSERT_OK_AND_ASSIGN(actual, scanner->Head(GetParam().expected_rows()));
   AssertTablesEqual(*expected, *actual);
 
   ASSERT_OK_AND_ASSIGN(expected, scanner->ToTable());
-  ASSERT_OK_AND_ASSIGN(actual,
-                       scanner->Head(batch_size * num_batches * num_datasets + 100));
+  ASSERT_OK_AND_ASSIGN(actual, scanner->Head(GetParam().expected_rows() + 100));
   AssertTablesEqual(*expected, *actual);
 }
 
 INSTANTIATE_TEST_SUITE_P(TestScannerThreading, TestScanner,
-                         ::testing::ValuesIn(TestScannerParams::Values()));
+                         ::testing::ValuesIn(ParamValues()),
+                         TestScannerParams::ToTestNameString);
 
 class TestScannerBuilder : public ::testing::Test {
   void SetUp() override {
