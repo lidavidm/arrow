@@ -41,7 +41,6 @@ namespace dataset {
 
 constexpr int64_t kBatchSize = 1UL << 12;
 constexpr int64_t kBatchRepetitions = 1 << 5;
-constexpr int64_t kNumRows = kBatchSize * kBatchRepetitions;
 
 using internal::checked_pointer_cast;
 
@@ -283,13 +282,14 @@ TEST_P(TestIpcFileFormatScan, ScanRecordBatchReader) {
   ASSERT_OK_AND_ASSIGN(auto fragment, format_->MakeFragment(*source));
 
   int64_t row_count = 0;
-
+  int64_t batch_count = 0;
   for (auto maybe_batch : Batches(fragment)) {
     ASSERT_OK_AND_ASSIGN(auto batch, maybe_batch);
     row_count += batch->num_rows();
+    batch_count++;
   }
-
-  ASSERT_EQ(row_count, GetParam().expected_rows());
+  EXPECT_EQ(batch_count, GetParam().total_batches());
+  EXPECT_EQ(row_count, GetParam().expected_rows());
 }
 
 TEST_P(TestIpcFileFormatScan, FragmentScanOptions) {
