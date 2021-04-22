@@ -205,11 +205,13 @@ Result<RecordBatchGenerator> IpcFileFormat::ScanBatchesAsync(
                           GetReadOptions(*reader->schema(), self.get(), options.get()));
     return OpenReader(source, options);
   };
-  auto open_generator = [](std::shared_ptr<ipc::RecordBatchFileReader> reader)
-      -> Result<RecordBatchGenerator> { return reader->GetRecordBatchGenerator(); };
-  return MakeReadaheadGenerator(
-      MakeFromFuture(open_reader.Then(reopen_reader).Then(open_generator)),
-      options->batch_readahead);
+  auto readahead_level = options->batch_readahead;
+  auto open_generator = [=](std::shared_ptr<ipc::RecordBatchFileReader> reader)
+      -> Result<RecordBatchGenerator> {
+    ARROW_ASSIGN_OR_RAISE(auto generator, reader->GetRecordBatchGenerator());
+    return MakeReadaheadGenerator(std::move(generator), readahead_level);
+  };
+  return MakeFromFuture(open_reader.Then(reopen_reader).Then(open_generator));
 }
 
 //
