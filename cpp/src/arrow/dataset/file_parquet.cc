@@ -325,6 +325,45 @@ Result<std::unique_ptr<parquet::arrow::FileReader>> ParquetFileFormat::GetReader
   return std::move(arrow_reader);
 }
 
+Future<std::shared_ptr<parquet::arrow::FileReader>> ParquetFileFormat::GetReaderAsync(
+    const FileSource& source, ScanOptions* options) const {
+  ARROW_ASSIGN_OR_RAISE(auto parquet_scan_options,
+                        GetFragmentScanOptions<ParquetFragmentScanOptions>(
+                            kParquetTypeName, options, default_fragment_scan_options));
+  MemoryPool* pool = options ? options->pool : default_memory_pool();
+  auto properties = MakeReaderProperties(*this, parquet_scan_options.get(), pool);
+  ARROW_ASSIGN_OR_RAISE(auto input, source.Open());
+  // Some ugliness needed due to having Future<unique_ptr<>> here
+  auto reader_fut =
+      parquet::ParquetFileReader::OpenAsync(std::move(input), std::move(properties));
+  auto path = source.path();
+  auto self = checked_pointer_cast<const ParquetFileFormat>(shared_from_this());
+  return reader_fut.Then(
+      [=](const std::unique_ptr<parquet::ParquetFileReader>&) mutable
+      -> Result<std::shared_ptr<parquet::arrow::FileReader>> {
+        ARROW_ASSIGN_OR_RAISE(std::unique_ptr<parquet::ParquetFileReader> reader,
+                              reader_fut.MoveResult());
+        std::shared_ptr<parquet::FileMetaData> metadata = reader->metadata();
+        auto arrow_properties = MakeArrowReaderProperties(*self, *metadata);
+        if (options) {
+          arrow_properties.set_batch_size(options->batch_size);
+        }
+        if (options && !options->use_threads) {
+          arrow_properties.set_use_threads(
+              parquet_scan_options->enable_parallel_column_conversion);
+        }
+        std::unique_ptr<parquet::arrow::FileReader> arrow_reader;
+        RETURN_NOT_OK(parquet::arrow::FileReader::Make(
+            pool, std::move(reader), std::move(arrow_properties), &arrow_reader));
+        return arrow_reader;
+      },
+      [path](
+          const Status& status) -> Result<std::shared_ptr<parquet::arrow::FileReader>> {
+        return status.WithMessage("Could not open Parquet input source '", path,
+                                  "': ", status.message());
+      });
+}
+
 Result<ScanTaskIterator> ParquetFileFormat::ScanFile(
     const std::shared_ptr<ScanOptions>& options,
     const std::shared_ptr<FileFragment>& fragment) const {
@@ -380,6 +419,58 @@ Result<ScanTaskIterator> ParquetFileFormat::ScanFile(
   }
 
   return MakeVectorIterator(std::move(tasks));
+}
+
+Result<RecordBatchGenerator> ParquetFileFormat::ScanBatchesAsync(
+    const std::shared_ptr<ScanOptions>& options,
+    const std::shared_ptr<FileFragment>& file) {
+  auto parquet_fragment = checked_pointer_cast<ParquetFileFragment>(file);
+  std::vector<int> row_groups;
+  bool pre_filtered = false;
+  // If RowGroup metadata is cached completely we can pre-filter RowGroups before opening
+  // a FileReader, potentially avoiding IO altogether if all RowGroups are excluded due to
+  // prior statistics knowledge. In the case where a RowGroup doesn't have statistics
+  // metdata, it will not be excluded.
+  if (parquet_fragment->metadata() != nullptr) {
+    ARROW_ASSIGN_OR_RAISE(row_groups, parquet_fragment->FilterRowGroups(options->filter));
+    pre_filtered = true;
+    if (row_groups.empty()) return MakeEmptyGenerator<std::shared_ptr<RecordBatch>>();
+  }
+  // Open the reader and pay the real IO cost.
+  auto make_generator =
+      [=](const std::shared_ptr<parquet::arrow::FileReader>& reader) mutable
+      -> Result<RecordBatchGenerator> {
+    // Ensure that parquet_fragment has FileMetaData
+    RETURN_NOT_OK(parquet_fragment->EnsureCompleteMetadata(reader.get()));
+    if (!pre_filtered) {
+      // row groups were not already filtered; do this now
+      ARROW_ASSIGN_OR_RAISE(row_groups,
+                            parquet_fragment->FilterRowGroups(options->filter));
+      if (row_groups.empty()) return MakeEmptyGenerator<std::shared_ptr<RecordBatch>>();
+    }
+    auto column_projection = InferColumnProjection(*reader, *options);
+    ARROW_ASSIGN_OR_RAISE(
+        auto parquet_scan_options,
+        GetFragmentScanOptions<ParquetFragmentScanOptions>(
+            kParquetTypeName, options.get(), default_fragment_scan_options));
+    if (parquet_scan_options->arrow_reader_properties->pre_buffer()) {
+      BEGIN_PARQUET_CATCH_EXCEPTIONS
+      // Ignore the future here - don't wait for pre-buffering (the generator itself will
+      // wait as necessary)
+      auto io_context = parquet_scan_options->arrow_reader_properties->io_context();
+      auto cache_options = parquet_scan_options->arrow_reader_properties->cache_options();
+      ARROW_UNUSED(reader->parquet_reader()->PreBuffer(row_groups, column_projection,
+                                                       io_context, cache_options));
+      END_PARQUET_CATCH_EXCEPTIONS
+    }
+    ARROW_ASSIGN_OR_RAISE(auto generator,
+                          reader->GetRecordBatchGenerator(row_groups, column_projection));
+    generator = MakeReadaheadGenerator(std::move(generator), options->batch_readahead);
+    // Must keep reader alive
+    return [reader, generator]() { return generator(); };
+  };
+  return MakeFromFuture(GetReaderAsync(parquet_fragment->source(), options.get())
+                            .Then(std::move(make_generator)));
 }
 
 Result<std::shared_ptr<ParquetFileFragment>> ParquetFileFormat::MakeFragment(
