@@ -37,6 +37,11 @@ CacheOptions CacheOptions::Defaults() {
                       internal::ReadRangeCache::kDefaultRangeSizeLimit, false};
 }
 
+CacheOptions CacheOptions::LazyDefaults() {
+  return CacheOptions{internal::ReadRangeCache::kDefaultHoleSizeLimit,
+                      internal::ReadRangeCache::kDefaultRangeSizeLimit, true};
+}
+
 CacheOptions CacheOptions::MakeFromNetworkMetrics(int64_t time_to_first_byte_millis,
                                                   int64_t transfer_bandwidth_mib_per_sec,
                                                   double ideal_bandwidth_utilization_frac,

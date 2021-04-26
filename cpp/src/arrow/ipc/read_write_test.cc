@@ -1017,8 +1017,7 @@ struct FileGeneratorWriterHelper : public FileWriterHelper {
     AsyncGenerator<std::shared_ptr<RecordBatch>> generator;
 
     {
-      auto fut =
-          RecordBatchFileReader::OpenAsync(buf_reader.get(), footer_offset_, options);
+      auto fut = RecordBatchFileReader::OpenAsync(buf_reader, footer_offset_, options);
       RETURN_NOT_OK(fut.status());
       EXPECT_FINISHES_OK_AND_ASSIGN(auto reader, fut);
       EXPECT_EQ(num_batches_written_, reader->num_record_batches());

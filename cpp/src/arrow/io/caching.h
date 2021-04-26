@@ -69,6 +69,7 @@ struct ARROW_EXPORT CacheOptions {
       int64_t max_ideal_request_size_mib = kDefaultMaxIdealRequestSizeMib);
 
   static CacheOptions Defaults();
+  static CacheOptions LazyDefaults();
 };
 
 namespace internal {

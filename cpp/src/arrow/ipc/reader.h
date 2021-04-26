@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "arrow/io/caching.h"
 #include "arrow/io/type_fwd.h"
 #include "arrow/ipc/message.h"
 #include "arrow/ipc/options.h"
@@ -200,7 +201,8 @@ class ARROW_EXPORT RecordBatchFileReader
   ///     batches. This is generally only a benefit for very wide and/or
   ///     compressed batches.
   virtual Result<AsyncGenerator<std::shared_ptr<RecordBatch>>> GetRecordBatchGenerator(
-      const io::IOContext& io_context = io::default_io_context(),
+      bool pre_buffer = true, const io::IOContext& io_context = io::default_io_context(),
+      io::CacheOptions options = io::CacheOptions::LazyDefaults(),
       arrow::internal::Executor* executor = NULLPTR) = 0;
 };
 
