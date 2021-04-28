@@ -185,6 +185,7 @@ Result<Future<int64_t>> IpcFileFormat::CountRows(
                                   predicate.ToString());
   } else {
     auto self = internal::checked_pointer_cast<IpcFileFormat>(shared_from_this());
+    // TODO: add filename to error
     return options->io_context.executor()->Submit([self, file]() -> Result<int64_t> {
       ARROW_ASSIGN_OR_RAISE(auto reader, OpenReader(file->source()));
       return reader->CountRows();

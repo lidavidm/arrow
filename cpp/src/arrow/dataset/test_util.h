@@ -19,7 +19,9 @@
 
 #include <algorithm>
 #include <ciso646>
+#include <fstream>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <ostream>
 #include <string>
@@ -370,6 +372,9 @@ class FileFormatFixtureMixin : public ::testing::Test {
 
   std::shared_ptr<FileSource> GetFileSource(RecordBatchReader* reader) {
     EXPECT_OK_AND_ASSIGN(auto buffer, FormatHelper::Write(reader));
+    std::ofstream out("/tmp/foo.csv");
+    out << buffer->ToString();
+    out.close();
     return std::make_shared<FileSource>(std::move(buffer));
   }
 

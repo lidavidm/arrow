@@ -544,7 +544,8 @@ TEST_P(TestScanner, ScanBatchesFailure) {
 
   // Case 1: failure when getting next scan task
   {
-    FragmentVector fragments{std::make_shared<FailingFragment>(batches)};
+    FragmentVector fragments{std::make_shared<FailingFragment>(batches),
+                             std::make_shared<InMemoryFragment>(batches)};
     auto dataset = std::make_shared<FragmentDataset>(schema_, fragments);
     auto scanner = MakeScanner(std::move(dataset));
     check_scanner(*batch, scanner.get());
@@ -553,7 +554,8 @@ TEST_P(TestScanner, ScanBatchesFailure) {
   // Case 2: failure when calling ScanTask::Execute
   {
     FragmentVector fragments{
-        std::make_shared<FailingScanTaskFragment<FailingExecuteScanTask>>(batches)};
+        std::make_shared<FailingScanTaskFragment<FailingExecuteScanTask>>(batches),
+        std::make_shared<InMemoryFragment>(batches)};
     auto dataset = std::make_shared<FragmentDataset>(schema_, fragments);
     auto scanner = MakeScanner(std::move(dataset));
     check_scanner(*batch, scanner.get());
@@ -562,7 +564,8 @@ TEST_P(TestScanner, ScanBatchesFailure) {
   // Case 3: failure when calling RecordBatchIterator::Next
   {
     FragmentVector fragments{
-        std::make_shared<FailingScanTaskFragment<FailingIterationScanTask>>(batches)};
+        std::make_shared<FailingScanTaskFragment<FailingIterationScanTask>>(batches),
+        std::make_shared<InMemoryFragment>(batches)};
     auto dataset = std::make_shared<FragmentDataset>(schema_, fragments);
     auto scanner = MakeScanner(std::move(dataset));
     check_scanner(*batch, scanner.get());

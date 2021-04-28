@@ -190,8 +190,9 @@ struct ScanBatchesState : public std::enable_shared_from_this<ScanBatchesState> 
     if (!result.ok()) {
       {
         std::lock_guard<std::mutex> lock(mutex);
-        task_drained[task_index] = true;
+        std::fill(task_drained.begin() + task_index, task_drained.end(), true);
         iteration_error = result.status();
+        no_more_tasks = true;
       }
       ready.notify_one();
     }
@@ -209,8 +210,8 @@ struct ScanBatchesState : public std::enable_shared_from_this<ScanBatchesState> 
   }
 
   void PushScanTask() {
-    if (no_more_tasks) return;
     std::unique_lock<std::mutex> lock(mutex);
+    if (no_more_tasks) return;
     auto maybe_task = scan_tasks.Next();
     if (!maybe_task.ok()) {
       no_more_tasks = true;

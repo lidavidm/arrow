@@ -137,6 +137,31 @@ Future<std::vector<T>> CollectAsyncGenerator(AsyncGenerator<T> generator) {
   return Loop(LoopBody{std::move(generator), std::move(vec)});
 }
 
+/// \brief Reduces the results of an async generator into a single value
+template <typename T, typename R, typename ReduceFn>
+Future<R> ReduceAsyncGenerator(AsyncGenerator<T> generator, R initial, ReduceFn reducer) {
+  struct LoopBody {
+    Future<ControlFlow<R>> operator()() {
+      auto next = generator_();
+      auto reducer = reducer_;
+      auto result = result_;
+      return next.Then([reducer, result](const T& value) -> Result<ControlFlow<R>> {
+        if (IsIterationEnd(value)) {
+          return Break(*result);
+        } else {
+          *result = reducer(*result, value);
+          return Continue();
+        }
+      });
+    }
+    AsyncGenerator<T> generator_;
+    ReduceFn reducer_;
+    std::shared_ptr<R> result_;
+  };
+  return Loop(
+      LoopBody{std::move(generator), std::move(reducer), std::make_shared<R>(initial)});
+}
+
 /// \see MakeMappedGenerator
 template <typename T, typename V>
 class MappingGenerator {

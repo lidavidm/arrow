@@ -195,7 +195,8 @@ class LexingBoundaryFinder : public BoundaryFinder {
     Lexer<quoting, escaping> lexer(options_);
 
     const char* line_end =
-        lexer.ReadLine(partial.data(), partial.data() + partial.size());
+        partial.empty() ? nullptr
+                        : lexer.ReadLine(partial.data(), partial.data() + partial.size());
     DCHECK_EQ(line_end, nullptr);  // Otherwise `partial` is a whole CSV line
     line_end = lexer.ReadLine(block.data(), block.data() + block.size());
 
@@ -240,25 +241,28 @@ class LexingBoundaryFinder : public BoundaryFinder {
 
 }  // namespace
 
-std::unique_ptr<Chunker> MakeChunker(const ParseOptions& options) {
-  std::shared_ptr<BoundaryFinder> delimiter;
+std::shared_ptr<BoundaryFinder> MakeBoundaryFinder(const ParseOptions& options) {
   if (!options.newlines_in_values) {
-    delimiter = MakeNewlineBoundaryFinder();
+    return MakeNewlineBoundaryFinder();
   } else {
     if (options.quoting) {
       if (options.escaping) {
-        delimiter = std::make_shared<LexingBoundaryFinder<true, true>>(options);
+        return std::make_shared<LexingBoundaryFinder<true, true>>(options);
       } else {
-        delimiter = std::make_shared<LexingBoundaryFinder<true, false>>(options);
+        return std::make_shared<LexingBoundaryFinder<true, false>>(options);
       }
     } else {
       if (options.escaping) {
-        delimiter = std::make_shared<LexingBoundaryFinder<false, true>>(options);
+        return std::make_shared<LexingBoundaryFinder<false, true>>(options);
       } else {
-        delimiter = std::make_shared<LexingBoundaryFinder<false, false>>(options);
+        return std::make_shared<LexingBoundaryFinder<false, false>>(options);
       }
     }
   }
+}
+
+std::unique_ptr<Chunker> MakeChunker(const ParseOptions& options) {
+  std::shared_ptr<BoundaryFinder> delimiter = MakeBoundaryFinder(options);
   return internal::make_unique<Chunker>(std::move(delimiter));
 }
 

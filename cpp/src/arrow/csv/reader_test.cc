@@ -216,5 +216,94 @@ TEST(StreamingReaderTests, NestedParallelism) {
   TestNestedParallelism(thread_pool, table_factory);
 }
 
+TEST(CountRowsTests, Basics) {
+  auto no_trailing_newline = R"(f64,f32
+1.0,2.0
+3.0,4.0)";
+  auto trailing_newline = R"(f64,f32
+1.0,2.0
+3.0,4.0
+)";
+  auto blank_lines = R"(f64,f32
+1.0,2.0
+
+3.0,4.0
+)";
+  auto newline_in_value = R"(str
+"a"
+"b
+"
+)";
+  auto blank_lines_macos = "f64,f32\r1.0,2.0\r\r\r3.0,4.0\r";
+  auto blank_lines_unix = "f64,f32\n1.0,2.0\n\n\n3.0,4.0\n";
+  auto blank_lines_win = "f64,f32\r\n1.0,2.0\r\n\r\n\r\n3.0,4.0\r";
+  auto blank_lines_mixed = "f64,f32\n1.0,2.0\r\n\n\r\n\n\r3.0,4.0";
+
+  auto test_one = [](const std::string& data, const ReadOptions& read_options,
+                     const ParseOptions& parse_options) {
+    SCOPED_TRACE(data);
+    auto input = std::make_shared<io::BufferReader>(data);
+    ASSERT_FINISHES_OK_AND_ASSIGN(auto rows,
+                                  CountRows(input, read_options, parse_options));
+    ASSERT_OK_AND_ASSIGN(
+        auto reader,
+        StreamingReader::Make(io::default_io_context(),
+                              std::make_shared<io::BufferReader>(data), read_options,
+                              parse_options, ConvertOptions::Defaults()));
+    std::shared_ptr<Table> table;
+    ASSERT_OK(reader->ReadAll(&table));
+    EXPECT_EQ(table->num_rows(), rows);
+  };
+  auto test_all = [&](const ReadOptions& read_options,
+                      const ParseOptions& parse_options) {
+    test_one(no_trailing_newline, read_options, parse_options);
+    test_one(trailing_newline, read_options, parse_options);
+    test_one(blank_lines, read_options, parse_options);
+    test_one(blank_lines_macos, read_options, parse_options);
+    test_one(blank_lines_unix, read_options, parse_options);
+    test_one(blank_lines_win, read_options, parse_options);
+    test_one(blank_lines_mixed, read_options, parse_options);
+  };
+  {
+    SCOPED_TRACE("ParseOptions = Defaults, ReadOptions = Defaults");
+    test_all(ReadOptions::Defaults(), ParseOptions::Defaults());
+  }
+  {
+    SCOPED_TRACE(
+        "ParseOptions = Defaults, ReadOptions = { autogenerate_column_names = true }");
+    auto read_options = ReadOptions::Defaults();
+    read_options.autogenerate_column_names = true;
+    test_all(read_options, ParseOptions::Defaults());
+  }
+  {
+    SCOPED_TRACE("ParseOptions = Defaults, ReadOptions = { skip_rows = 1 }");
+    auto read_options = ReadOptions::Defaults();
+    read_options.skip_rows = 1;
+    test_all(read_options, ParseOptions::Defaults());
+  }
+  {
+    SCOPED_TRACE("ParseOptions = { ignore_empty_lines = false }, ReadOptions = Defaults");
+    auto parse_options = ParseOptions::Defaults();
+    parse_options.ignore_empty_lines = false;
+    test_all(ReadOptions::Defaults(), parse_options);
+  }
+  {
+    SCOPED_TRACE("ParseOptions = { newlines_in_values = true }, ReadOptions = Defaults");
+    auto parse_options = ParseOptions::Defaults();
+    parse_options.newlines_in_values = true;
+    test_all(ReadOptions::Defaults(), parse_options);
+    test_one(newline_in_value, ReadOptions::Defaults(), parse_options);
+  }
+  {
+    // Error cases
+    auto parse_options = ParseOptions::Defaults();
+    auto read_options = ReadOptions::Defaults();
+    read_options.skip_rows = 3;
+    auto input = std::make_shared<io::BufferReader>(trailing_newline);
+    ASSERT_FINISHES_AND_RAISES(Invalid, CountRows(input, read_options, parse_options));
+  }
+  // TODO: skip_rows = 2 is inconsistent
+}
+
 }  // namespace csv
 }  // namespace arrow

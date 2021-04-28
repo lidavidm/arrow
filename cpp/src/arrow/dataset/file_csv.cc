@@ -95,13 +95,13 @@ static inline Result<csv::ConvertOptions> GetConvertOptions(
   std::unordered_set<std::string> materialized_fields(materialized.begin(),
                                                       materialized.end());
   for (auto field : scan_options->dataset_schema->fields()) {
-    if (materialized_fields.find(field->name()) == materialized_fields.end()) continue;
     // Ignore virtual columns.
     if (column_names.find(field->name()) == column_names.end()) continue;
-    // Only read the requested columns
-    convert_options.include_columns.push_back(field->name());
     // Properly set conversion types
     convert_options.column_types[field->name()] = field->type();
+    if (materialized_fields.find(field->name()) == materialized_fields.end()) continue;
+    // Only read the requested columns
+    convert_options.include_columns.push_back(field->name());
   }
   return convert_options;
 }
@@ -246,6 +246,21 @@ Result<ScanTaskIterator> CsvFileFormat::ScanFile(
   auto task = std::make_shared<CsvScanTask>(std::move(this_), options, fragment);
 
   return MakeVectorIterator<std::shared_ptr<ScanTask>>({std::move(task)});
+}
+
+Result<Future<int64_t>> CsvFileFormat::CountRows(
+    const std::shared_ptr<FileFragment>& file, Expression predicate,
+    std::shared_ptr<ScanOptions> options) {
+  if (FieldsInExpression(predicate).size() > 0) {
+    return Status::NotImplemented("Cannot count rows using metadata for predicate: ",
+                                  predicate.ToString());
+  } else {
+    ARROW_ASSIGN_OR_RAISE(auto read_options, GetReadOptions(*this, options));
+    // TODO: add filename to error
+    ARROW_ASSIGN_OR_RAISE(auto input, file->source().OpenCompressed());
+    return csv::CountRows(input, read_options, parse_options, options->io_context,
+                          internal::GetCpuThreadPool());
+  }
 }
 
 }  // namespace dataset

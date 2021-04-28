@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -1061,6 +1062,85 @@ Future<std::shared_ptr<StreamingReader>> StreamingReader::MakeAsync(
     const ParseOptions& parse_options, const ConvertOptions& convert_options) {
   return MakeStreamingReader(io_context, std::move(input), cpu_executor, read_options,
                              parse_options, convert_options);
+}
+
+Future<int64_t> CountRows(std::shared_ptr<io::InputStream> input,
+                          const ReadOptions& read_options,
+                          const ParseOptions& parse_options, io::IOContext io_context,
+                          internal::Executor* cpu_executor) {
+  if (!cpu_executor) cpu_executor = internal::GetCpuThreadPool();
+  ARROW_ASSIGN_OR_RAISE(auto istream_it,
+                        io::MakeInputStreamIterator(input, read_options.block_size));
+  // TODO Consider exposing readahead as a read option (ARROW-12090)
+  ARROW_ASSIGN_OR_RAISE(
+      auto bg_it, MakeBackgroundGenerator(std::move(istream_it), io_context.executor()));
+  auto transferred_it = MakeTransferredGenerator(bg_it, cpu_executor);
+  auto buffer_generator = CSVBufferIterator::MakeAsync(std::move(transferred_it));
+  return buffer_generator().Then(
+      [=](const std::shared_ptr<Buffer>& first_buffer) -> Future<int64_t> {
+        if (first_buffer == nullptr) return Status::Invalid("Empty CSV file");
+        auto boundary_finder = MakeBoundaryFinder(parse_options);
+        AsyncGenerator<CSVBlock> block_generator = SerialBlockReader::MakeAsyncIterator(
+            std::move(buffer_generator), MakeChunker(parse_options), first_buffer);
+        std::function<Result<int64_t>(const CSVBlock&)> counter =
+            [=](const CSVBlock& block) -> Result<int64_t> {
+          int64_t count = 0;
+          util::string_view partial(*block.partial);
+          int64_t consumed = 0;
+          for (auto current_buf :
+               std::vector<Buffer*>{block.completion.get(), block.buffer.get()}) {
+            util::string_view buffer(*current_buf);
+            DCHECK(partial.find_first_of("\r\n") == util::string_view::npos);
+            while (!buffer.empty()) {
+              int64_t out_pos = 0;
+              RETURN_NOT_OK(boundary_finder->FindFirst(partial, buffer, &out_pos));
+              if (out_pos == BoundaryFinder::kNoDelimiterFound) break;
+              consumed += partial.size();
+              partial = util::string_view();
+              if (!parse_options.ignore_empty_lines) {
+                // Block from BoundaryFinder may have multiple newlines at the end
+                int i = out_pos - 1;
+                while (i >= 0) {
+                  if (buffer[i] == '\r') {
+                    i--;
+                    count++;
+                  } else if (buffer[i] == '\n') {
+                    i--;
+                    count++;
+                    if (i >= 0 && buffer[i] == '\r') i--;
+                  } else {
+                    break;
+                  }
+                }
+              } else {
+                auto end = buffer.substr(0, out_pos).find_first_not_of("\r\n");
+                if (end != util::string_view::npos) count++;
+              }
+              buffer = buffer.substr(out_pos);
+              consumed += out_pos;
+            }
+            partial = buffer;
+          }
+          if (block.is_final && !partial.empty()) count++;
+          RETURN_NOT_OK(block.consume_bytes(consumed));
+          return count;
+        };
+        AsyncGenerator<int64_t> count_generator = MakeMappedGenerator<CSVBlock, int64_t>(
+            std::move(block_generator), std::move(counter));
+        return ReduceAsyncGenerator(
+                   count_generator, int64_t(),
+                   [](const int64_t left, const int64_t right) { return left + right; })
+            .Then([=](int64_t count) -> Result<int64_t> {
+              if (!read_options.autogenerate_column_names) {
+                if (count < 1) return Status::Invalid("No header found");
+                count--;
+              }
+              if (read_options.skip_rows > count) {
+                return Status::Invalid("Cannot skip ", read_options.skip_rows, " rows");
+              }
+              return count - read_options.skip_rows;
+            });
+      });
 }
 
 }  // namespace csv

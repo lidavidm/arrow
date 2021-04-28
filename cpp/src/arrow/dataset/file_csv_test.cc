@@ -50,7 +50,10 @@ class CsvFormatHelper {
   }
 
   static std::shared_ptr<CsvFileFormat> MakeFormat() {
-    return std::make_shared<CsvFileFormat>();
+    auto format = std::make_shared<CsvFileFormat>();
+    // Test that read rows count on this (as the writer emits nulls as blank lines)
+    format->parse_options.ignore_empty_lines = false;
+    return format;
   }
 };
 
@@ -245,6 +248,8 @@ N/A
   EXPECT_EQ(supported, true);
 }
 
+TEST_F(TestCsvFileFormat, CountRows) { TestCountRows(); }
+
 TEST_P(TestCsvFileFormat, NonProjectedFieldWithDifferingTypeFromInferred) {
   auto source = GetFileSource(R"(betrayal_not_really_f64,str
 1.0,foo
@@ -305,16 +310,7 @@ INSTANTIATE_TEST_SUITE_P(TestZSTDCsv, TestCsvFileFormat,
                          ::testing::Values(Compression::ZSTD));
 #endif
 
-class CsvWithNullsHelper : public CsvFormatHelper {
- public:
-  static std::shared_ptr<CsvFileFormat> MakeFormat() {
-    auto format = std::make_shared<CsvFileFormat>();
-    format->parse_options.ignore_empty_lines = false;
-    return format;
-  }
-};
-
-class TestCsvFileFormatScan : public FileFormatScanMixin<CsvWithNullsHelper> {};
+class TestCsvFileFormatScan : public FileFormatScanMixin<CsvFormatHelper> {};
 
 TEST_P(TestCsvFileFormatScan, ScanRecordBatchReader) { TestScan(); }
 TEST_P(TestCsvFileFormatScan, ScanRecordBatchReaderWithVirtualColumn) {

@@ -30,6 +30,9 @@ namespace arrow {
 namespace csv {
 
 ARROW_EXPORT
+std::shared_ptr<BoundaryFinder> MakeBoundaryFinder(const ParseOptions& options);
+
+ARROW_EXPORT
 std::unique_ptr<Chunker> MakeChunker(const ParseOptions& options);
 
 }  // namespace csv
