@@ -101,6 +101,9 @@ struct ARROW_EXPORT ConvertOptions {
   /// or null by default)
   /// This option is ignored if `include_columns` is empty.
   bool include_missing_columns = false;
+  /// If true, no columns are decoded (record batches will have a row count and no
+  /// columns). This is useful if you need only a row count.
+  bool skip_decoding = false;
 
   /// User-defined timestamp parsers, using the virtual parser interface in
   /// arrow/util/value_parsing.h. More than one parser can be specified, and

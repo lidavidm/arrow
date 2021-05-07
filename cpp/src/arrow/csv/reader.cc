@@ -426,7 +426,10 @@ class ReaderMixin {
           ConversionSchema::NullColumn(std::move(col_name), std::move(type)));
     };
 
-    if (convert_options_.include_columns.empty()) {
+    if (convert_options_.skip_decoding) {
+      // Column is used only to get a row count; won't be included in results
+      append_null_column("fabricated");
+    } else if (convert_options_.include_columns.empty()) {
       // Include all columns in CSV file order
       for (int32_t col_index = 0; col_index < num_csv_cols_; ++col_index) {
         append_csv_column(column_names_[col_index], col_index);
@@ -672,13 +675,20 @@ class BaseStreamingReader : public ReaderMixin, public csv::StreamingReader {
     }
 
     if (schema_ == nullptr) {
-      FieldVector fields(arrays.size());
-      for (size_t i = 0; i < arrays.size(); ++i) {
-        fields[i] = field(conversion_schema_.columns[i].name, arrays[i]->type());
+      if (convert_options_.skip_decoding) {
+        schema_ = arrow::schema({});
+      } else {
+        FieldVector fields(arrays.size());
+        for (size_t i = 0; i < arrays.size(); ++i) {
+          fields[i] = field(conversion_schema_.columns[i].name, arrays[i]->type());
+        }
+        schema_ = arrow::schema(std::move(fields));
       }
-      schema_ = arrow::schema(std::move(fields));
     }
     const auto n_rows = arrays[0]->length();
+    if (convert_options_.skip_decoding) {
+      return RecordBatch::Make(schema_, n_rows, ArrayVector{});
+    }
     return RecordBatch::Make(schema_, n_rows, std::move(arrays));
   }
 

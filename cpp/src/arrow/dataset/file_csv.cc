@@ -48,18 +48,28 @@ using internal::SerialExecutor;
 using RecordBatchGenerator = std::function<Future<std::shared_ptr<RecordBatch>>()>;
 
 Result<std::unordered_set<std::string>> GetColumnNames(
-    const csv::ParseOptions& parse_options, util::string_view first_block,
-    MemoryPool* pool) {
+    const csv::ReadOptions& read_options, const csv::ParseOptions& parse_options,
+    util::string_view first_block, MemoryPool* pool) {
+  if (!read_options.column_names.empty()) {
+    std::unordered_set<std::string> column_names;
+    for (const auto& s : read_options.column_names) {
+      if (!column_names.emplace(s).second) {
+        return Status::Invalid("CSV file contained multiple columns named ", s);
+      }
+    }
+    return column_names;
+  }
+
   uint32_t parsed_size = 0;
-  csv::BlockParser parser(pool, parse_options, /*num_cols=*/-1,
-                          /*max_num_rows=*/1);
+  int32_t max_num_rows = read_options.skip_rows + 1;
+  csv::BlockParser parser(pool, parse_options, /*num_cols=*/-1, max_num_rows);
 
   RETURN_NOT_OK(parser.Parse(util::string_view{first_block}, &parsed_size));
 
-  if (parser.num_rows() != 1) {
-    return Status::Invalid(
-        "Could not read first row from CSV file, either "
-        "file is truncated or header is larger than block size");
+  if (parser.num_rows() != max_num_rows) {
+    return Status::Invalid("Could not read first ", max_num_rows,
+                           " rows from CSV file, either file is truncated or"
+                           " header is larger than block size");
   }
 
   if (parser.num_cols() == 0) {
@@ -84,14 +94,14 @@ static inline Result<csv::ConvertOptions> GetConvertOptions(
     const CsvFileFormat& format, const ScanOptions* scan_options,
     const util::string_view first_block) {
   ARROW_ASSIGN_OR_RAISE(
-      auto column_names,
-      GetColumnNames(format.parse_options, first_block,
-                     scan_options ? scan_options->pool : default_memory_pool()));
-
-  ARROW_ASSIGN_OR_RAISE(
       auto csv_scan_options,
       GetFragmentScanOptions<CsvFragmentScanOptions>(
           kCsvTypeName, scan_options, format.default_fragment_scan_options));
+  ARROW_ASSIGN_OR_RAISE(
+      auto column_names,
+      GetColumnNames(csv_scan_options->read_options, format.parse_options, first_block,
+                     scan_options ? scan_options->pool : default_memory_pool()));
+
   auto convert_options = csv_scan_options->convert_options;
 
   if (!scan_options) return convert_options;
@@ -107,6 +117,11 @@ static inline Result<csv::ConvertOptions> GetConvertOptions(
     convert_options.include_columns.push_back(field->name());
     // Properly set conversion types
     convert_options.column_types[field->name()] = field->type();
+  }
+  if (convert_options.include_columns.empty()) {
+    // We know which columns we want - so if none were specified, override the default
+    // behavior of reading all columns and don't do any parsing
+    convert_options.skip_decoding = true;
   }
   return convert_options;
 }
