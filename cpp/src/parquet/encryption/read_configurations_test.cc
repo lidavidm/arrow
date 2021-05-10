@@ -22,6 +22,8 @@
 
 #include "arrow/io/file.h"
 #include "arrow/testing/gtest_compat.h"
+#include "arrow/testing/gtest_util.h"
+#include "arrow/util/io_util.h"
 
 #include "parquet/column_reader.h"
 #include "parquet/column_writer.h"
