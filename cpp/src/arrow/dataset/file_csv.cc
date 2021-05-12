@@ -118,11 +118,6 @@ static inline Result<csv::ConvertOptions> GetConvertOptions(
     // Properly set conversion types
     convert_options.column_types[field->name()] = field->type();
   }
-  if (convert_options.include_columns.empty()) {
-    // We know which columns we want - so if none were specified, override the default
-    // behavior of reading all columns and don't do any parsing
-    convert_options.skip_decoding = true;
-  }
   return convert_options;
 }
 
@@ -270,6 +265,20 @@ Result<RecordBatchGenerator> CsvFileFormat::ScanBatchesAsync(
   auto reader_fut =
       OpenReaderAsync(source, *this, scan_options, internal::GetCpuThreadPool());
   return GeneratorFromReader(std::move(reader_fut));
+}
+
+Future<util::optional<int64_t>> CsvFileFormat::CountRows(
+    const std::shared_ptr<FileFragment>& file, compute::Expression predicate,
+    std::shared_ptr<ScanOptions> options) {
+  if (ExpressionHasFieldRefs(predicate)) {
+    return Future<util::optional<int64_t>>::MakeFinished(util::nullopt);
+  }
+  auto self = internal::checked_pointer_cast<CsvFileFormat>(shared_from_this());
+  ARROW_ASSIGN_OR_RAISE(auto input, file->source().OpenCompressed());
+  ARROW_ASSIGN_OR_RAISE(auto read_options, GetReadOptions(*self, options));
+  return csv::CountRows(options->io_context, std::move(input), read_options,
+                        self->parse_options)
+      .Then([](int64_t count) { return util::make_optional<int64_t>(count); });
 }
 
 }  // namespace dataset

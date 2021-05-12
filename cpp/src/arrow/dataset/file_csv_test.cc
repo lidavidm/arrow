@@ -50,7 +50,10 @@ class CsvFormatHelper {
   }
 
   static std::shared_ptr<CsvFileFormat> MakeFormat() {
-    return std::make_shared<CsvFileFormat>();
+    auto format = std::make_shared<CsvFileFormat>();
+    // Required for CountRows
+    format->parse_options.ignore_empty_lines = false;
+    return format;
   }
 };
 
@@ -122,7 +125,7 @@ N/A
     row_count += batch->num_rows();
   }
 
-  ASSERT_EQ(row_count, 3);
+  ASSERT_EQ(row_count, 4);
 }
 
 TEST_P(TestCsvFileFormat, CustomConvertOptions) {
@@ -221,7 +224,7 @@ N/A
     row_count += batch->num_rows();
   }
 
-  ASSERT_EQ(row_count, 3);
+  ASSERT_EQ(row_count, 4);
 }
 
 TEST_P(TestCsvFileFormat, InspectFailureWithRelevantError) {
@@ -321,6 +324,8 @@ TEST_P(TestCsvFileFormat, WriteRecordBatchReader) {
   GTEST_SKIP() << "Write support not implemented for CSV";
 }
 
+TEST_P(TestCsvFileFormat, CountRows) { TestCountRows(); }
+
 INSTANTIATE_TEST_SUITE_P(TestUncompressedCsv, TestCsvFileFormat,
                          ::testing::Values(Compression::UNCOMPRESSED));
 #ifdef ARROW_WITH_BZ2
@@ -341,16 +346,7 @@ INSTANTIATE_TEST_SUITE_P(TestZSTDCsv, TestCsvFileFormat,
                          ::testing::Values(Compression::ZSTD));
 #endif
 
-class CsvWithNullsHelper : public CsvFormatHelper {
- public:
-  static std::shared_ptr<CsvFileFormat> MakeFormat() {
-    auto format = std::make_shared<CsvFileFormat>();
-    format->parse_options.ignore_empty_lines = false;
-    return format;
-  }
-};
-
-class TestCsvFileFormatScan : public FileFormatScanMixin<CsvWithNullsHelper> {};
+class TestCsvFileFormatScan : public FileFormatScanMixin<CsvFormatHelper> {};
 
 TEST_P(TestCsvFileFormatScan, ScanRecordBatchReader) { TestScan(); }
 TEST_P(TestCsvFileFormatScan, ScanRecordBatchReaderWithVirtualColumn) {
@@ -359,21 +355,6 @@ TEST_P(TestCsvFileFormatScan, ScanRecordBatchReaderWithVirtualColumn) {
 TEST_P(TestCsvFileFormatScan, ScanRecordBatchReaderProjected) { TestScanProjected(); }
 TEST_P(TestCsvFileFormatScan, ScanRecordBatchReaderProjectedMissingCols) {
   TestScanProjectedMissingCols();
-}
-TEST_P(TestCsvFileFormatScan, CountRows) {
-  auto reader = GetRecordBatchReader(schema({field("f64", float64())}));
-  auto source = this->GetFileSource(reader.get());
-
-  this->SetSchema(reader->schema()->fields());
-  auto fragment = this->MakeFragment(*source);
-
-  auto dataset =
-      std::make_shared<FragmentDataset>(reader->schema(), FragmentVector{fragment});
-  ScannerBuilder builder(dataset, opts_);
-  ASSERT_OK(builder.UseAsync(GetParam().use_async));
-  ASSERT_OK_AND_ASSIGN(auto scanner, builder.Finish());
-  ASSERT_OK_AND_ASSIGN(auto row_count, scanner->CountRows())
-  ASSERT_EQ(row_count, GetParam().expected_rows());
 }
 
 INSTANTIATE_TEST_SUITE_P(TestScan, TestCsvFileFormatScan,
