@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -1085,9 +1086,12 @@ Result<int64_t> SyncScanner::CountRows() {
     futures.push_back(
         count_fut.Then([fragment](const util::optional<int64_t>& count)
                            -> std::pair<int64_t, std::shared_ptr<Fragment>> {
+          std::cout << "SyncScanner" << std::endl;
           if (count.has_value()) {
+            std::cout << "SyncScanner got count " << *count << ' ' << fragment->ToString() << std::endl;
             return std::make_pair(*count, nullptr);
           }
+          std::cout << "SyncScanner got no count " << fragment->ToString() << std::endl;
           return std::make_pair(0, std::move(fragment));
         }));
   }

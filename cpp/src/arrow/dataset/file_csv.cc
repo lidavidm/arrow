@@ -18,6 +18,7 @@
 #include "arrow/dataset/file_csv.h"
 
 #include <algorithm>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -270,15 +271,22 @@ Result<RecordBatchGenerator> CsvFileFormat::ScanBatchesAsync(
 Future<util::optional<int64_t>> CsvFileFormat::CountRows(
     const std::shared_ptr<FileFragment>& file, compute::Expression predicate,
     std::shared_ptr<ScanOptions> options) {
+  std::cout << "CsvFileFormat::CountRows" << std::endl;
   if (ExpressionHasFieldRefs(predicate)) {
+    std::cout << "CsvFileFormat::CountRows bail out" << std::endl;
     return Future<util::optional<int64_t>>::MakeFinished(util::nullopt);
   }
   auto self = internal::checked_pointer_cast<CsvFileFormat>(shared_from_this());
+  std::cout << "CsvFileFormat::CountRows opening" << std::endl;
   ARROW_ASSIGN_OR_RAISE(auto input, file->source().OpenCompressed());
   ARROW_ASSIGN_OR_RAISE(auto read_options, GetReadOptions(*self, options));
+  std::cout << "CsvFileFormat::CountRows got options" << std::endl;
   return csv::CountRows(options->io_context, std::move(input), read_options,
                         self->parse_options)
-      .Then([](int64_t count) { return util::make_optional<int64_t>(count); });
+      .Then([](int64_t count) {
+        std::cout << "CsvFileFormat::CountRows got count " << count << std::endl;
+        return util::make_optional<int64_t>(count);
+      });
 }
 
 }  // namespace dataset

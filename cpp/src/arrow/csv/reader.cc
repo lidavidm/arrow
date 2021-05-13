@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -1024,13 +1025,19 @@ class CSVRowCounter : public ReaderMixin,
         row_count_(0) {}
 
   Future<int64_t> Count() {
+    std::cout << "CSVRowCounter::Count" << std::endl;
     auto self = shared_from_this();
     return Init(self).Then(
-        [self](const arrow::detail::Empty&) { return self->DoCount(self); });
+        [self](const arrow::detail::Empty&) { return self->DoCount(self); })
+        .Then([](int64_t count) -> int64_t {
+          std::cout << "CSVRowCounter::Count done " << count << std::endl;
+          return count;
+        });
   }
 
  private:
   Future<> Init(const std::shared_ptr<CSVRowCounter>& self) {
+    std::cout << "CSVRowCounter::Init" << std::endl;
     ARROW_ASSIGN_OR_RAISE(auto istream_it,
                           io::MakeInputStreamIterator(input_, read_options_.block_size));
     // TODO Consider exposing readahead as a read option (ARROW-12090)
@@ -1038,35 +1045,46 @@ class CSVRowCounter : public ReaderMixin,
                                                               io_context_.executor()));
     auto transferred_it = MakeTransferredGenerator(bg_it, cpu_executor_);
     auto buffer_generator = CSVBufferIterator::MakeAsync(std::move(transferred_it));
+    std::cout << "CSVRowCounter::Init made iterator" << std::endl;
 
     return buffer_generator().Then([self, buffer_generator](
                                        std::shared_ptr<Buffer> first_buffer) {
+      std::cout << "CSVRowCounter::Init got first buffer" << std::endl;
       if (!first_buffer) {
         return Status::Invalid("Empty CSV file");
       }
+      std::cout << "CSVRowCounter::Init reading header" << std::endl;
       RETURN_NOT_OK(self->ProcessHeader(first_buffer, &first_buffer));
       self->block_generator_ = SerialBlockReader::MakeAsyncIterator(
           buffer_generator, MakeChunker(self->parse_options_), std::move(first_buffer));
+      std::cout << "CSVRowCounter::Init made async iterator" << std::endl;
       return Status::OK();
     });
   }
 
   Future<int64_t> DoCount(const std::shared_ptr<CSVRowCounter>& self) {
+    std::cout << "CSVRowCounter::DoCount" << std::endl;
     // We must return a value instead of Status/Future<> to work with MakeMappedGenerator,
     // and we must use a type with a valid end value to work with IterationEnd.
     std::function<Result<util::optional<int64_t>>(const CSVBlock&)> count_cb =
         [self](const CSVBlock& maybe_block) -> Result<util::optional<int64_t>> {
+      std::cout << "CSVRowCounter::DoCount counting block" << std::endl;
       ARROW_ASSIGN_OR_RAISE(
           auto parser,
           self->Parse(maybe_block.partial, maybe_block.completion, maybe_block.buffer,
                       maybe_block.block_index, maybe_block.is_final));
+      std::cout << "CSVRowCounter::DoCount got parser" << std::endl;
       RETURN_NOT_OK(maybe_block.consume_bytes(parser.parsed_bytes));
       self->row_count_ += parser.parser->num_rows();
-      return parser.parser->num_rows();
+      std::cout << "CSVRowCounter::DoCount counted " << self->row_count_ << std::endl;
+      return self->row_count_;
     };
     auto count_gen = MakeMappedGenerator(block_generator_, std::move(count_cb));
     return DiscardAllFromAsyncGenerator(count_gen).Then(
-        [self](const arrow::detail::Empty&) { return self->row_count_; });
+        [self](const arrow::detail::Empty&) -> int64_t {
+          std::cout << "CSVRowCounter::DoCount finished count " << self->row_count_ << std::endl;
+          return self->row_count_;
+        });
   }
 
   Executor* cpu_executor_;
@@ -1132,10 +1150,15 @@ Future<int64_t> CountRows(io::IOContext io_context,
                           std::shared_ptr<io::InputStream> input,
                           const ReadOptions& read_options,
                           const ParseOptions& parse_options) {
+  std::cout << "CountRows start" << std::endl;
   auto cpu_executor = internal::GetCpuThreadPool();
   auto counter = std::make_shared<CSVRowCounter>(
       io_context, cpu_executor, std::move(input), read_options, parse_options);
-  return counter->Count();
+  std::cout << "CountRows init" << std::endl;
+  return counter->Count().Then([](int64_t count) -> int64_t {
+    std::cout << "CountRows finished " << count << std::endl;
+    return count;
+  });
 }
 
 }  // namespace csv

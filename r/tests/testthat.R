@@ -24,4 +24,4 @@ if (identical(tolower(Sys.getenv("ARROW_R_DEV", "false")), "true")) {
 } else {
   arrow_reporter <- check_reporter()
 }
-test_check("arrow", reporter = arrow_reporter)
+test_check("arrow", reporter = "location")
