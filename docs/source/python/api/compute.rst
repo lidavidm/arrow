@@ -350,6 +350,7 @@ Structural Transforms
 
    binary_length
    case_when
+   choose
    coalesce
    fill_null
    if_else
