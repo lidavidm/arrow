@@ -47,9 +47,8 @@ Computation inputs are represented as a general :class:`Datum` class,
 which is a tagged union of several shapes of data such as :class:`Scalar`,
 :class:`Array` and :class:`ChunkedArray`.  Many compute functions support
 both array (chunked or not) and scalar inputs, however some will mandate
-either.  For example, the ``fill_null`` function requires its second input
-to be a scalar, while ``sort_indices`` requires its first and only input to
-be an array.
+either.  For example, while ``sort_indices`` requires its first and only
+input to be an array.
 
 Invoking functions
 ------------------
@@ -1003,23 +1002,21 @@ Structural transforms
 +--------------------------+------------+---------------------------------------------------+---------------------+---------+
 | coalesce                 | Varargs    | Any                                               | Input type          | \(3)    |
 +--------------------------+------------+---------------------------------------------------+---------------------+---------+
-| fill_null                | Binary     | Boolean, Null, Numeric, Temporal, String-like     | Input type          | \(4)    |
+| if_else                  | Ternary    | Boolean, Null, Numeric, Temporal                  | Input type          | \(4)    |
 +--------------------------+------------+---------------------------------------------------+---------------------+---------+
-| if_else                  | Ternary    | Boolean, Null, Numeric, Temporal                  | Input type          | \(5)    |
+| is_finite                | Unary      | Float, Double                                     | Boolean             | \(5)    |
 +--------------------------+------------+---------------------------------------------------+---------------------+---------+
-| is_finite                | Unary      | Float, Double                                     | Boolean             | \(6)    |
+| is_inf                   | Unary      | Float, Double                                     | Boolean             | \(6)    |
 +--------------------------+------------+---------------------------------------------------+---------------------+---------+
-| is_inf                   | Unary      | Float, Double                                     | Boolean             | \(7)    |
+| is_nan                   | Unary      | Float, Double                                     | Boolean             | \(7)    |
 +--------------------------+------------+---------------------------------------------------+---------------------+---------+
-| is_nan                   | Unary      | Float, Double                                     | Boolean             | \(8)    |
+| is_null                  | Unary      | Any                                               | Boolean             | \(8)    |
 +--------------------------+------------+---------------------------------------------------+---------------------+---------+
-| is_null                  | Unary      | Any                                               | Boolean             | \(9)    |
+| is_valid                 | Unary      | Any                                               | Boolean             | \(9)    |
 +--------------------------+------------+---------------------------------------------------+---------------------+---------+
-| is_valid                 | Unary      | Any                                               | Boolean             | \(10)   |
+| list_value_length        | Unary      | List-like                                         | Int32 or Int64      | \(10)   |
 +--------------------------+------------+---------------------------------------------------+---------------------+---------+
-| list_value_length        | Unary      | List-like                                         | Int32 or Int64      | \(11)   |
-+--------------------------+------------+---------------------------------------------------+---------------------+---------+
-| make_struct              | Varargs    | Any                                               | Struct              | \(12)   |
+| make_struct              | Varargs    | Any                                               | Struct              | \(11)   |
 +--------------------------+------------+---------------------------------------------------+---------------------+---------+
 
 * \(1) This function acts like a SQL 'case when' statement or switch-case. The
@@ -1045,11 +1042,7 @@ Structural transforms
 * \(3) Each row of the output will be the corresponding value of the first
   input which is non-null for that row, otherwise null.
 
-* \(4) First input must be an array, second input a scalar of the same type.
-  Output is an array of the same type as the inputs, and with the same values
-  as the first input, except for nulls replaced with the second input value.
-
-* \(5) First input must be a Boolean scalar or array. Second and third inputs
+* \(4) First input must be a Boolean scalar or array. Second and third inputs
   could be scalars or arrays and must be of the same type. Output is an array
   (or scalar if all inputs are scalar) of the same type as the second/ third
   input. If the nulls present on the first input, they will be promoted to the
@@ -1057,21 +1050,21 @@ Structural transforms
 
   Also see: :ref:`replace_with_mask <cpp-compute-vector-structural-transforms>`.
 
-* \(6) Output is true iff the corresponding input element is finite (not Infinity,
+* \(5) Output is true iff the corresponding input element is finite (not Infinity,
   -Infinity, or NaN).
 
-* \(7) Output is true iff the corresponding input element is Infinity/-Infinity.
+* \(6) Output is true iff the corresponding input element is Infinity/-Infinity.
 
-* \(8) Output is true iff the corresponding input element is NaN.
+* \(7) Output is true iff the corresponding input element is NaN.
 
-* \(9) Output is true iff the corresponding input element is null.
+* \(8) Output is true iff the corresponding input element is null.
 
-* \(10) Output is true iff the corresponding input element is non-null.
+* \(9) Output is true iff the corresponding input element is non-null.
 
-* \(11) Each output element is the length of the corresponding input element
+* \(10) Each output element is the length of the corresponding input element
   (null if input is null).  Output type is Int32 for List, Int64 for LargeList.
 
-* \(12) The output struct's field types are the types of its arguments. The
+* \(11) The output struct's field types are the types of its arguments. The
   field names are specified using an instance of :struct:`MakeStructOptions`.
   The output shape will be scalar if all inputs are scalar, otherwise any
   scalars will be broadcast to arrays.
