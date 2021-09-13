@@ -1626,10 +1626,8 @@ class OrGenerator {
 
         Result<T> operator()(const T& value) {
           if (IterationTraits<T>::IsEnd(value)) {
-            ARROW_LOG(WARNING) << "Emitting or";
             return std::move(or_value);
           }
-          ARROW_LOG(WARNING) << "Emitting value";
           return value;
         }
       } Continuation;
