@@ -32,6 +32,7 @@
 #include "arrow/util/optional.h"
 #include "arrow/util/queue.h"
 #include "arrow/util/thread_pool.h"
+#include "arrow/util/logging.h"
 
 namespace arrow {
 
@@ -1625,8 +1626,10 @@ class OrGenerator {
 
         Result<T> operator()(const T& value) {
           if (IterationTraits<T>::IsEnd(value)) {
+            ARROW_LOG(WARNING) << "Emitting or";
             return std::move(or_value);
           }
+          ARROW_LOG(WARNING) << "Emitting value";
           return value;
         }
       } Continuation;
