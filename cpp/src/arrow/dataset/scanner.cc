@@ -578,6 +578,7 @@ Result<EnumeratedRecordBatch> ToEnumeratedRecordBatch(
   out.record_batch.last = batch->values[num_fields + 2].scalar_as<BooleanScalar>().value;
   ARROW_ASSIGN_OR_RAISE(out.record_batch.value,
                         batch->ToRecordBatch(options.projected_schema, options.pool));
+  ARROW_LOG(WARNING) << "Emitting batch with fragment index=" << out.fragment.index << " and batch index=" << out.record_batch.index << " last=" << out.record_batch.last;
   return out;
 }
 
