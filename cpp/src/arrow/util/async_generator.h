@@ -32,7 +32,6 @@
 #include "arrow/util/optional.h"
 #include "arrow/util/queue.h"
 #include "arrow/util/thread_pool.h"
-#include "arrow/util/logging.h"
 
 namespace arrow {
 
