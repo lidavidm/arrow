@@ -17,6 +17,7 @@
 
 #include "arrow/builder.h"
 
+#include <iostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -59,6 +60,7 @@ struct DictionaryBuilderCase {
 
   template <typename ValueType>
   Status CreateFor() {
+    std::cerr << "CreateFor" << std::endl;
     using AdaptiveBuilderType = DictionaryBuilder<ValueType>;
     if (dictionary != nullptr) {
       out->reset(new AdaptiveBuilderType(dictionary, pool));
@@ -103,6 +105,7 @@ struct DictionaryBuilderCase {
       auto start_int_size = internal::GetByteWidth(*index_type);
       out->reset(new AdaptiveBuilderType(start_int_size, value_type, pool));
     }
+    std::cerr << "CreateFor end" << std::endl;
     return Status::OK();
   }
 
@@ -124,6 +127,7 @@ struct MakeBuilderImpl {
   }
 
   Status Visit(const DictionaryType& dict_type) {
+    std::cout << "MakeBuilderImpl::Visit(DictionaryType)" << std::endl;
     DictionaryBuilderCase visitor = {pool,
                                      dict_type.index_type(),
                                      dict_type.value_type(),
@@ -134,6 +138,7 @@ struct MakeBuilderImpl {
   }
 
   Status Visit(const ListType& list_type) {
+    std::cout << "MakeBuilderImpl::List" << std::endl;
     std::shared_ptr<DataType> value_type = list_type.value_type();
     ARROW_ASSIGN_OR_RAISE(auto value_builder, ChildBuilder(value_type));
     out.reset(new ListBuilder(pool, std::move(value_builder), type));
@@ -141,6 +146,7 @@ struct MakeBuilderImpl {
   }
 
   Status Visit(const LargeListType& list_type) {
+    std::cout << "MakeBuilderImpl::Large" << std::endl;
     std::shared_ptr<DataType> value_type = list_type.value_type();
     ARROW_ASSIGN_OR_RAISE(auto value_builder, ChildBuilder(value_type));
     out.reset(new LargeListBuilder(pool, std::move(value_builder), type));
@@ -148,6 +154,7 @@ struct MakeBuilderImpl {
   }
 
   Status Visit(const MapType& map_type) {
+    std::cout << "MakeBuilderImpl::Map" << std::endl;
     ARROW_ASSIGN_OR_RAISE(auto key_builder, ChildBuilder(map_type.key_type()));
     ARROW_ASSIGN_OR_RAISE(auto item_builder, ChildBuilder(map_type.item_type()));
     out.reset(
@@ -156,6 +163,7 @@ struct MakeBuilderImpl {
   }
 
   Status Visit(const FixedSizeListType& list_type) {
+    std::cout << "MakeBuilderImpl::Fixed" << std::endl;
     auto value_type = list_type.value_type();
     ARROW_ASSIGN_OR_RAISE(auto value_builder, ChildBuilder(value_type));
     out.reset(new FixedSizeListBuilder(pool, std::move(value_builder), type));
@@ -163,18 +171,21 @@ struct MakeBuilderImpl {
   }
 
   Status Visit(const StructType& struct_type) {
+    std::cout << "MakeBuilderImpl::Struct" << std::endl;
     ARROW_ASSIGN_OR_RAISE(auto field_builders, FieldBuilders(*type, pool));
     out.reset(new StructBuilder(type, pool, std::move(field_builders)));
     return Status::OK();
   }
 
   Status Visit(const SparseUnionType&) {
+    std::cout << "MakeBuilderImpl::Sparse" << std::endl;
     ARROW_ASSIGN_OR_RAISE(auto field_builders, FieldBuilders(*type, pool));
     out.reset(new SparseUnionBuilder(pool, std::move(field_builders), type));
     return Status::OK();
   }
 
   Status Visit(const DenseUnionType&) {
+    std::cout << "MakeBuilderImpl::Dense" << std::endl;
     ARROW_ASSIGN_OR_RAISE(auto field_builders, FieldBuilders(*type, pool));
     out.reset(new DenseUnionBuilder(pool, std::move(field_builders), type));
     return Status::OK();
@@ -184,6 +195,7 @@ struct MakeBuilderImpl {
   Status Visit(const DataType&) { return NotImplemented(); }
 
   Status NotImplemented() {
+    std::cout << "MakeBuilderImpl::NotImplemented" << std::endl;
     return Status::NotImplemented("MakeBuilder: cannot construct builder for type ",
                                   type->ToString());
   }
@@ -215,6 +227,7 @@ struct MakeBuilderImpl {
 
 Status MakeBuilder(MemoryPool* pool, const std::shared_ptr<DataType>& type,
                    std::unique_ptr<ArrayBuilder>* out) {
+  std::cout << "MakeBuilder " << type->ToString() << std::endl;
   MakeBuilderImpl impl{pool, type, /*exact_index_type=*/false, /*out=*/nullptr};
   RETURN_NOT_OK(VisitTypeInline(*type, &impl));
   *out = std::move(impl.out);
@@ -223,6 +236,7 @@ Status MakeBuilder(MemoryPool* pool, const std::shared_ptr<DataType>& type,
 
 Status MakeBuilderExactIndex(MemoryPool* pool, const std::shared_ptr<DataType>& type,
                              std::unique_ptr<ArrayBuilder>* out) {
+  std::cout << "MakeBuilderExactIndex " << type->ToString() << std::endl;
   MakeBuilderImpl impl{pool, type, /*exact_index_type=*/true, /*out=*/nullptr};
   RETURN_NOT_OK(VisitTypeInline(*type, &impl));
   *out = std::move(impl.out);
@@ -232,6 +246,7 @@ Status MakeBuilderExactIndex(MemoryPool* pool, const std::shared_ptr<DataType>& 
 Status MakeDictionaryBuilder(MemoryPool* pool, const std::shared_ptr<DataType>& type,
                              const std::shared_ptr<Array>& dictionary,
                              std::unique_ptr<ArrayBuilder>* out) {
+  std::cout << "MakeDictionaryBuilder " << type->ToString() << std::endl;
   const auto& dict_type = static_cast<const DictionaryType&>(*type);
   DictionaryBuilderCase visitor = {
       pool,       dict_type.index_type(),     dict_type.value_type(),
