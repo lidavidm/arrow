@@ -79,6 +79,26 @@ Iterator<T> WrapIterator(
 }
 
 template <typename T>
+AsyncGenerator<T> WrapAsyncGenerator(AsyncGenerator<T> wrapped,
+                                     const std::string& span_name) {
+  // TODO: what Future/Executor should do is automatically propagate the span context
+  return [=]() mutable -> Future<T> {
+    auto span = GetTracer()->StartSpan(span_name);
+    auto fut = wrapped();
+    fut.AddCallback([=](const Result<T>& result) {
+      if (!result.ok()) {
+        span->SetStatus(opentelemetry::trace::StatusCode::kError,
+                        result.status().ToString());
+      } else {
+        span->SetStatus(opentelemetry::trace::StatusCode::kOk);
+      }
+      span->End();
+    });
+    return fut;
+  };
+}
+
+template <typename T>
 AsyncGenerator<T> WrapAsyncGenerator(
     AsyncGenerator<T> wrapped,
     opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> parent_span,

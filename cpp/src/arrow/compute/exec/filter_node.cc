@@ -27,6 +27,7 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/future.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/tracing_internal.h"
 
 namespace arrow {
 
@@ -99,10 +100,14 @@ class FilterNode : public ExecNode {
   void InputReceived(ExecNode* input, ExecBatch batch) override {
     DCHECK_EQ(input, inputs_[0]);
 
+    auto span =
+        arrow::internal::tracing::GetTracer()->StartSpan("FilterNode::InputReceived");
+
     auto maybe_filtered = DoFilter(std::move(batch));
     if (ErrorIfNotOk(maybe_filtered.status())) return;
 
     maybe_filtered->guarantee = batch.guarantee;
+    span->End();
     outputs_[0]->InputReceived(this, maybe_filtered.MoveValueUnsafe());
   }
 

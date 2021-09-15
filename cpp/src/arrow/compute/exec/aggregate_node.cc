@@ -31,6 +31,7 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/thread_pool.h"
+#include "arrow/util/tracing_internal.h"
 
 namespace arrow {
 
@@ -178,9 +179,14 @@ class ScalarAggregateNode : public ExecNode {
   void InputReceived(ExecNode* input, ExecBatch batch) override {
     DCHECK_EQ(input, inputs_[0]);
 
+    auto span =
+        arrow::internal::tracing::GetTracer()->StartSpan("AggregateNode::InputReceived");
+
     auto thread_index = get_thread_index_();
 
     if (ErrorIfNotOk(DoConsume(std::move(batch), thread_index))) return;
+
+    span->End();
 
     if (input_counter_.Increment()) {
       ErrorIfNotOk(Finish());
@@ -227,6 +233,7 @@ class ScalarAggregateNode : public ExecNode {
 
  private:
   Status Finish() {
+    auto span = arrow::internal::tracing::GetTracer()->StartSpan("AggregateNode::Finish");
     ExecBatch batch{{}, 1};
     batch.values.resize(kernels_.size());
 
@@ -237,6 +244,7 @@ class ScalarAggregateNode : public ExecNode {
       RETURN_NOT_OK(kernels_[i]->finalize(&ctx, &batch.values[i]));
     }
 
+    span->End();
     outputs_[0]->InputReceived(this, std::move(batch));
     finished_.MarkFinished();
     return Status::OK();

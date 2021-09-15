@@ -28,6 +28,10 @@ if (ARROW_PARQUET AND ARROW_DATASET)
     set(DATASET_EXAMPLES_LINK_LIBS arrow_dataset_static)
   endif()
 
+  ADD_ARROW_EXAMPLE(compute_query_example
+    EXTRA_LINK_LIBS ${DATASET_EXAMPLES_LINK_LIBS})
+  add_dependencies(compute_query_example parquet)
+
   ADD_ARROW_EXAMPLE(dataset_parquet_scan_example
     EXTRA_LINK_LIBS
     ${DATASET_EXAMPLES_LINK_LIBS})
