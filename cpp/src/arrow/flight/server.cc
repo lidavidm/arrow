@@ -842,7 +842,8 @@ class ServerSignalHandler {
   std::thread handle_signals_;
 };
 
-class GrpcServerImpl : public internal::ServerImpl {
+// TODO: split all of this out into a subdir
+class GrpcServerImpl : public internal::ServerTransportImpl {
  public:
   GrpcServerImpl() : port_(0) {}
 
@@ -921,7 +922,7 @@ class GrpcServerImpl : public internal::ServerImpl {
 };
 
 struct FlightServerBase::Impl {
-  std::unique_ptr<internal::ServerImpl> server_;
+  std::unique_ptr<internal::ServerTransportImpl> server_;
 
   // Signal handlers (on Windows) and the shutdown handler (other platforms)
   // are executed in a separate thread, so getting the current thread instance
@@ -991,7 +992,9 @@ Status FlightServerBase::Init(const FlightServerOptions& options) {
   if (util::string_view(scheme).starts_with("grpc")) {
     impl_->server_.reset(new GrpcServerImpl());
   } else {
-    return Status::NotImplemented("Unknown scheme: ", scheme);
+    ARROW_ASSIGN_OR_RAISE(
+        impl_->server_,
+        internal::GetDefaultServerTransportImplRegistry()->GetImplForScheme(scheme));
   }
   return impl_->server_->Init(options, *options.location.uri_, this);
 }

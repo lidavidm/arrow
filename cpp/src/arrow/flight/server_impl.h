@@ -19,9 +19,13 @@
 
 #pragma once
 
-namespace arrow {
+#include <functional>
+#include <memory>
 
-class Status;
+#include "arrow/flight/visibility.h"
+#include "arrow/type_fwd.h"
+
+namespace arrow {
 
 namespace internal {
 class Uri;
@@ -34,8 +38,11 @@ class FlightServerOptions;
 
 namespace internal {
 
-class ServerImpl {
+/// An implementation of a Flight server for a particular transport.
+class ARROW_FLIGHT_EXPORT ServerTransportImpl {
  public:
+  virtual ~ServerTransportImpl() = default;
+
   /// Initialize the server.
   virtual Status Init(const FlightServerOptions& options,
                       const arrow::internal::Uri& location, FlightServerBase* server) = 0;
@@ -47,8 +54,25 @@ class ServerImpl {
 
   /// Get the port the server is listening on, or -1 if not listening or not applicable.
   virtual int port() const = 0;
-  // TODO: should probably be an optional Location or something
+  // TODO: should probably return an optional Location or something
 };
+
+/// A registry of transport implementations.
+class ARROW_FLIGHT_EXPORT ServerTransportImplRegistry {
+ public:
+  using Factory = std::function<arrow::Result<std::unique_ptr<ServerTransportImpl>>()>;
+  ServerTransportImplRegistry();
+  arrow::Result<std::unique_ptr<ServerTransportImpl>> GetImplForScheme(
+      const std::string& scheme);
+  Status RegisterImpl(const std::string& scheme, Factory factory);
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+ARROW_FLIGHT_EXPORT
+ServerTransportImplRegistry* GetDefaultServerTransportImplRegistry();
 
 }  // namespace internal
 }  // namespace flight

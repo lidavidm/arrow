@@ -148,6 +148,7 @@ set(ARROW_FLIGHT_SRCS
     serialization_internal.cc
     server.cc
     server_auth.cc
+    server_impl.cc
     types.cc)
 
 add_arrow_lib(arrow_flight
