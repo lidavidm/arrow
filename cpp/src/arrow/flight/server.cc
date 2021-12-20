@@ -59,6 +59,7 @@
 #include "arrow/flight/middleware_internal.h"
 #include "arrow/flight/serialization_internal.h"
 #include "arrow/flight/server_auth.h"
+#include "arrow/flight/server_impl.h"
 #include "arrow/flight/server_middleware.h"
 #include "arrow/flight/types.h"
 
@@ -841,10 +842,86 @@ class ServerSignalHandler {
   std::thread handle_signals_;
 };
 
-struct FlightServerBase::Impl {
+class GrpcServerImpl : public internal::ServerImpl {
+ public:
+  GrpcServerImpl() : port_(0) {}
+
+  Status Init(const FlightServerOptions& options, const arrow::internal::Uri& location,
+              FlightServerBase* server) override {
+    service_.reset(
+        new FlightServiceImpl(options.auth_handler, options.middleware, server));
+
+    grpc::ServerBuilder builder;
+    // Allow uploading messages of any length
+    builder.SetMaxReceiveMessageSize(-1);
+
+    const std::string scheme = location.scheme();
+    if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp || scheme == kSchemeGrpcTls) {
+      std::stringstream address;
+      address << arrow::internal::UriEncodeHost(location.host()) << ':'
+              << location.port_text();
+
+      std::shared_ptr<grpc::ServerCredentials> creds;
+      if (scheme == kSchemeGrpcTls) {
+        grpc::SslServerCredentialsOptions ssl_options;
+        for (const auto& pair : options.tls_certificates) {
+          ssl_options.pem_key_cert_pairs.push_back({pair.pem_key, pair.pem_cert});
+        }
+        if (options.verify_client) {
+          ssl_options.client_certificate_request =
+              GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
+        }
+        if (!options.root_certificates.empty()) {
+          ssl_options.pem_root_certs = options.root_certificates;
+        }
+        creds = grpc::SslServerCredentials(ssl_options);
+      } else {
+        creds = grpc::InsecureServerCredentials();
+      }
+
+      builder.AddListeningPort(address.str(), creds, &port_);
+    } else if (scheme == kSchemeGrpcUnix) {
+      std::stringstream address;
+      address << "unix:" << location.path();
+      builder.AddListeningPort(address.str(), grpc::InsecureServerCredentials());
+    } else {
+      return Status::NotImplemented("Scheme is not supported: " + scheme);
+    }
+
+    builder.RegisterService(service_.get());
+
+    // Disable SO_REUSEPORT - it makes debugging/testing a pain as
+    // leftover processes can handle requests on accident
+    builder.AddChannelArgument(GRPC_ARG_ALLOW_REUSEPORT, 0);
+
+    if (options.builder_hook) {
+      options.builder_hook(&builder);
+    }
+
+    server_ = builder.BuildAndStart();
+    if (!server_) {
+      return Status::UnknownError("Server did not start properly");
+    }
+    return Status::OK();
+  }
+  Status Shutdown() override {
+    server_->Shutdown();
+    return Status::OK();
+  }
+  Status Wait() override {
+    server_->Wait();
+    return Status::OK();
+  }
+  int port() const override { return port_; }
+
+ private:
   std::unique_ptr<FlightServiceImpl> service_;
   std::unique_ptr<grpc::Server> server_;
   int port_;
+};
+
+struct FlightServerBase::Impl {
+  std::unique_ptr<internal::ServerImpl> server_;
 
   // Signal handlers (on Windows) and the shutdown handler (other platforms)
   // are executed in a separate thread, so getting the current thread instance
@@ -886,7 +963,8 @@ struct FlightServerBase::Impl {
     }
     auto instance = running_instance_.load();
     if (instance != nullptr) {
-      instance->server_->Shutdown();
+      // TODO:
+      ARROW_UNUSED(instance->server_->Shutdown());
     }
   }
 };
@@ -909,65 +987,16 @@ FlightServerBase::FlightServerBase() { impl_.reset(new Impl); }
 FlightServerBase::~FlightServerBase() {}
 
 Status FlightServerBase::Init(const FlightServerOptions& options) {
-  impl_->service_.reset(
-      new FlightServiceImpl(options.auth_handler, options.middleware, this));
-
-  grpc::ServerBuilder builder;
-  // Allow uploading messages of any length
-  builder.SetMaxReceiveMessageSize(-1);
-
-  const Location& location = options.location;
-  const std::string scheme = location.scheme();
-  if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp || scheme == kSchemeGrpcTls) {
-    std::stringstream address;
-    address << arrow::internal::UriEncodeHost(location.uri_->host()) << ':'
-            << location.uri_->port_text();
-
-    std::shared_ptr<grpc::ServerCredentials> creds;
-    if (scheme == kSchemeGrpcTls) {
-      grpc::SslServerCredentialsOptions ssl_options;
-      for (const auto& pair : options.tls_certificates) {
-        ssl_options.pem_key_cert_pairs.push_back({pair.pem_key, pair.pem_cert});
-      }
-      if (options.verify_client) {
-        ssl_options.client_certificate_request =
-            GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
-      }
-      if (!options.root_certificates.empty()) {
-        ssl_options.pem_root_certs = options.root_certificates;
-      }
-      creds = grpc::SslServerCredentials(ssl_options);
-    } else {
-      creds = grpc::InsecureServerCredentials();
-    }
-
-    builder.AddListeningPort(address.str(), creds, &impl_->port_);
-  } else if (scheme == kSchemeGrpcUnix) {
-    std::stringstream address;
-    address << "unix:" << location.uri_->path();
-    builder.AddListeningPort(address.str(), grpc::InsecureServerCredentials());
+  const auto scheme = options.location.scheme();
+  if (util::string_view(scheme).starts_with("grpc")) {
+    impl_->server_.reset(new GrpcServerImpl());
   } else {
-    return Status::NotImplemented("Scheme is not supported: " + scheme);
+    return Status::NotImplemented("Unknown scheme: ", scheme);
   }
-
-  builder.RegisterService(impl_->service_.get());
-
-  // Disable SO_REUSEPORT - it makes debugging/testing a pain as
-  // leftover processes can handle requests on accident
-  builder.AddChannelArgument(GRPC_ARG_ALLOW_REUSEPORT, 0);
-
-  if (options.builder_hook) {
-    options.builder_hook(&builder);
-  }
-
-  impl_->server_ = builder.BuildAndStart();
-  if (!impl_->server_) {
-    return Status::UnknownError("Server did not start properly");
-  }
-  return Status::OK();
+  return impl_->server_->Init(options, *options.location.uri_, this);
 }
 
-int FlightServerBase::port() const { return impl_->port_; }
+int FlightServerBase::port() const { return impl_->server_->port(); }
 
 Status FlightServerBase::SetShutdownOnSignals(const std::vector<int> sigs) {
   impl_->signals_ = sigs;
@@ -1012,12 +1041,12 @@ Status FlightServerBase::Shutdown() {
   if (!server) {
     return Status::Invalid("Shutdown() on uninitialized FlightServerBase");
   }
-  impl_->server_->Shutdown();
-  return Status::OK();
+  // TODO:
+  return impl_->server_->Shutdown();
 }
 
 Status FlightServerBase::Wait() {
-  impl_->server_->Wait();
+  RETURN_NOT_OK(impl_->server_->Wait());
   impl_->running_instance_ = nullptr;
   return Status::OK();
 }
