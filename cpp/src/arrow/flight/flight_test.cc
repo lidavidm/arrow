@@ -51,6 +51,8 @@
 #include "arrow/flight/middleware_internal.h"
 #include "arrow/flight/test_util.h"
 
+// TODO: refactor things such that we can run all tests with a new backend
+
 namespace arrow {
 namespace flight {
 

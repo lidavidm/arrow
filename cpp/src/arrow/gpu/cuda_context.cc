@@ -302,14 +302,14 @@ Result<std::shared_ptr<io::RandomAccessFile>> CudaMemoryManager::GetBufferReader
         "for device ",
         buf->device()->ToString());
   }
-  return std::make_shared<CudaBufferReader>(checked_pointer_cast<CudaBuffer>(buf));
+  return std::make_shared<CudaBufferReader>(buf);
 }
 
 Result<std::shared_ptr<io::OutputStream>> CudaMemoryManager::GetBufferWriter(
     std::shared_ptr<Buffer> buf) {
   if (*buf->device() != *device_) {
     return Status::Invalid(
-        "CudaMemoryManager::GetBufferReader called on foreign buffer "
+        "CudaMemoryManager::GetBufferWriter called on foreign buffer "
         "for device ",
         buf->device()->ToString());
   }

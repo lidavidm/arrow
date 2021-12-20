@@ -57,6 +57,7 @@
 #include "arrow/flight/middleware.h"
 #include "arrow/flight/middleware_internal.h"
 #include "arrow/flight/serialization_internal.h"
+#include "arrow/flight/transport_impl.h"
 #include "arrow/flight/types.h"
 
 namespace arrow {
@@ -494,6 +495,58 @@ class GrpcIpcMessageReader : public ipc::MessageReader {
   std::shared_ptr<Buffer>* app_metadata_;
   bool stream_finished_;
 };
+template <>
+class GrpcIpcMessageReader<internal::ClientDataStream> : public ipc::MessageReader {
+ public:
+  GrpcIpcMessageReader(
+      std::shared_ptr<std::mutex> read_mutex, internal::ClientDataStream* stream,
+      std::shared_ptr<internal::PeekableFlightDataReader<internal::ClientDataStream*>>
+          peekable_reader,
+      std::shared_ptr<Buffer>* app_metadata)
+      : read_mutex_(read_mutex),
+        stream_(std::move(stream)),
+        peekable_reader_(peekable_reader),
+        app_metadata_(app_metadata),
+        stream_finished_(false) {}
+
+  ::arrow::Result<std::unique_ptr<ipc::Message>> ReadNextMessage() override {
+    if (stream_finished_) {
+      return nullptr;
+    }
+    internal::FlightData* data;
+    {
+      auto guard = read_mutex_ ? std::unique_lock<std::mutex>(*read_mutex_)
+                               : std::unique_lock<std::mutex>();
+      peekable_reader_->Next(&data);
+    }
+    if (!data) {
+      stream_finished_ = true;
+      return stream_->Finish(Status::OK());
+    }
+    // Validate IPC message
+    auto result = data->OpenMessage();
+    if (!result.ok()) {
+      return stream_->Finish(std::move(result).status());
+    }
+    *app_metadata_ = std::move(data->app_metadata);
+    return result;
+  }
+
+ private:
+  // Guard reads with a mutex to prevent concurrent reads if the write
+  // side calls Finish(). Nullable as DoGet doesn't need this.
+  std::shared_ptr<std::mutex> read_mutex_;
+  internal::ClientDataStream* stream_;
+  std::shared_ptr<internal::PeekableFlightDataReader<internal::ClientDataStream*>>
+      peekable_reader_;
+  // A reference to GrpcStreamReader.app_metadata_. That class
+  // can't access the app metadata because when it Peek()s the stream,
+  // it may be looking at a dictionary batch, not the record
+  // batch. Updating it here ensures the reader is always updated with
+  // the last metadata message read.
+  std::shared_ptr<Buffer>* app_metadata_;
+  bool stream_finished_;
+};
 
 /// The implementation of the public-facing API for reading from a
 /// FlightData stream
@@ -622,6 +675,130 @@ class GrpcStreamReader : public FlightStreamReader {
   StopToken stop_token_;
   std::shared_ptr<FinishableStream<Reader, internal::FlightData>> stream_;
   std::shared_ptr<internal::PeekableFlightDataReader<std::shared_ptr<Reader>>>
+      peekable_reader_;
+  std::shared_ptr<ipc::RecordBatchReader> batch_reader_;
+  std::shared_ptr<Buffer> app_metadata_;
+};
+
+template <>
+class GrpcStreamReader<internal::ClientDataStream> : public FlightStreamReader {
+ public:
+  GrpcStreamReader(std::shared_ptr<std::mutex> read_mutex,
+                   const ipc::IpcReadOptions& options, StopToken stop_token,
+                   std::unique_ptr<internal::ClientDataStream> stream)
+      : read_mutex_(read_mutex),
+        options_(options),
+        stop_token_(std::move(stop_token)),
+        stream_(std::move(stream)),
+        peekable_reader_(
+            new internal::PeekableFlightDataReader<internal::ClientDataStream*>(
+                stream_.get())),
+        app_metadata_(nullptr) {}
+
+  Status EnsureDataStarted() {
+    if (!batch_reader_) {
+      bool skipped_to_data = false;
+      {
+        auto guard = TakeGuard();
+        skipped_to_data = peekable_reader_->SkipToData();
+      }
+      // peek() until we find the first data message; discard metadata
+      if (!skipped_to_data) {
+        return OverrideWithServerError(MakeFlightError(
+            FlightStatusCode::Internal, "Server never sent a data message"));
+      }
+
+      auto message_reader = std::unique_ptr<ipc::MessageReader>(
+          new GrpcIpcMessageReader<internal::ClientDataStream>(
+              read_mutex_, stream_.get(), peekable_reader_, &app_metadata_));
+      auto result =
+          ipc::RecordBatchStreamReader::Open(std::move(message_reader), options_);
+      RETURN_NOT_OK(OverrideWithServerError(std::move(result).Value(&batch_reader_)));
+    }
+    return Status::OK();
+  }
+  arrow::Result<std::shared_ptr<Schema>> GetSchema() override {
+    RETURN_NOT_OK(EnsureDataStarted());
+    return batch_reader_->schema();
+  }
+  Status Next(FlightStreamChunk* out) override {
+    internal::FlightData* data;
+    {
+      auto guard = TakeGuard();
+      peekable_reader_->Peek(&data);
+    }
+    if (!data) {
+      out->app_metadata = nullptr;
+      out->data = nullptr;
+      return stream_->Finish(Status::OK());
+    }
+
+    if (!data->metadata) {
+      // Metadata-only (data->metadata is the IPC header)
+      out->app_metadata = data->app_metadata;
+      out->data = nullptr;
+      {
+        auto guard = TakeGuard();
+        peekable_reader_->Next(&data);
+      }
+      return Status::OK();
+    }
+
+    if (!batch_reader_) {
+      RETURN_NOT_OK(EnsureDataStarted());
+      // Re-peek here since EnsureDataStarted() advances the stream
+      return Next(out);
+    }
+    RETURN_NOT_OK(batch_reader_->ReadNext(&out->data));
+    out->app_metadata = std::move(app_metadata_);
+    return Status::OK();
+  }
+  Status ReadAll(std::vector<std::shared_ptr<RecordBatch>>* batches) override {
+    return ReadAll(batches, stop_token_);
+  }
+  Status ReadAll(std::vector<std::shared_ptr<RecordBatch>>* batches,
+                 const StopToken& stop_token) override {
+    FlightStreamChunk chunk;
+
+    while (true) {
+      if (stop_token.IsStopRequested()) {
+        Cancel();
+        return stop_token.Poll();
+      }
+      RETURN_NOT_OK(Next(&chunk));
+      if (!chunk.data) break;
+      batches->emplace_back(std::move(chunk.data));
+    }
+    return Status::OK();
+  }
+  Status ReadAll(std::shared_ptr<Table>* table) override {
+    return ReadAll(table, stop_token_);
+  }
+  using FlightStreamReader::ReadAll;
+  void Cancel() override { stream_->TryCancel(); }
+
+ private:
+  std::unique_lock<std::mutex> TakeGuard() {
+    return read_mutex_ ? std::unique_lock<std::mutex>(*read_mutex_)
+                       : std::unique_lock<std::mutex>();
+  }
+
+  Status OverrideWithServerError(Status&& st) {
+    if (st.ok()) {
+      return std::move(st);
+    }
+    return stream_->Finish(std::move(st));
+  }
+
+  friend class GrpcIpcMessageReader<internal::ClientDataStream>;
+  // Guard reads with a lock to prevent Finish()/Close() from being
+  // called on the writer while the reader has a pending
+  // read. Nullable, as DoGet() doesn't need this.
+  std::shared_ptr<std::mutex> read_mutex_;
+  ipc::IpcReadOptions options_;
+  StopToken stop_token_;
+  std::unique_ptr<internal::ClientDataStream> stream_;
+  std::shared_ptr<internal::PeekableFlightDataReader<internal::ClientDataStream*>>
       peekable_reader_;
   std::shared_ptr<ipc::RecordBatchReader> batch_reader_;
   std::shared_ptr<Buffer> app_metadata_;
@@ -878,6 +1055,75 @@ Status GrpcStreamWriter<ProtoReadT, FlightReadT>::Open(
 
 FlightMetadataReader::~FlightMetadataReader() = default;
 
+class GrpcClientDataStream : public internal::ClientDataStream {
+ public:
+  GrpcClientDataStream(std::shared_ptr<ClientRpc> rpc,
+                       std::shared_ptr<grpc::ClientReader<pb::FlightData>> stream,
+                       std::shared_ptr<MemoryManager> memory_manager)
+      : rpc_(std::move(rpc)),
+        stream_(std::move(stream)),
+        memory_manager_(memory_manager ? std::move(memory_manager)
+                                       : CPUDevice::Instance()->default_memory_manager()),
+        finished_(false) {}
+
+  bool Read(internal::FlightData* data) {
+    bool success = internal::ReadPayload(stream_.get(), data);
+    if (ARROW_PREDICT_FALSE(!success)) return false;
+    if (ARROW_PREDICT_FALSE(!memory_manager_->is_cpu())) {
+      if (!data->body) return true;
+      auto status =
+          MemoryManager::CopyBuffer(data->body, memory_manager_).Value(&data->body);
+      if (!status.ok()) {
+        ARROW_LOG(WARNING) << status.ToString();
+        server_status_ = std::move(status);
+        return false;
+      }
+    }
+    return true;
+  }
+  Status Write(const FlightPayload& payload) { return Status::NotImplemented("NYI"); }
+  Status WritesDone() { return Status::NotImplemented("NYI"); }
+  Status Finish(Status st) {
+    if (finished_) {
+      return MergeStatus(std::move(st));
+    }
+
+    // Drain the read side, as otherwise gRPC Finish() will hang. We
+    // only call Finish() when the client closes the writer or the
+    // reader finishes, so it's OK to assume the client no longer
+    // wants to read and drain the read side. (If the client wants to
+    // indicate that it is done writing, but not done reading, it
+    // should use DoneWriting.
+    internal::FlightData message;
+    while (internal::ReadPayload(stream_.get(), &message)) {
+      // Drain the read side to avoid gRPC hanging in Finish()
+    }
+
+    server_status_ = internal::FromGrpcStatus(stream_->Finish(), &rpc_->context);
+    finished_ = true;
+
+    return MergeStatus(std::move(st));
+  }
+  void TryCancel() { rpc_->context.TryCancel(); }
+
+ private:
+  Status MergeStatus(Status&& st) {
+    if (server_status_.ok()) {
+      return std::move(st);
+    }
+    return Status::FromDetailAndArgs(
+        server_status_.code(), server_status_.detail(), server_status_.message(),
+        ". Client context: ", st.ToString(),
+        ". gRPC client debug context: ", rpc_->context.debug_error_string());
+  }
+
+  std::shared_ptr<ClientRpc> rpc_;
+  std::shared_ptr<grpc::ClientReader<pb::FlightData>> stream_;
+  std::shared_ptr<MemoryManager> memory_manager_;
+  bool finished_;
+  Status server_status_;
+};
+
 class GrpcMetadataReader : public FlightMetadataReader {
  public:
   explicit GrpcMetadataReader(
@@ -927,16 +1173,16 @@ constexpr char kDummyRootCert[] =
     "-----END CERTIFICATE-----\n";
 #endif
 }  // namespace
-class FlightClient::FlightClientImpl {
+class GrpcClientImpl : public internal::ClientTransportImpl {
  public:
-  Status Connect(const Location& location, const FlightClientOptions& options) {
+  Status Init(const FlightClientOptions& options, const Location& location,
+              const arrow::internal::Uri& uri) override {
     const std::string& scheme = location.scheme();
 
     std::stringstream grpc_uri;
     std::shared_ptr<grpc::ChannelCredentials> creds;
     if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp || scheme == kSchemeGrpcTls) {
-      grpc_uri << arrow::internal::UriEncodeHost(location.uri_->host()) << ':'
-               << location.uri_->port_text();
+      grpc_uri << arrow::internal::UriEncodeHost(uri.host()) << ':' << uri.port_text();
 
       if (scheme == kSchemeGrpcTls) {
         if (options.disable_server_verification) {
@@ -1005,10 +1251,11 @@ class FlightClient::FlightClientImpl {
         creds = grpc::InsecureChannelCredentials();
       }
     } else if (scheme == kSchemeGrpcUnix) {
-      grpc_uri << "unix://" << location.uri_->path();
+      grpc_uri << "unix://" << uri.path();
       creds = grpc::InsecureChannelCredentials();
     } else {
-      return Status::NotImplemented("Flight scheme " + scheme + " is not supported.");
+      return Status::NotImplemented("Flight scheme ", scheme,
+                                    " is not supported by the gRPC transport");
     }
 
     grpc::ChannelArguments args;
@@ -1054,8 +1301,10 @@ class FlightClient::FlightClientImpl {
     return Status::OK();
   }
 
+  Status Close() override { return Status::OK(); }
+
   Status Authenticate(const FlightCallOptions& options,
-                      std::unique_ptr<ClientAuthHandler> auth_handler) {
+                      std::unique_ptr<ClientAuthHandler> auth_handler) override {
     auth_handler_ = std::move(auth_handler);
     ClientRpc rpc(options);
     std::shared_ptr<grpc::ClientReaderWriter<pb::HandshakeRequest, pb::HandshakeResponse>>
@@ -1075,7 +1324,7 @@ class FlightClient::FlightClientImpl {
 
   arrow::Result<std::pair<std::string, std::string>> AuthenticateBasicToken(
       const FlightCallOptions& options, const std::string& username,
-      const std::string& password) {
+      const std::string& password) override {
     // Add basic auth headers to outgoing headers.
     ClientRpc rpc(options);
     internal::AddBasicAuthHeaders(&rpc.context, username, password);
@@ -1098,7 +1347,7 @@ class FlightClient::FlightClientImpl {
   }
 
   Status ListFlights(const FlightCallOptions& options, const Criteria& criteria,
-                     std::unique_ptr<FlightListing>* listing) {
+                     std::unique_ptr<FlightListing>* listing) override {
     pb::Criteria pb_criteria;
     RETURN_NOT_OK(internal::ToProto(criteria, &pb_criteria));
 
@@ -1122,7 +1371,7 @@ class FlightClient::FlightClientImpl {
   }
 
   Status DoAction(const FlightCallOptions& options, const Action& action,
-                  std::unique_ptr<ResultStream>* results) {
+                  std::unique_ptr<ResultStream>* results) override {
     pb::Action pb_action;
     RETURN_NOT_OK(internal::ToProto(action, &pb_action));
 
@@ -1147,7 +1396,8 @@ class FlightClient::FlightClientImpl {
     return internal::FromGrpcStatus(stream->Finish(), &rpc.context);
   }
 
-  Status ListActions(const FlightCallOptions& options, std::vector<ActionType>* types) {
+  Status ListActions(const FlightCallOptions& options,
+                     std::vector<ActionType>* types) override {
     pb::Empty empty;
 
     ClientRpc rpc(options);
@@ -1168,7 +1418,7 @@ class FlightClient::FlightClientImpl {
 
   Status GetFlightInfo(const FlightCallOptions& options,
                        const FlightDescriptor& descriptor,
-                       std::unique_ptr<FlightInfo>* info) {
+                       std::unique_ptr<FlightInfo>* info) override {
     pb::FlightDescriptor pb_descriptor;
     pb::FlightInfo pb_response;
 
@@ -1187,7 +1437,7 @@ class FlightClient::FlightClientImpl {
   }
 
   Status GetSchema(const FlightCallOptions& options, const FlightDescriptor& descriptor,
-                   std::unique_ptr<SchemaResult>* schema_result) {
+                   std::unique_ptr<SchemaResult>* schema_result) override {
     pb::FlightDescriptor pb_descriptor;
     pb::SchemaResult pb_response;
 
@@ -1206,8 +1456,7 @@ class FlightClient::FlightClientImpl {
   }
 
   Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
-               std::unique_ptr<FlightStreamReader>* out) {
-    using StreamReader = GrpcStreamReader<grpc::ClientReader<pb::FlightData>>;
+               std::unique_ptr<internal::ClientDataStream>* out) override {
     pb::Ticket pb_ticket;
     internal::ToProto(ticket, &pb_ticket);
 
@@ -1215,20 +1464,15 @@ class FlightClient::FlightClientImpl {
     RETURN_NOT_OK(rpc->SetToken(auth_handler_.get()));
     std::shared_ptr<grpc::ClientReader<pb::FlightData>> stream =
         stub_->DoGet(&rpc->context, pb_ticket);
-    auto finishable_stream = std::make_shared<
-        FinishableStream<grpc::ClientReader<pb::FlightData>, internal::FlightData>>(
-        rpc, stream);
-    *out = std::unique_ptr<StreamReader>(
-        new StreamReader(rpc, options.memory_manager, nullptr, options.read_options,
-                         options.stop_token, finishable_stream));
-    // Eagerly read the schema
-    return static_cast<StreamReader*>(out->get())->EnsureDataStarted();
+    *out = std::unique_ptr<internal::ClientDataStream>(new GrpcClientDataStream(
+        std::move(rpc), std::move(stream), options.memory_manager));
+    return Status::OK();
   }
 
   Status DoPut(const FlightCallOptions& options, const FlightDescriptor& descriptor,
                const std::shared_ptr<Schema>& schema,
                std::unique_ptr<FlightStreamWriter>* out,
-               std::unique_ptr<FlightMetadataReader>* reader) {
+               std::unique_ptr<FlightMetadataReader>* reader) override {
     using GrpcStream = grpc::ClientReaderWriter<pb::FlightData, pb::PutResult>;
     using StreamWriter = GrpcStreamWriter<pb::PutResult, pb::PutResult>;
 
@@ -1249,7 +1493,7 @@ class FlightClient::FlightClientImpl {
 
   Status DoExchange(const FlightCallOptions& options, const FlightDescriptor& descriptor,
                     std::unique_ptr<FlightStreamWriter>* writer,
-                    std::unique_ptr<FlightStreamReader>* reader) {
+                    std::unique_ptr<FlightStreamReader>* reader) override {
     using GrpcStream = grpc::ClientReaderWriter<pb::FlightData, pb::FlightData>;
     using StreamReader = GrpcStreamReader<GrpcStream>;
     using StreamWriter = GrpcStreamWriter<pb::FlightData, internal::FlightData>;
@@ -1288,7 +1532,7 @@ class FlightClient::FlightClientImpl {
   int64_t write_size_limit_bytes_;
 };
 
-FlightClient::FlightClient() { impl_.reset(new FlightClientImpl); }
+FlightClient::FlightClient() {}
 
 FlightClient::~FlightClient() {}
 
@@ -1300,7 +1544,15 @@ Status FlightClient::Connect(const Location& location,
 Status FlightClient::Connect(const Location& location, const FlightClientOptions& options,
                              std::unique_ptr<FlightClient>* client) {
   client->reset(new FlightClient);
-  return (*client)->impl_->Connect(location, options);
+  const auto scheme = location.scheme();
+  if (util::string_view(scheme).starts_with("grpc")) {
+    (*client)->impl_.reset(new GrpcClientImpl);
+  } else {
+    ARROW_ASSIGN_OR_RAISE(
+        (*client)->impl_,
+        internal::GetDefaultTransportImplRegistry()->MakeClientImpl(scheme));
+  }
+  return (*client)->impl_->Init(options, location, *location.uri_);
 }
 
 Status FlightClient::Authenticate(const FlightCallOptions& options,
@@ -1348,7 +1600,14 @@ Status FlightClient::ListFlights(const FlightCallOptions& options,
 
 Status FlightClient::DoGet(const FlightCallOptions& options, const Ticket& ticket,
                            std::unique_ptr<FlightStreamReader>* stream) {
-  return impl_->DoGet(options, ticket, stream);
+  using StreamReader = GrpcStreamReader<internal::ClientDataStream>;
+
+  std::unique_ptr<internal::ClientDataStream> remote_stream;
+  RETURN_NOT_OK(impl_->DoGet(options, ticket, &remote_stream));
+  *stream = std::unique_ptr<StreamReader>(new StreamReader(
+      nullptr, options.read_options, options.stop_token, std::move(remote_stream)));
+  // Eagerly read the schema
+  return static_cast<StreamReader*>(stream->get())->EnsureDataStarted();
 }
 
 Status FlightClient::DoPut(const FlightCallOptions& options,

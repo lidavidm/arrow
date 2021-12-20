@@ -60,6 +60,7 @@
 #include "arrow/flight/serialization_internal.h"
 #include "arrow/flight/server_auth.h"
 #include "arrow/flight/server_middleware.h"
+#include "arrow/flight/transport_impl.h"
 #include "arrow/flight/types.h"
 
 using FlightService = arrow::flight::protocol::FlightService;
@@ -384,7 +385,7 @@ class DoExchangeMessageWriter : public FlightMessageWriter {
   bool dictionaries_written_ = false;
 };
 
-class FlightServiceImpl;
+class FlightGrpcServiceImpl;
 class GrpcServerCallContext : public ServerCallContext {
   explicit GrpcServerCallContext(grpc::ServerContext* context)
       : context_(context), peer_(context_->peer()) {}
@@ -420,7 +421,7 @@ class GrpcServerCallContext : public ServerCallContext {
   }
 
  private:
-  friend class FlightServiceImpl;
+  friend class FlightGrpcServiceImpl;
   ServerContext* context_;
   std::string peer_;
   std::string peer_identity_;
@@ -441,20 +442,41 @@ class GrpcAddCallHeaders : public AddCallHeaders {
   grpc::ServerContext* context_;
 };
 
+class GrpcTransportDataStream : public internal::TransportDataStream {
+ public:
+  explicit GrpcTransportDataStream(ServerWriter<pb::FlightData>* writer)
+      : writer_(writer) {}
+
+  bool Read(internal::FlightData* data) override { return false; }
+
+  Status Write(const FlightPayload& payload) override {
+    return internal::WritePayload(payload, writer_);
+  }
+
+  Status WritesDone() {
+    // Cannot be implemented for gRPC servers.
+    return Status::OK();
+  }
+
+ private:
+  ServerWriter<pb::FlightData>* writer_;
+};
+
 // This class glues an implementation of FlightServerBase together with the
 // gRPC service definition, so the latter is not exposed in the public API
-class FlightServiceImpl : public FlightService::Service {
+class FlightGrpcServiceImpl : public FlightService::Service {
  public:
-  explicit FlightServiceImpl(
+  explicit FlightGrpcServiceImpl(
       std::shared_ptr<ServerAuthHandler> auth_handler,
       std::shared_ptr<MemoryManager> memory_manager,
       std::vector<std::pair<std::string, std::shared_ptr<ServerMiddlewareFactory>>>
           middleware,
-      FlightServerBase* server)
+      internal::FlightServiceImpl* service)
       : auth_handler_(auth_handler),
         memory_manager_(std::move(memory_manager)),
         middleware_(middleware),
-        server_(server) {}
+        service_(service),
+        server_(service_->base()) {}
 
   template <typename UserType, typename Iterator, typename ProtoType>
   grpc::Status WriteStream(Iterator* iterator, ServerWriter<ProtoType>* writer) {
@@ -658,38 +680,9 @@ class FlightServiceImpl : public FlightService::Service {
     Ticket ticket;
     SERVICE_RETURN_NOT_OK(flight_context, internal::FromProto(*request, &ticket));
 
-    std::unique_ptr<FlightDataStream> data_stream;
-    SERVICE_RETURN_NOT_OK(flight_context,
-                          server_->DoGet(flight_context, ticket, &data_stream));
-
-    if (!data_stream) {
-      RETURN_WITH_MIDDLEWARE(flight_context, grpc::Status(grpc::StatusCode::NOT_FOUND,
-                                                          "No data in this flight"));
-    }
-
-    // Write the schema as the first message in the stream
-    FlightPayload schema_payload;
-    SERVICE_RETURN_NOT_OK(flight_context, data_stream->GetSchemaPayload(&schema_payload));
-    auto status = internal::WritePayload(schema_payload, writer);
-    if (status.IsIOError()) {
-      // gRPC doesn't give any way for us to know why the message
-      // could not be written.
-      RETURN_WITH_MIDDLEWARE(flight_context, grpc::Status::OK);
-    }
-    SERVICE_RETURN_NOT_OK(flight_context, status);
-
-    // Consume data stream and write out payloads
-    while (true) {
-      FlightPayload payload;
-      SERVICE_RETURN_NOT_OK(flight_context, data_stream->Next(&payload));
-      // End of stream
-      if (payload.ipc_message.metadata == nullptr) break;
-      auto status = internal::WritePayload(payload, writer);
-      // Connection terminated
-      if (status.IsIOError()) break;
-      SERVICE_RETURN_NOT_OK(flight_context, status);
-    }
-    RETURN_WITH_MIDDLEWARE(flight_context, grpc::Status::OK);
+    GrpcTransportDataStream stream(writer);
+    RETURN_WITH_MIDDLEWARE(flight_context,
+                           service_->DoGet(flight_context, ticket, &stream));
   }
 
   grpc::Status DoPut(ServerContext* context,
@@ -771,6 +764,7 @@ class FlightServiceImpl : public FlightService::Service {
   std::shared_ptr<MemoryManager> memory_manager_;
   std::vector<std::pair<std::string, std::shared_ptr<ServerMiddlewareFactory>>>
       middleware_;
+  internal::FlightServiceImpl* service_;
   FlightServerBase* server_;
 };
 
@@ -857,10 +851,93 @@ class ServerSignalHandler {
   std::thread handle_signals_;
 };
 
-struct FlightServerBase::Impl {
-  std::unique_ptr<FlightServiceImpl> service_;
+// TODO: split all of this out into a subdir
+class GrpcServerImpl : public internal::ServerTransportImpl {
+ public:
+  Status Init(const FlightServerOptions& options, const arrow::internal::Uri& uri,
+              internal::FlightServiceImpl* server) override {
+    service_.reset(new FlightGrpcServiceImpl(options.auth_handler, options.memory_manager,
+                                             options.middleware, server));
+
+    grpc::ServerBuilder builder;
+    // Allow uploading messages of any length
+    builder.SetMaxReceiveMessageSize(-1);
+
+    const std::string scheme = uri.scheme();
+    int port = 0;
+    if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp || scheme == kSchemeGrpcTls) {
+      std::stringstream address;
+      address << arrow::internal::UriEncodeHost(uri.host()) << ':' << uri.port_text();
+
+      std::shared_ptr<grpc::ServerCredentials> creds;
+      if (scheme == kSchemeGrpcTls) {
+        grpc::SslServerCredentialsOptions ssl_options;
+        for (const auto& pair : options.tls_certificates) {
+          ssl_options.pem_key_cert_pairs.push_back({pair.pem_key, pair.pem_cert});
+        }
+        if (options.verify_client) {
+          ssl_options.client_certificate_request =
+              GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
+        }
+        if (!options.root_certificates.empty()) {
+          ssl_options.pem_root_certs = options.root_certificates;
+        }
+        creds = grpc::SslServerCredentials(ssl_options);
+      } else {
+        creds = grpc::InsecureServerCredentials();
+      }
+
+      builder.AddListeningPort(address.str(), creds, &port);
+    } else if (scheme == kSchemeGrpcUnix) {
+      std::stringstream address;
+      address << "unix:" << uri.path();
+      builder.AddListeningPort(address.str(), grpc::InsecureServerCredentials());
+      location_ = options.location;
+    } else {
+      return Status::NotImplemented("Scheme is not supported: " + scheme);
+    }
+
+    builder.RegisterService(service_.get());
+
+    // Disable SO_REUSEPORT - it makes debugging/testing a pain as
+    // leftover processes can handle requests on accident
+    builder.AddChannelArgument(GRPC_ARG_ALLOW_REUSEPORT, 0);
+
+    if (options.builder_hook) {
+      options.builder_hook(&builder);
+    }
+
+    server_ = builder.BuildAndStart();
+    if (!server_) {
+      return Status::UnknownError("Server did not start properly");
+    }
+
+    if (scheme == kSchemeGrpcTls) {
+      RETURN_NOT_OK(Location::ForGrpcTls(uri.host(), port, &location_));
+    } else if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp) {
+      RETURN_NOT_OK(Location::ForGrpcTcp(uri.host(), port, &location_));
+    }
+    return Status::OK();
+  }
+  Status Shutdown() override {
+    server_->Shutdown();
+    return Status::OK();
+  }
+  Status Wait() override {
+    server_->Wait();
+    return Status::OK();
+  }
+  Location location() const override { return location_; }
+
+ private:
+  std::unique_ptr<FlightGrpcServiceImpl> service_;
   std::unique_ptr<grpc::Server> server_;
-  int port_;
+  Location location_;
+};
+
+struct FlightServerBase::Impl {
+  std::unique_ptr<internal::ServerTransportImpl> server_;
+  std::unique_ptr<internal::FlightServiceImpl> service_;
 
   // Signal handlers (on Windows) and the shutdown handler (other platforms)
   // are executed in a separate thread, so getting the current thread instance
@@ -902,7 +979,8 @@ struct FlightServerBase::Impl {
     }
     auto instance = running_instance_.load();
     if (instance != nullptr) {
-      instance->server_->Shutdown();
+      // TODO:
+      ARROW_UNUSED(instance->server_->Shutdown());
     }
   }
 };
@@ -926,65 +1004,21 @@ FlightServerBase::FlightServerBase() { impl_.reset(new Impl); }
 FlightServerBase::~FlightServerBase() {}
 
 Status FlightServerBase::Init(const FlightServerOptions& options) {
-  impl_->service_.reset(new FlightServiceImpl(
-      options.auth_handler, options.memory_manager, options.middleware, this));
-
-  grpc::ServerBuilder builder;
-  // Allow uploading messages of any length
-  builder.SetMaxReceiveMessageSize(-1);
-
-  const Location& location = options.location;
-  const std::string scheme = location.scheme();
-  if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp || scheme == kSchemeGrpcTls) {
-    std::stringstream address;
-    address << arrow::internal::UriEncodeHost(location.uri_->host()) << ':'
-            << location.uri_->port_text();
-
-    std::shared_ptr<grpc::ServerCredentials> creds;
-    if (scheme == kSchemeGrpcTls) {
-      grpc::SslServerCredentialsOptions ssl_options;
-      for (const auto& pair : options.tls_certificates) {
-        ssl_options.pem_key_cert_pairs.push_back({pair.pem_key, pair.pem_cert});
-      }
-      if (options.verify_client) {
-        ssl_options.client_certificate_request =
-            GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
-      }
-      if (!options.root_certificates.empty()) {
-        ssl_options.pem_root_certs = options.root_certificates;
-      }
-      creds = grpc::SslServerCredentials(ssl_options);
-    } else {
-      creds = grpc::InsecureServerCredentials();
-    }
-
-    builder.AddListeningPort(address.str(), creds, &impl_->port_);
-  } else if (scheme == kSchemeGrpcUnix) {
-    std::stringstream address;
-    address << "unix:" << location.uri_->path();
-    builder.AddListeningPort(address.str(), grpc::InsecureServerCredentials());
+  const auto scheme = options.location.scheme();
+  if (util::string_view(scheme).starts_with("grpc")) {
+    impl_->server_.reset(new GrpcServerImpl());
   } else {
-    return Status::NotImplemented("Scheme is not supported: " + scheme);
+    ARROW_ASSIGN_OR_RAISE(
+        impl_->server_,
+        internal::GetDefaultTransportImplRegistry()->MakeServerImpl(scheme));
   }
-
-  builder.RegisterService(impl_->service_.get());
-
-  // Disable SO_REUSEPORT - it makes debugging/testing a pain as
-  // leftover processes can handle requests on accident
-  builder.AddChannelArgument(GRPC_ARG_ALLOW_REUSEPORT, 0);
-
-  if (options.builder_hook) {
-    options.builder_hook(&builder);
-  }
-
-  impl_->server_ = builder.BuildAndStart();
-  if (!impl_->server_) {
-    return Status::UnknownError("Server did not start properly");
-  }
-  return Status::OK();
+  impl_->service_.reset(new internal::FlightServiceImpl(this));
+  return impl_->server_->Init(options, *options.location.uri_, impl_->service_.get());
 }
 
-int FlightServerBase::port() const { return impl_->port_; }
+int FlightServerBase::port() const { return location().uri_->port(); }
+
+Location FlightServerBase::location() const { return impl_->server_->location(); }
 
 Status FlightServerBase::SetShutdownOnSignals(const std::vector<int> sigs) {
   impl_->signals_ = sigs;
@@ -1030,12 +1064,12 @@ Status FlightServerBase::Shutdown() {
     return Status::Invalid("Shutdown() on uninitialized FlightServerBase");
   }
   impl_->running_instance_ = nullptr;
-  impl_->server_->Shutdown();
-  return Status::OK();
+  // TODO:
+  return impl_->server_->Shutdown();
 }
 
 Status FlightServerBase::Wait() {
-  impl_->server_->Wait();
+  RETURN_NOT_OK(impl_->server_->Wait());
   impl_->running_instance_ = nullptr;
   return Status::OK();
 }
