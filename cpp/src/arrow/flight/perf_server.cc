@@ -19,6 +19,7 @@
 
 #include <signal.h>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -43,8 +44,12 @@
 #ifdef ARROW_CUDA
 #include "arrow/gpu/cuda_api.h"
 #endif
+#ifdef ARROW_WITH_UCX
+#include "arrow/flight/transport/ucx/ucx.h"
+#endif
 
 DEFINE_bool(cuda, false, "Allocate results in CUDA memory");
+DEFINE_string(transport, "grpc", "Transport to use");
 DEFINE_string(server_host, "localhost", "Host where the server is running on");
 DEFINE_int32(port, 31337, "Server port to listen on");
 DEFINE_string(server_unix, "", "Unix socket path where the server is running on");
@@ -191,7 +196,8 @@ class FlightPerfServer : public FlightServerBase {
                std::unique_ptr<FlightDataStream>* data_stream) override {
     perf::Token token;
     CHECK_PARSE(token.ParseFromString(request.ticket));
-    return GetPerfBatches(token, perf_schema_, false, data_stream);
+    // This must also be set in flight_benchmark.cc
+    return GetPerfBatches(token, perf_schema_, /*verify=*/false, data_stream);
   }
 
   Status DoPut(const ServerCallContext& context,
@@ -241,28 +247,56 @@ int main(int argc, char** argv) {
 
   arrow::flight::Location bind_location;
   arrow::flight::Location connect_location;
-  if (FLAGS_server_unix.empty()) {
-    if (!FLAGS_cert_file.empty() || !FLAGS_key_file.empty()) {
-      if (!FLAGS_cert_file.empty() && !FLAGS_key_file.empty()) {
-        ARROW_CHECK_OK(
-            arrow::flight::Location::ForGrpcTls("0.0.0.0", FLAGS_port, &bind_location));
-        ARROW_CHECK_OK(arrow::flight::Location::ForGrpcTls(FLAGS_server_host, FLAGS_port,
-                                                           &connect_location));
+  if (FLAGS_transport == "grpc") {
+    if (FLAGS_server_unix.empty()) {
+      if (!FLAGS_cert_file.empty() || !FLAGS_key_file.empty()) {
+        if (!FLAGS_cert_file.empty() && !FLAGS_key_file.empty()) {
+          ARROW_CHECK_OK(
+              arrow::flight::Location::ForGrpcTls("0.0.0.0", FLAGS_port, &bind_location));
+          ARROW_CHECK_OK(arrow::flight::Location::ForGrpcTls(
+              FLAGS_server_host, FLAGS_port, &connect_location));
+        } else {
+          std::cerr << "If providing TLS cert/key, must provide both" << std::endl;
+          return 1;
+        }
       } else {
-        std::cerr << "If providing TLS cert/key, must provide both" << std::endl;
-        return 1;
+        ARROW_CHECK_OK(
+            arrow::flight::Location::ForGrpcTcp("0.0.0.0", FLAGS_port, &bind_location));
+        ARROW_CHECK_OK(arrow::flight::Location::ForGrpcTcp(FLAGS_server_host, FLAGS_port,
+                                                           &connect_location));
       }
     } else {
       ARROW_CHECK_OK(
-          arrow::flight::Location::ForGrpcTcp("0.0.0.0", FLAGS_port, &bind_location));
-      ARROW_CHECK_OK(arrow::flight::Location::ForGrpcTcp(FLAGS_server_host, FLAGS_port,
-                                                         &connect_location));
+          arrow::flight::Location::ForGrpcUnix(FLAGS_server_unix, &bind_location));
+      ARROW_CHECK_OK(
+          arrow::flight::Location::ForGrpcUnix(FLAGS_server_unix, &connect_location));
     }
+  } else if (FLAGS_transport == "ucx") {
+#ifdef ARROW_WITH_UCX
+    arrow::flight::transport::ucx::InitializeFlightUcx();
+    if (FLAGS_server_unix.empty()) {
+      if (!FLAGS_cert_file.empty() || !FLAGS_key_file.empty()) {
+        std::cerr << "Transport does not support TLS: " << FLAGS_transport << std::endl;
+        return EXIT_FAILURE;
+      }
+      ARROW_CHECK_OK(arrow::flight::Location::Parse(
+          "ucx://" + FLAGS_server_host + ":" + std::to_string(FLAGS_port),
+          &bind_location));
+      ARROW_CHECK_OK(arrow::flight::Location::Parse(
+          "ucx://" + FLAGS_server_host + ":" + std::to_string(FLAGS_port),
+          &connect_location));
+    } else {
+      std::cerr << "Transport does not support domain sockets: " << FLAGS_transport
+                << std::endl;
+      return EXIT_FAILURE;
+    }
+#else
+    std::cerr << "Not built with transport: " << FLAGS_transport << std::endl;
+    return EXIT_FAILURE;
+#endif
   } else {
-    ARROW_CHECK_OK(
-        arrow::flight::Location::ForGrpcUnix(FLAGS_server_unix, &bind_location));
-    ARROW_CHECK_OK(
-        arrow::flight::Location::ForGrpcUnix(FLAGS_server_unix, &connect_location));
+    std::cerr << "Unknown transport: " << FLAGS_transport << std::endl;
+    return EXIT_FAILURE;
   }
   arrow::flight::FlightServerOptions options(bind_location);
   if (!FLAGS_cert_file.empty() && !FLAGS_key_file.empty()) {
@@ -293,6 +327,7 @@ int main(int argc, char** argv) {
   ARROW_CHECK_OK(g_server->Init(options));
   // Exit with a clean error code (0) on SIGTERM
   ARROW_CHECK_OK(g_server->SetShutdownOnSignals({SIGTERM}));
+  std::cout << "Server location: " << connect_location.ToString() << std::endl;
   if (FLAGS_server_unix.empty()) {
     std::cout << "Server host: " << FLAGS_server_host << std::endl;
     std::cout << "Server port: " << FLAGS_port << std::endl;
@@ -301,5 +336,5 @@ int main(int argc, char** argv) {
   }
   g_server->SetLocation(connect_location);
   ARROW_CHECK_OK(g_server->Serve());
-  return 0;
+  return EXIT_SUCCESS;
 }
