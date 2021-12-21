@@ -21,7 +21,7 @@
 
 #include <ucp/api/ucp.h>
 
-#include "arrow/flight/server_impl.h"
+#include "arrow/flight/transport_impl.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
 #include "arrow/util/base64.h"
@@ -44,10 +44,10 @@ inline Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status)
   }
 }
 
-class ARROW_FLIGHT_EXPORT UcxTransportImpl
+class ARROW_FLIGHT_EXPORT UcxServerImpl
     : public arrow::flight::internal::ServerTransportImpl {
  public:
-  UcxTransportImpl() : ucp_address_(nullptr), ucp_address_len_(0) {}
+  UcxServerImpl() : ucp_address_(nullptr), ucp_address_len_(0) {}
 
   Status Init(const FlightServerOptions& options, const arrow::internal::Uri& location,
               FlightServerBase* server) override {
@@ -104,21 +104,16 @@ class ARROW_FLIGHT_EXPORT UcxTransportImpl
 std::once_flag kInitializeOnce;
 void InitializeFlightUcx() {
   std::call_once(kInitializeOnce, []() {
-    RegisterTransportImpl(flight::internal::GetDefaultServerTransportImplRegistry());
+    // TODO: is there a recognized URI scheme?
+    auto* registry = flight::internal::GetDefaultTransportImplRegistry();
+    DCHECK_OK(registry->RegisterServer(
+        "ucx",
+        []() -> arrow::Result<
+                 std::unique_ptr<arrow::flight::internal::ServerTransportImpl>> {
+          return arrow::internal::make_unique<UcxServerImpl>();
+        }));
   });
 }
-
-void RegisterTransportImpl(
-    arrow::flight::internal::ServerTransportImplRegistry* registry) {
-  // TODO: is there a recognized URI scheme?
-  DCHECK_OK(registry->RegisterImpl(
-      "ucx",
-      []() -> arrow::Result<
-               std::unique_ptr<arrow::flight::internal::ServerTransportImpl>> {
-        return arrow::internal::make_unique<UcxTransportImpl>();
-      }));
-}
-
 }  // namespace ucx
 }  // namespace transport
 }  // namespace flight

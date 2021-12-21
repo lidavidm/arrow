@@ -32,10 +32,6 @@ namespace ucx {
 ARROW_FLIGHT_EXPORT
 void InitializeFlightUcx();
 
-ARROW_FLIGHT_EXPORT
-void RegisterTransportImpl(
-    arrow::flight::internal::ServerTransportImplRegistry* registry);
-
 }  // namespace ucx
 }  // namespace transport
 }  // namespace flight
