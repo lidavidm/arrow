@@ -36,6 +36,14 @@ void InitializeFlightUcx() {
   std::call_once(kInitializeOnce, []() {
     // TODO: is there a recognized URI scheme?
     auto* registry = flight::internal::GetDefaultTransportImplRegistry();
+
+    DCHECK_OK(registry->RegisterClient(
+        "ucx",
+        []() -> arrow::Result<
+                 std::unique_ptr<arrow::flight::internal::ClientTransportImpl>> {
+          return arrow::internal::make_unique<UcxClientImpl>();
+        }));
+
     DCHECK_OK(registry->RegisterServer(
         "ucx",
         []() -> arrow::Result<

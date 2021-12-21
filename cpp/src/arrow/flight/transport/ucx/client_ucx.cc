@@ -15,47 +15,27 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#pragma once
+#include "arrow/flight/transport/ucx/ucx_internal.h"
+
+#include <mutex>
 
 #include <ucp/api/ucp.h>
 
 #include "arrow/flight/transport_impl.h"
-#include "arrow/flight/visibility.h"
+#include "arrow/result.h"
+#include "arrow/status.h"
+#include "arrow/util/base64.h"
 
 namespace arrow {
 namespace flight {
 namespace transport {
 namespace ucx {
 
-class ARROW_FLIGHT_EXPORT UcxServerImpl
-    : public arrow::flight::internal::ServerTransportImpl {
- public:
-  UcxServerImpl();
-
-  Status Init(const FlightServerOptions& options, const arrow::internal::Uri& location,
-              FlightServerBase* server);
-  Status Shutdown() override;
-  Status Wait() override;
-  Location location() const override;
-
- private:
-  ucp_context_h ucp_context_;
-  ucp_worker_h ucp_worker_;
-  ucp_address_t* ucp_address_;
-  uint64_t ucp_address_len_;
-  Location location_;
-};
-
-class ARROW_FLIGHT_EXPORT UcxClientImpl
-    : public arrow::flight::internal::ClientTransportImpl {
- public:
-  Status Init(const FlightClientOptions& options, const Location& location,
-              const arrow::internal::Uri& uri) override;
-  Status Close() override;
-
- private:
-};
-
+Status UcxClientImpl::Init(const FlightClientOptions& options, const Location& location,
+                           const arrow::internal::Uri& uri) {
+  return Status::NotImplemented("NYI");
+}
+Status UcxClientImpl::Close() { return Status::OK(); }
 }  // namespace ucx
 }  // namespace transport
 }  // namespace flight
