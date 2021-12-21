@@ -18,20 +18,45 @@
 #pragma once
 
 #include <ucp/api/ucp.h>
+#include <atomic>
+#include <thread>
 
 #include "arrow/flight/transport_impl.h"
 #include "arrow/flight/visibility.h"
+#include "arrow/type_fwd.h"
+#include "arrow/util/macros.h"
 
 namespace arrow {
 namespace flight {
 namespace transport {
 namespace ucx {
 
+/// A UCP address (opaque handle and length).
+class UcpAddress {
+ public:
+  // If not null, then this is a UCX-managed address and Close() needs
+  // to release the address. Else, this is an Arrow-allocated address
+  // and Close() just needs to free memory.
+  ucp_worker_h worker;
+  ucp_address_t* address;
+  uint64_t length;
+
+  UcpAddress() : worker(nullptr), address(nullptr), length(0) {}
+
+  arrow::Result<Location> ToLocation() const;
+  void Close();
+
+  static Status FromUri(const arrow::internal::Uri& uri, UcpAddress* address);
+
+ private:
+  ARROW_DISALLOW_COPY_AND_ASSIGN(UcpAddress);
+};
+
+/// General UCP state that both server and client require.
 struct UcpState {
   ucp_context_h context;
   ucp_worker_h worker;
-  ucp_address_t* address;
-  uint64_t address_len;
+  UcpAddress address;
   Location location;
 
   Status Init(const ucp_params_t& ucp_params);
@@ -50,11 +75,11 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   Location location() const override;
 
  private:
-  ucp_context_h ucp_context_;
-  ucp_worker_h ucp_worker_;
-  ucp_address_t* ucp_address_;
-  uint64_t ucp_address_len_;
-  Location location_;
+  void RunServer();
+
+  UcpState ucp_state_;
+  std::atomic_flag running_;
+  std::thread server_thread_;
 };
 
 class ARROW_FLIGHT_EXPORT UcxClientImpl
@@ -70,10 +95,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
  private:
   UcpState ucp_state_;
-
-  // TODO: wrap in higher level wrapper
-  ucp_address_t* remote_address_;
-  uint64_t remote_address_len_;
+  ucp_ep_h remote_endpoint_;
 };
 
 static inline Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
@@ -177,7 +199,6 @@ static inline Status FromUcsStatus(const std::string& context, ucs_status_t ucs_
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_LAST");
     default:
-      // TODO: other cases
       return Status::UnknownError(
           context, ": Unknown UCX error: ", static_cast<int32_t>(ucs_status));
   }

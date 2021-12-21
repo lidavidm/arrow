@@ -25,58 +25,90 @@
 #include "arrow/result.h"
 #include "arrow/status.h"
 #include "arrow/util/base64.h"
+#include "arrow/util/logging.h"
 
 namespace arrow {
 namespace flight {
 namespace transport {
 namespace ucx {
 
-UcxServerImpl::UcxServerImpl() : ucp_address_(nullptr), ucp_address_len_(0) {}
+UcxServerImpl::UcxServerImpl() {}
 
 Status UcxServerImpl::Init(const FlightServerOptions& options,
                            const arrow::internal::Uri& location,
                            FlightServerBase* server) {
-  // Initialize UCX
   ucp_params_t ucp_params;
-  ucp_config_t* ucp_config;
-
   std::memset(&ucp_params, 0, sizeof(ucp_params));
   ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
   ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_STREAM;
 
-  RETURN_NOT_OK(
-      FromUcsStatus("ucp_config_read", ucp_config_read(nullptr, nullptr, &ucp_config)));
-  auto init_status = ucp_init(&ucp_params, ucp_config, &ucp_context_);
-  ucp_config_release(ucp_config);
-  RETURN_NOT_OK(FromUcsStatus("ucp_init", init_status));
+  RETURN_NOT_OK(ucp_state_.Init(ucp_params));
 
-  // Initialize the worker
-  ucp_worker_params_t worker_params;
-  std::memset(&worker_params, 0, sizeof(worker_params));
-  worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
-  worker_params.thread_mode = UCS_THREAD_MODE_MULTI;
+  running_.test_and_set();
+  std::thread t(&UcxServerImpl::RunServer, this);
+  server_thread_.swap(t);
 
-  // TODO: RAII release worker/context
-  RETURN_NOT_OK(
-      FromUcsStatus("ucp_worker_create",
-                    ucp_worker_create(ucp_context_, &worker_params, &ucp_worker_)));
-  RETURN_NOT_OK(FromUcsStatus(
-      "ucp_worker_get_address",
-      ucp_worker_get_address(ucp_worker_, &ucp_address_, &ucp_address_len_)));
-
-  auto encoded = util::base64_encode(
-      util::string_view(reinterpret_cast<char*>(ucp_address_), ucp_address_len_));
-  RETURN_NOT_OK(Location::Parse("ucx://worker_address/" + encoded, &location_));
   return Status::OK();
 }
 Status UcxServerImpl::Shutdown() {
-  ucp_worker_release_address(ucp_worker_, ucp_address_);
-  ucp_worker_destroy(ucp_worker_);
-  ucp_cleanup(ucp_context_);
+  running_.clear();
+  RETURN_NOT_OK(Wait());
+  ucp_state_.Close();
   return Status::OK();
 }
-Status UcxServerImpl::Wait() { return Status::OK(); }
-Location UcxServerImpl::location() const { return location_; }
+Status UcxServerImpl::Wait() {
+  try {
+    server_thread_.join();
+  } catch (const std::system_error& e) {
+    if (e.code() == std::errc::invalid_argument) {
+      return Status::Invalid("Cannot Wait() on server that is not running: ", e.what());
+    }
+    return Status::UnknownError("Could not Wait(): ", e.what());
+  }
+  return Status::OK();
+}
+Location UcxServerImpl::location() const { return ucp_state_.location; }
+
+void UcxServerImpl::RunServer() {
+  constexpr uint64_t tag = 0xDEADBEEFu;
+  const uint64_t tag_mask = std::numeric_limits<uint64_t>::max();
+  while (running_.test_and_set()) {
+    ucp_worker_progress(ucp_state_.worker);
+
+    ucp_tag_recv_info_t info_tag;
+    ucp_tag_message_h msg_tag =
+        ucp_tag_probe_nb(ucp_state_.worker, tag, tag_mask, /*remove=*/1, &info_tag);
+    if (!msg_tag) continue;
+
+    ARROW_LOG(WARNING) << "Incoming message";
+    // TODO: use Arrow allocator
+    void* incoming_msg = std::malloc(info_tag.length);
+
+    void* request = ucp_tag_msg_recv_nb(
+        ucp_state_.worker, incoming_msg, info_tag.length, ucp_dt_make_contig(1), msg_tag,
+        [](void* request, ucs_status_t status, ucp_tag_recv_info_t* info) {});
+    if (UCS_PTR_IS_ERR(request)) {
+    } else {
+      DCHECK(UCS_PTR_IS_PTR(request));
+      while (true) {
+        auto status = ucp_request_check_status(request);
+        if (status == UCS_OK) {
+          break;
+        } else if (status != UCS_INPROGRESS) {
+          // return Status::IOError(
+          //     "ucp_request_check_status: unknown error receiving message: ",
+          //     static_cast<int32_t>(status));
+        }
+        ucp_worker_progress(ucp_state_.worker);
+      }
+      ucp_request_release(request);
+    }
+
+    ARROW_LOG(WARNING) << "Received message";
+    std::free(incoming_msg);
+  }
+}
+
 }  // namespace ucx
 }  // namespace transport
 }  // namespace flight

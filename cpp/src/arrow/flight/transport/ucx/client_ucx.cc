@@ -32,6 +32,53 @@ namespace flight {
 namespace transport {
 namespace ucx {
 
+// TODO: move all this into its own .cc file
+constexpr char kUcxScheme[] = "ucx";
+constexpr char kUcxHost[] = "worker_address";
+constexpr char kUcxUriPrefix[] = "ucx://worker_address/";
+
+arrow::Result<Location> UcpAddress::ToLocation() const {
+  Location location;
+  auto encoded =
+      util::base64_encode(util::string_view(reinterpret_cast<char*>(address), length));
+  RETURN_NOT_OK(Location::Parse(kUcxUriPrefix + encoded, &location));
+  return location;
+}
+
+void UcpAddress::Close() {
+  if (worker) {
+    ucp_worker_release_address(worker, address);
+  } else if (address) {
+    std::free(address);
+  }
+  worker = nullptr;
+  address = nullptr;
+  length = 0;
+}
+
+Status UcpAddress::FromUri(const arrow::internal::Uri& uri, UcpAddress* address) {
+  if (!address) {
+    return Status::Invalid("UcpAddress::FromUri requires an out argument");
+  } else if (address->worker || address->address) {
+    return Status::Invalid("Cannot overwrite existing allocated address");
+  } else if (uri.scheme() != kUcxScheme) {
+    return Status::NotImplemented("Flight scheme ", uri.scheme(),
+                                  " is not supported by the UCX transport");
+  } else if (uri.host() != kUcxHost) {
+    return Status::Invalid("Expected URI in the format ", kUcxUriPrefix,
+                           "..., but host was: ", uri.host());
+  }
+
+  // Remove the leading slash
+  auto decoded_worker_address =
+      util::base64_decode(util::string_view(uri.path()).substr(1));
+  address->address =
+      reinterpret_cast<ucp_address_t*>(std::malloc(decoded_worker_address.size()));
+  std::memcpy(address->address, decoded_worker_address.data(),
+              decoded_worker_address.size());
+  return Status::OK();
+}
+
 Status UcpState::Init(const ucp_params_t& ucp_params) {
   // Initialize UCX
   ucp_config_t* ucp_config;
@@ -51,49 +98,44 @@ Status UcpState::Init(const ucp_params_t& ucp_params) {
   // TODO: RAII release worker/context
   status = ucp_worker_create(context, &worker_params, &worker);
   RETURN_NOT_OK(FromUcsStatus("ucp_worker_create", status));
-  status = ucp_worker_get_address(worker, &address, &address_len);
+  address.worker = worker;
+  status = ucp_worker_get_address(worker, &address.address, &address.length);
   RETURN_NOT_OK(FromUcsStatus("ucp_worker_get_address", status));
 
-  auto encoded = util::base64_encode(
-      util::string_view(reinterpret_cast<char*>(address), address_len));
-  RETURN_NOT_OK(Location::Parse("ucx://worker_address/" + encoded, &location));
-
+  ARROW_ASSIGN_OR_RAISE(location, address.ToLocation());
   return Status::OK();
 }
 
 void UcpState::Close() {
-  ucp_worker_release_address(worker, address);
+  address.Close();
   ucp_worker_destroy(worker);
   ucp_cleanup(context);
 }
 
 Status UcxClientImpl::Init(const FlightClientOptions& options, const Location& location,
                            const arrow::internal::Uri& uri) {
-  // TODO: constexpr constants
-  if (uri.scheme() != "ucx") {
-    return Status::NotImplemented("Flight scheme ", location.scheme(),
-                                  " is not supported by the UCX transport");
-  } else if (uri.host() != "worker_address") {
-    return Status::Invalid(
-        "Expected URI in the format ucx://worker_address/..., but host was: ",
-        uri.host());
+  {
+    // Initialize client state
+    ucp_params_t ucp_params;
+    std::memset(&ucp_params, 0, sizeof(ucp_params));
+    ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
+    ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_STREAM;
+
+    RETURN_NOT_OK(ucp_state_.Init(ucp_params));
   }
 
-  auto encoded_worker_address = uri.path();
-  // Remove the leading slash
-  auto decoded_worker_address =
-      util::base64_decode(util::string_view(encoded_worker_address).substr(1));
-  remote_address_ =
-      reinterpret_cast<ucp_address_t*>(std::malloc(decoded_worker_address.size()));
-  std::memcpy(remote_address_, decoded_worker_address.data(),
-              decoded_worker_address.size());
+  {
+    // Create endpoint for remote worker
+    UcpAddress remote_address;
+    RETURN_NOT_OK(UcpAddress::FromUri(uri, &remote_address));
 
-  ucp_params_t ucp_params;
-  std::memset(&ucp_params, 0, sizeof(ucp_params));
-  ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
-  ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_STREAM;
+    ucp_ep_params_t ep_params;
+    ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
+    ep_params.address = remote_address.address;
 
-  RETURN_NOT_OK(ucp_state_.Init(ucp_params));
+    auto status = ucp_ep_create(ucp_state_.worker, &ep_params, &remote_endpoint_);
+    RETURN_NOT_OK(FromUcsStatus("ucp_ep_create", status));
+  }
 
   return Status::OK();
 }
@@ -110,21 +152,11 @@ Status UcxClientImpl::GetFlightInfo(const FlightCallOptions& options,
   // Tag-matching. Send a message containing our address, a tag to use, and the serialized
   // descriptor. The server responds on the given address with the given tag.
 
-  // TODO: factor this out?
-  ucp_ep_params_t ep_params;
-  ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
-  ep_params.address = remote_address_;
-
-  // TODO: ep needs to be destroyed too
-  ucp_ep_h server_ep;
-  auto status = ucp_ep_create(ucp_state_.worker, &ep_params, &server_ep);
-  RETURN_NOT_OK(FromUcsStatus("ucp_ep_create", status));
-
   constexpr ucp_tag_t kTag = 0xDEADBEEFu;
-  void* request =
-      ucp_tag_send_nb(server_ep, reinterpret_cast<const void*>(ucp_state_.address),
-                      ucp_state_.address_len, ucp_dt_make_contig(1), kTag,
-                      [](void* request, ucs_status_t status) {});
+  void* request = ucp_tag_send_nb(
+      remote_endpoint_, reinterpret_cast<const void*>(ucp_state_.address.address),
+      ucp_state_.address.length, ucp_dt_make_contig(1), kTag,
+      [](void* request, ucs_status_t status) {});
   if (UCS_PTR_IS_ERR(request)) {
     return Status::IOError("ucp_tag_send_nb: unknown error sending message");
   } else if (UCS_PTR_IS_PTR(request)) {
