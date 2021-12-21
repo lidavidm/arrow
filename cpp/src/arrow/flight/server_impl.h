@@ -22,6 +22,7 @@
 #include <functional>
 #include <memory>
 
+#include "arrow/flight/types.h"
 #include "arrow/flight/visibility.h"
 #include "arrow/type_fwd.h"
 
@@ -52,9 +53,8 @@ class ARROW_FLIGHT_EXPORT ServerTransportImpl {
   /// listening.
   virtual Status Wait() = 0;
 
-  /// Get the port the server is listening on, or -1 if not listening or not applicable.
-  virtual int port() const = 0;
-  // TODO: should probably return an optional Location or something
+  /// Get the address the server is listening on, else an empty Location.
+  virtual Location location() const = 0;
 };
 
 /// A registry of transport implementations.

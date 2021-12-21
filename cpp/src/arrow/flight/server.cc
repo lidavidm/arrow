@@ -845,8 +845,6 @@ class ServerSignalHandler {
 // TODO: split all of this out into a subdir
 class GrpcServerImpl : public internal::ServerTransportImpl {
  public:
-  GrpcServerImpl() : port_(0) {}
-
   Status Init(const FlightServerOptions& options, const arrow::internal::Uri& location,
               FlightServerBase* server) override {
     service_.reset(
@@ -857,6 +855,7 @@ class GrpcServerImpl : public internal::ServerTransportImpl {
     builder.SetMaxReceiveMessageSize(-1);
 
     const std::string scheme = location.scheme();
+    int port = 0;
     if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp || scheme == kSchemeGrpcTls) {
       std::stringstream address;
       address << arrow::internal::UriEncodeHost(location.host()) << ':'
@@ -880,11 +879,12 @@ class GrpcServerImpl : public internal::ServerTransportImpl {
         creds = grpc::InsecureServerCredentials();
       }
 
-      builder.AddListeningPort(address.str(), creds, &port_);
+      builder.AddListeningPort(address.str(), creds, &port);
     } else if (scheme == kSchemeGrpcUnix) {
       std::stringstream address;
       address << "unix:" << location.path();
       builder.AddListeningPort(address.str(), grpc::InsecureServerCredentials());
+      location_ = options.location;
     } else {
       return Status::NotImplemented("Scheme is not supported: " + scheme);
     }
@@ -903,6 +903,12 @@ class GrpcServerImpl : public internal::ServerTransportImpl {
     if (!server_) {
       return Status::UnknownError("Server did not start properly");
     }
+
+    if (scheme == kSchemeGrpcTls) {
+      RETURN_NOT_OK(Location::ForGrpcTls(location.host(), port, &location_));
+    } else if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp) {
+      RETURN_NOT_OK(Location::ForGrpcTcp(location.host(), port, &location_));
+    }
     return Status::OK();
   }
   Status Shutdown() override {
@@ -913,12 +919,12 @@ class GrpcServerImpl : public internal::ServerTransportImpl {
     server_->Wait();
     return Status::OK();
   }
-  int port() const override { return port_; }
+  Location location() const override { return location_; }
 
  private:
   std::unique_ptr<FlightServiceImpl> service_;
   std::unique_ptr<grpc::Server> server_;
-  int port_;
+  Location location_;
 };
 
 struct FlightServerBase::Impl {
@@ -999,7 +1005,9 @@ Status FlightServerBase::Init(const FlightServerOptions& options) {
   return impl_->server_->Init(options, *options.location.uri_, this);
 }
 
-int FlightServerBase::port() const { return impl_->server_->port(); }
+int FlightServerBase::port() const { return location().uri_->port(); }
+
+Location FlightServerBase::location() const { return impl_->server_->location(); }
 
 Status FlightServerBase::SetShutdownOnSignals(const std::vector<int> sigs) {
   impl_->signals_ = sigs;

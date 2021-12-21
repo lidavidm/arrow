@@ -26,7 +26,9 @@
 
 #include "arrow/status.h"
 #include "arrow/testing/util.h"
+#include "arrow/util/make_unique.h"
 
+#include "arrow/flight/client.h"
 #include "arrow/flight/client_auth.h"
 #include "arrow/flight/server.h"
 #include "arrow/flight/server_auth.h"
@@ -76,6 +78,44 @@ class ARROW_FLIGHT_EXPORT TestServer {
 /// \brief Create a simple Flight server for testing
 ARROW_FLIGHT_EXPORT
 std::unique_ptr<FlightServerBase> ExampleTestServer();
+
+// Helper to initialize a server and matching client with callbacks to
+// populate options.
+template <typename T, typename... Args>
+Status MakeServer(const Location& location, std::unique_ptr<FlightServerBase>* server,
+                  std::unique_ptr<FlightClient>* client,
+                  std::function<Status(FlightServerOptions*)> make_server_options,
+                  std::function<Status(FlightClientOptions*)> make_client_options,
+                  Args&&... server_args) {
+  *server = arrow::internal::make_unique<T>(std::forward<Args>(server_args)...);
+  FlightServerOptions server_options(location);
+  RETURN_NOT_OK(make_server_options(&server_options));
+  RETURN_NOT_OK((*server)->Init(server_options));
+  Location real_location;
+  if ((*server)->port() > 0) {
+    RETURN_NOT_OK(Location::ForGrpcTcp("localhost", (*server)->port(), &real_location));
+  } else {
+    real_location = (*server)->location();
+  }
+  FlightClientOptions client_options = FlightClientOptions::Defaults();
+  RETURN_NOT_OK(make_client_options(&client_options));
+  return FlightClient::Connect(real_location, client_options, client);
+}
+
+// Helper to initialize a server and matching client with callbacks to
+// populate options.
+template <typename T, typename... Args>
+Status MakeServer(std::unique_ptr<FlightServerBase>* server,
+                  std::unique_ptr<FlightClient>* client,
+                  std::function<Status(FlightServerOptions*)> make_server_options,
+                  std::function<Status(FlightClientOptions*)> make_client_options,
+                  Args&&... server_args) {
+  Location location;
+  RETURN_NOT_OK(Location::ForGrpcTcp("localhost", 0, &location));
+  return MakeServer<T>(location, server, client, std::move(make_server_options),
+                       std::move(make_client_options),
+                       std::forward<Args>(server_args)...);
+}
 
 // ----------------------------------------------------------------------
 // A RecordBatchReader for serving a sequence of in-memory record batches
