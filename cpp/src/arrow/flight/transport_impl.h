@@ -69,33 +69,53 @@ class ARROW_FLIGHT_EXPORT ClientTransportImpl {
   virtual Status Close() = 0;
 
   virtual Status Authenticate(const FlightCallOptions& options,
-                              std::unique_ptr<ClientAuthHandler> auth_handler) = 0;
+                              std::unique_ptr<ClientAuthHandler> auth_handler) {
+    return Status::NotImplemented("NYI");
+  }
   virtual arrow::Result<std::pair<std::string, std::string>> AuthenticateBasicToken(
       const FlightCallOptions& options, const std::string& username,
-      const std::string& password) = 0;
+      const std::string& password) {
+    return Status::NotImplemented("NYI");
+  }
   virtual Status DoAction(const FlightCallOptions& options, const Action& action,
-                          std::unique_ptr<ResultStream>* results) = 0;
+                          std::unique_ptr<ResultStream>* results) {
+    return Status::NotImplemented("NYI");
+  }
   virtual Status ListActions(const FlightCallOptions& options,
-                             std::vector<ActionType>* actions) = 0;
+                             std::vector<ActionType>* actions) {
+    return Status::NotImplemented("NYI");
+  }
   virtual Status GetFlightInfo(const FlightCallOptions& options,
                                const FlightDescriptor& descriptor,
-                               std::unique_ptr<FlightInfo>* info) = 0;
+                               std::unique_ptr<FlightInfo>* info) {
+    return Status::NotImplemented("NYI");
+  }
   virtual Status GetSchema(const FlightCallOptions& options,
                            const FlightDescriptor& descriptor,
-                           std::unique_ptr<SchemaResult>* schema_result) = 0;
+                           std::unique_ptr<SchemaResult>* schema_result) {
+    return Status::NotImplemented("NYI");
+  }
   virtual Status ListFlights(const FlightCallOptions& options, const Criteria& criteria,
-                             std::unique_ptr<FlightListing>* listing) = 0;
+                             std::unique_ptr<FlightListing>* listing) {
+    return Status::NotImplemented("NYI");
+  }
   virtual Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
-                       std::unique_ptr<FlightStreamReader>* stream) = 0;
+                       std::unique_ptr<FlightStreamReader>* stream) {
+    return Status::NotImplemented("NYI");
+  }
   virtual Status DoPut(const FlightCallOptions& options,
                        const FlightDescriptor& descriptor,
                        const std::shared_ptr<Schema>& schema,
                        std::unique_ptr<FlightStreamWriter>* stream,
-                       std::unique_ptr<FlightMetadataReader>* reader) = 0;
+                       std::unique_ptr<FlightMetadataReader>* reader) {
+    return Status::NotImplemented("NYI");
+  }
   virtual Status DoExchange(const FlightCallOptions& options,
                             const FlightDescriptor& descriptor,
                             std::unique_ptr<FlightStreamWriter>* writer,
-                            std::unique_ptr<FlightStreamReader>* reader) = 0;
+                            std::unique_ptr<FlightStreamReader>* reader) {
+    return Status::NotImplemented("NYI");
+  }
 };
 
 /// An implementation of a Flight server for a particular transport.
