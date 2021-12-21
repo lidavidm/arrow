@@ -15,23 +15,35 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Experimental UCX-based transport for Flight.
+#include "arrow/flight/transport/ucx/ucx.h"
 
-#pragma once
+#include <mutex>
 
-#include "arrow/flight/visibility.h"
+#include <ucp/api/ucp.h>
+
+#include "arrow/flight/transport/ucx/ucx_internal.h"
+#include "arrow/flight/transport_impl.h"
+#include "arrow/util/logging.h"
+#include "arrow/util/make_unique.h"
 
 namespace arrow {
 namespace flight {
-namespace internal {
-class ServerTransportImplRegistry;
-}
 namespace transport {
 namespace ucx {
 
-ARROW_FLIGHT_EXPORT
-void InitializeFlightUcx();
-
+std::once_flag kInitializeOnce;
+void InitializeFlightUcx() {
+  std::call_once(kInitializeOnce, []() {
+    // TODO: is there a recognized URI scheme?
+    auto* registry = flight::internal::GetDefaultTransportImplRegistry();
+    DCHECK_OK(registry->RegisterServer(
+        "ucx",
+        []() -> arrow::Result<
+                 std::unique_ptr<arrow::flight::internal::ServerTransportImpl>> {
+          return arrow::internal::make_unique<UcxServerImpl>();
+        }));
+  });
+}
 }  // namespace ucx
 }  // namespace transport
 }  // namespace flight

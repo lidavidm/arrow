@@ -22,7 +22,7 @@ arrow_install_all_headers("arrow/flight/transport/ucx")
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(UCX REQUIRED ucx)
 
-set(ARROW_FLIGHT_TRANSPORT_UCX_SRCS server_ucx.cc)
+set(ARROW_FLIGHT_TRANSPORT_UCX_SRCS server_ucx.cc ucx.cc)
 set(ARROW_FLIGHT_TRANSPORT_UCX_LINK_LIBS)
 
 list(APPEND ARROW_FLIGHT_TRANSPORT_UCX_LINK_LIBS ${UCX_LIBRARIES})

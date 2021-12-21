@@ -15,40 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
+// Experimental UCX-based transport for Flight.
 
-#include "arrow/flight/test_util.h"
-#include "arrow/flight/transport/ucx/ucx.h"
-#include "arrow/testing/gtest_util.h"
+#pragma once
 
-// TODO: ensure UCX headers are not in public api
+#include "arrow/flight/visibility.h"
 
 namespace arrow {
 namespace flight {
+namespace transport {
+namespace ucx {
 
-class TestUcx : public ::testing::Test {
- public:
-  void SetUp() {
-    transport::ucx::InitializeFlightUcx();
+ARROW_FLIGHT_EXPORT
+void InitializeFlightUcx();
 
-    Location location;
-    ASSERT_OK(Location::Parse("ucx://", &location));
-
-    ASSERT_OK(MakeServer<FlightServerBase>(
-        location, &server_, &client_,
-        [](FlightServerOptions* options) { return Status::OK(); },
-        [](FlightClientOptions* options) { return Status::OK(); }));
-  }
-
-  void TearDown() { ASSERT_OK(server_->Shutdown()); }
-
- protected:
-  std::unique_ptr<FlightClient> client_;
-  std::unique_ptr<FlightServerBase> server_;
-};
-
-TEST_F(TestUcx, Basics) {}
-
+}  // namespace ucx
+}  // namespace transport
 }  // namespace flight
 }  // namespace arrow

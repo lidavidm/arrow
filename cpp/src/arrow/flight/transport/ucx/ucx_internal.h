@@ -15,40 +15,38 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
+#pragma once
 
-#include "arrow/flight/test_util.h"
-#include "arrow/flight/transport/ucx/ucx.h"
-#include "arrow/testing/gtest_util.h"
+#include <ucp/api/ucp.h>
 
-// TODO: ensure UCX headers are not in public api
+#include "arrow/flight/transport_impl.h"
+#include "arrow/flight/visibility.h"
 
 namespace arrow {
 namespace flight {
+namespace transport {
+namespace ucx {
 
-class TestUcx : public ::testing::Test {
+class ARROW_FLIGHT_EXPORT UcxServerImpl
+    : public arrow::flight::internal::ServerTransportImpl {
  public:
-  void SetUp() {
-    transport::ucx::InitializeFlightUcx();
+  UcxServerImpl();
 
-    Location location;
-    ASSERT_OK(Location::Parse("ucx://", &location));
+  Status Init(const FlightServerOptions& options, const arrow::internal::Uri& location,
+              FlightServerBase* server);
+  Status Shutdown() override;
+  Status Wait() override;
+  Location location() const override;
 
-    ASSERT_OK(MakeServer<FlightServerBase>(
-        location, &server_, &client_,
-        [](FlightServerOptions* options) { return Status::OK(); },
-        [](FlightClientOptions* options) { return Status::OK(); }));
-  }
-
-  void TearDown() { ASSERT_OK(server_->Shutdown()); }
-
- protected:
-  std::unique_ptr<FlightClient> client_;
-  std::unique_ptr<FlightServerBase> server_;
+ private:
+  ucp_context_h ucp_context_;
+  ucp_worker_h ucp_worker_;
+  ucp_address_t* ucp_address_;
+  uint64_t ucp_address_len_;
+  Location location_;
 };
 
-TEST_F(TestUcx, Basics) {}
-
+}  // namespace ucx
+}  // namespace transport
 }  // namespace flight
 }  // namespace arrow
