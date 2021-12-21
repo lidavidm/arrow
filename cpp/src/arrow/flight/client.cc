@@ -1278,7 +1278,7 @@ class GrpcClientImpl : public internal::ClientTransportImpl {
   int64_t write_size_limit_bytes_;
 };
 
-FlightClient::FlightClient() { impl_.reset(new GrpcClientImpl); }
+FlightClient::FlightClient() {}
 
 FlightClient::~FlightClient() {}
 
@@ -1290,6 +1290,14 @@ Status FlightClient::Connect(const Location& location,
 Status FlightClient::Connect(const Location& location, const FlightClientOptions& options,
                              std::unique_ptr<FlightClient>* client) {
   client->reset(new FlightClient);
+  const auto scheme = location.scheme();
+  if (util::string_view(scheme).starts_with("grpc")) {
+    (*client)->impl_.reset(new GrpcClientImpl);
+  } else {
+    ARROW_ASSIGN_OR_RAISE(
+        (*client)->impl_,
+        internal::GetDefaultTransportImplRegistry()->MakeClientImpl(scheme));
+  }
   return (*client)->impl_->Init(options, location, *location.uri_);
 }
 

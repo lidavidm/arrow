@@ -33,7 +33,7 @@ class TransportImplRegistry::Impl {
       const std::string& scheme) {
     auto it = client_factories_.find(scheme);
     if (it == client_factories_.end()) {
-      return Status::KeyError("No transport implementation for", scheme);
+      return Status::KeyError("No client transport implementation for ", scheme);
     }
     return it->second();
   }
@@ -41,21 +41,21 @@ class TransportImplRegistry::Impl {
       const std::string& scheme) {
     auto it = server_factories_.find(scheme);
     if (it == server_factories_.end()) {
-      return Status::KeyError("No transport implementation for", scheme);
+      return Status::KeyError("No server transport implementation for ", scheme);
     }
     return it->second();
   }
   Status RegisterClient(const std::string& scheme, ClientFactory factory) {
     auto it = client_factories_.insert({scheme, std::move(factory)});
     if (!it.second) {
-      return Status::Invalid("Transport already registered for ", scheme);
+      return Status::Invalid("Client transport already registered for ", scheme);
     }
     return Status::OK();
   }
   Status RegisterServer(const std::string& scheme, ServerFactory factory) {
     auto it = server_factories_.insert({scheme, std::move(factory)});
     if (!it.second) {
-      return Status::Invalid("Transport already registered for ", scheme);
+      return Status::Invalid("Server transport already registered for ", scheme);
     }
     return Status::OK();
   }
