@@ -49,3 +49,13 @@ add_arrow_lib(arrow_flight_transport_ucx
               arrow_flight_static)
 # TODO: is this right?
 target_include_directories(arrow_flight_transport_ucx_shared SYSTEM PRIVATE ${UCX_INCLUDE_DIRS})
+
+add_arrow_test(flight_transport_ucx_test
+  STATIC_LINK_LIBS
+  arrow_shared
+  arrow_flight_shared
+  arrow_flight_transport_ucx_shared
+  ${ARROW_TEST_LINK_LIBS}
+  ${ARROW_FLIGHT_TRANSPORT_UCX_LINK_LIBS}
+  LABELS
+  "arrow_flight")
