@@ -59,8 +59,8 @@
 #include "arrow/flight/middleware_internal.h"
 #include "arrow/flight/serialization_internal.h"
 #include "arrow/flight/server_auth.h"
-#include "arrow/flight/server_impl.h"
 #include "arrow/flight/server_middleware.h"
+#include "arrow/flight/transport_impl.h"
 #include "arrow/flight/types.h"
 
 using FlightService = arrow::flight::protocol::FlightService;
@@ -1000,7 +1000,7 @@ Status FlightServerBase::Init(const FlightServerOptions& options) {
   } else {
     ARROW_ASSIGN_OR_RAISE(
         impl_->server_,
-        internal::GetDefaultServerTransportImplRegistry()->GetImplForScheme(scheme));
+        internal::GetDefaultTransportImplRegistry()->MakeServerImpl(scheme));
   }
   return impl_->server_->Init(options, *options.location.uri_, this);
 }
