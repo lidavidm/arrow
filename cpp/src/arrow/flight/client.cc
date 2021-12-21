@@ -57,6 +57,7 @@
 #include "arrow/flight/middleware.h"
 #include "arrow/flight/middleware_internal.h"
 #include "arrow/flight/serialization_internal.h"
+#include "arrow/flight/transport_impl.h"
 #include "arrow/flight/types.h"
 
 namespace arrow {
@@ -914,16 +915,16 @@ constexpr char kDummyRootCert[] =
     "-----END CERTIFICATE-----\n";
 #endif
 }  // namespace
-class FlightClient::FlightClientImpl {
+class GrpcClientImpl : public internal::ClientTransportImpl {
  public:
-  Status Connect(const Location& location, const FlightClientOptions& options) {
+  Status Init(const FlightClientOptions& options, const Location& location,
+              const arrow::internal::Uri& uri) override {
     const std::string& scheme = location.scheme();
 
     std::stringstream grpc_uri;
     std::shared_ptr<grpc::ChannelCredentials> creds;
     if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp || scheme == kSchemeGrpcTls) {
-      grpc_uri << arrow::internal::UriEncodeHost(location.uri_->host()) << ':'
-               << location.uri_->port_text();
+      grpc_uri << arrow::internal::UriEncodeHost(uri.host()) << ':' << uri.port_text();
 
       if (scheme == kSchemeGrpcTls) {
         if (options.disable_server_verification) {
@@ -992,10 +993,11 @@ class FlightClient::FlightClientImpl {
         creds = grpc::InsecureChannelCredentials();
       }
     } else if (scheme == kSchemeGrpcUnix) {
-      grpc_uri << "unix://" << location.uri_->path();
+      grpc_uri << "unix://" << uri.path();
       creds = grpc::InsecureChannelCredentials();
     } else {
-      return Status::NotImplemented("Flight scheme " + scheme + " is not supported.");
+      return Status::NotImplemented("Flight scheme " + scheme +
+                                    " is not supported by the gRPC transport.");
     }
 
     grpc::ChannelArguments args;
@@ -1041,8 +1043,10 @@ class FlightClient::FlightClientImpl {
     return Status::OK();
   }
 
+  Status Close() override { return Status::OK(); }
+
   Status Authenticate(const FlightCallOptions& options,
-                      std::unique_ptr<ClientAuthHandler> auth_handler) {
+                      std::unique_ptr<ClientAuthHandler> auth_handler) override {
     auth_handler_ = std::move(auth_handler);
     ClientRpc rpc(options);
     std::shared_ptr<grpc::ClientReaderWriter<pb::HandshakeRequest, pb::HandshakeResponse>>
@@ -1062,7 +1066,7 @@ class FlightClient::FlightClientImpl {
 
   arrow::Result<std::pair<std::string, std::string>> AuthenticateBasicToken(
       const FlightCallOptions& options, const std::string& username,
-      const std::string& password) {
+      const std::string& password) override {
     // Add basic auth headers to outgoing headers.
     ClientRpc rpc(options);
     internal::AddBasicAuthHeaders(&rpc.context, username, password);
@@ -1085,7 +1089,7 @@ class FlightClient::FlightClientImpl {
   }
 
   Status ListFlights(const FlightCallOptions& options, const Criteria& criteria,
-                     std::unique_ptr<FlightListing>* listing) {
+                     std::unique_ptr<FlightListing>* listing) override {
     pb::Criteria pb_criteria;
     RETURN_NOT_OK(internal::ToProto(criteria, &pb_criteria));
 
@@ -1109,7 +1113,7 @@ class FlightClient::FlightClientImpl {
   }
 
   Status DoAction(const FlightCallOptions& options, const Action& action,
-                  std::unique_ptr<ResultStream>* results) {
+                  std::unique_ptr<ResultStream>* results) override {
     pb::Action pb_action;
     RETURN_NOT_OK(internal::ToProto(action, &pb_action));
 
@@ -1134,7 +1138,8 @@ class FlightClient::FlightClientImpl {
     return internal::FromGrpcStatus(stream->Finish(), &rpc.context);
   }
 
-  Status ListActions(const FlightCallOptions& options, std::vector<ActionType>* types) {
+  Status ListActions(const FlightCallOptions& options,
+                     std::vector<ActionType>* types) override {
     pb::Empty empty;
 
     ClientRpc rpc(options);
@@ -1155,7 +1160,7 @@ class FlightClient::FlightClientImpl {
 
   Status GetFlightInfo(const FlightCallOptions& options,
                        const FlightDescriptor& descriptor,
-                       std::unique_ptr<FlightInfo>* info) {
+                       std::unique_ptr<FlightInfo>* info) override {
     pb::FlightDescriptor pb_descriptor;
     pb::FlightInfo pb_response;
 
@@ -1174,7 +1179,7 @@ class FlightClient::FlightClientImpl {
   }
 
   Status GetSchema(const FlightCallOptions& options, const FlightDescriptor& descriptor,
-                   std::unique_ptr<SchemaResult>* schema_result) {
+                   std::unique_ptr<SchemaResult>* schema_result) override {
     pb::FlightDescriptor pb_descriptor;
     pb::SchemaResult pb_response;
 
@@ -1193,7 +1198,7 @@ class FlightClient::FlightClientImpl {
   }
 
   Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
-               std::unique_ptr<FlightStreamReader>* out) {
+               std::unique_ptr<FlightStreamReader>* out) override {
     using StreamReader = GrpcStreamReader<grpc::ClientReader<pb::FlightData>>;
     pb::Ticket pb_ticket;
     internal::ToProto(ticket, &pb_ticket);
@@ -1214,7 +1219,7 @@ class FlightClient::FlightClientImpl {
   Status DoPut(const FlightCallOptions& options, const FlightDescriptor& descriptor,
                const std::shared_ptr<Schema>& schema,
                std::unique_ptr<FlightStreamWriter>* out,
-               std::unique_ptr<FlightMetadataReader>* reader) {
+               std::unique_ptr<FlightMetadataReader>* reader) override {
     using GrpcStream = grpc::ClientReaderWriter<pb::FlightData, pb::PutResult>;
     using StreamWriter = GrpcStreamWriter<pb::PutResult, pb::PutResult>;
 
@@ -1235,7 +1240,7 @@ class FlightClient::FlightClientImpl {
 
   Status DoExchange(const FlightCallOptions& options, const FlightDescriptor& descriptor,
                     std::unique_ptr<FlightStreamWriter>* writer,
-                    std::unique_ptr<FlightStreamReader>* reader) {
+                    std::unique_ptr<FlightStreamReader>* reader) override {
     using GrpcStream = grpc::ClientReaderWriter<pb::FlightData, pb::FlightData>;
     using StreamReader = GrpcStreamReader<GrpcStream>;
     using StreamWriter = GrpcStreamWriter<pb::FlightData, internal::FlightData>;
@@ -1273,7 +1278,7 @@ class FlightClient::FlightClientImpl {
   int64_t write_size_limit_bytes_;
 };
 
-FlightClient::FlightClient() { impl_.reset(new FlightClientImpl); }
+FlightClient::FlightClient() { impl_.reset(new GrpcClientImpl); }
 
 FlightClient::~FlightClient() {}
 
@@ -1285,7 +1290,7 @@ Status FlightClient::Connect(const Location& location,
 Status FlightClient::Connect(const Location& location, const FlightClientOptions& options,
                              std::unique_ptr<FlightClient>* client) {
   client->reset(new FlightClient);
-  return (*client)->impl_->Connect(location, options);
+  return (*client)->impl_->Init(options, location, *location.uri_);
 }
 
 Status FlightClient::Authenticate(const FlightCallOptions& options,

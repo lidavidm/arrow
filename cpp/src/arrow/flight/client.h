@@ -173,6 +173,11 @@ class ARROW_FLIGHT_EXPORT FlightMetadataReader {
   virtual Status ReadMetadata(std::shared_ptr<Buffer>* out) = 0;
 };
 
+// Forward declaration
+namespace internal {
+class ClientTransportImpl;
+}
+
 /// \brief Client class for Arrow Flight RPC services (gRPC-based).
 /// API experimental for now
 class ARROW_FLIGHT_EXPORT FlightClient {
@@ -322,8 +327,7 @@ class ARROW_FLIGHT_EXPORT FlightClient {
 
  private:
   FlightClient();
-  class FlightClientImpl;
-  std::unique_ptr<FlightClientImpl> impl_;
+  std::unique_ptr<internal::ClientTransportImpl> impl_;
 };
 
 }  // namespace flight

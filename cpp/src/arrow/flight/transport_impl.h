@@ -21,6 +21,9 @@
 
 #include <functional>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "arrow/flight/types.h"
 #include "arrow/flight/visibility.h"
@@ -34,9 +37,23 @@ class Uri;
 
 namespace flight {
 
+// TODO: type_fwd.h
+class Action;
+class ActionType;
+class ClientAuthHandler;
+class FlightCallOptions;
 class FlightClientOptions;
+class FlightInfo;
+class FlightListing;
+class FlightMetadataReader;
+class FlightMetadataWriter;
 class FlightServerBase;
 class FlightServerOptions;
+class FlightStreamReader;
+class FlightStreamWriter;
+class Location;
+class ResultStream;
+class SchemaResult;
 
 namespace internal {
 
@@ -46,12 +63,39 @@ class ARROW_FLIGHT_EXPORT ClientTransportImpl {
   virtual ~ClientTransportImpl() = default;
 
   /// Initialize the client.
-  virtual Status Init(const FlightClientOptions& options,
-                      const arrow::internal::Uri& location) = 0;
+  virtual Status Init(const FlightClientOptions& options, const Location& location,
+                      const arrow::internal::Uri& uri) = 0;
   /// Close the client. Once this returns, the client is no longer usable.
   virtual Status Close() = 0;
 
-  // TODO:
+  virtual Status Authenticate(const FlightCallOptions& options,
+                              std::unique_ptr<ClientAuthHandler> auth_handler) = 0;
+  virtual arrow::Result<std::pair<std::string, std::string>> AuthenticateBasicToken(
+      const FlightCallOptions& options, const std::string& username,
+      const std::string& password) = 0;
+  virtual Status DoAction(const FlightCallOptions& options, const Action& action,
+                          std::unique_ptr<ResultStream>* results) = 0;
+  virtual Status ListActions(const FlightCallOptions& options,
+                             std::vector<ActionType>* actions) = 0;
+  virtual Status GetFlightInfo(const FlightCallOptions& options,
+                               const FlightDescriptor& descriptor,
+                               std::unique_ptr<FlightInfo>* info) = 0;
+  virtual Status GetSchema(const FlightCallOptions& options,
+                           const FlightDescriptor& descriptor,
+                           std::unique_ptr<SchemaResult>* schema_result) = 0;
+  virtual Status ListFlights(const FlightCallOptions& options, const Criteria& criteria,
+                             std::unique_ptr<FlightListing>* listing) = 0;
+  virtual Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
+                       std::unique_ptr<FlightStreamReader>* stream) = 0;
+  virtual Status DoPut(const FlightCallOptions& options,
+                       const FlightDescriptor& descriptor,
+                       const std::shared_ptr<Schema>& schema,
+                       std::unique_ptr<FlightStreamWriter>* stream,
+                       std::unique_ptr<FlightMetadataReader>* reader) = 0;
+  virtual Status DoExchange(const FlightCallOptions& options,
+                            const FlightDescriptor& descriptor,
+                            std::unique_ptr<FlightStreamWriter>* writer,
+                            std::unique_ptr<FlightStreamReader>* reader) = 0;
 };
 
 /// An implementation of a Flight server for a particular transport.
