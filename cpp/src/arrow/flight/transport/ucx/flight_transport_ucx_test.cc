@@ -48,7 +48,11 @@ class TestUcx : public ::testing::Test {
   std::unique_ptr<FlightServerBase> server_;
 };
 
-TEST_F(TestUcx, Basics) {}
+TEST_F(TestUcx, Basics) {
+  auto descriptor = FlightDescriptor::Path({"foo", "bar"});
+  std::unique_ptr<FlightInfo> info;
+  ASSERT_OK(client_->GetFlightInfo(descriptor, &info));
+}
 
 }  // namespace flight
 }  // namespace arrow

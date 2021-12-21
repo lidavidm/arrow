@@ -31,17 +31,6 @@ namespace flight {
 namespace transport {
 namespace ucx {
 
-inline Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
-  switch (ucs_status) {
-    case UCS_OK:
-      return Status::OK();
-    default:
-      // TODO: other cases
-      return Status::UnknownError(
-          context, ": Unknown UCX error: ", static_cast<int32_t>(ucs_status));
-  }
-}
-
 UcxServerImpl::UcxServerImpl() : ucp_address_(nullptr), ucp_address_len_(0) {}
 
 Status UcxServerImpl::Init(const FlightServerOptions& options,
