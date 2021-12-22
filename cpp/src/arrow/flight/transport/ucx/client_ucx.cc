@@ -21,10 +21,12 @@
 
 #include <ucp/api/ucp.h>
 
+#include "arrow/buffer.h"
 #include "arrow/flight/transport_impl.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
 #include "arrow/util/base64.h"
+#include "arrow/util/logging.h"
 #include "arrow/util/uri.h"
 
 namespace arrow {
@@ -119,7 +121,7 @@ Status UcxClientImpl::Init(const FlightClientOptions& options, const Location& l
     ucp_params_t ucp_params;
     std::memset(&ucp_params, 0, sizeof(ucp_params));
     ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
-    ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_STREAM;
+    ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_STREAM | UCP_FEATURE_WAKEUP;
 
     RETURN_NOT_OK(ucp_state_.Init(ucp_params));
   }
@@ -149,14 +151,46 @@ Status UcxClientImpl::GetFlightInfo(const FlightCallOptions& options,
                                     const FlightDescriptor& descriptor,
                                     std::unique_ptr<FlightInfo>* info) {
   // TODO: respect options
+  // TODO: thread safety? need to set option for multithreaded worker on init?
+
   // Tag-matching. Send a message containing our address, a tag to use, and the serialized
   // descriptor. The server responds on the given address with the given tag.
 
+  std::vector<uint8_t> payload(ucp_state_.address.length + 8 + 8);
+  ARROW_LOG(WARNING) << "Addr length: " << ucp_state_.address.length;
+  // Client UCP address length
+  payload[0] = static_cast<uint8_t>(ucp_state_.address.length & 0xFF);
+  payload[1] = static_cast<uint8_t>((ucp_state_.address.length >> 8) & 0xFF);
+  payload[2] = static_cast<uint8_t>((ucp_state_.address.length >> 16) & 0xFF);
+  payload[3] = static_cast<uint8_t>((ucp_state_.address.length >> 24) & 0xFF);
+  payload[4] = static_cast<uint8_t>((ucp_state_.address.length >> 32) & 0xFF);
+  payload[5] = static_cast<uint8_t>((ucp_state_.address.length >> 40) & 0xFF);
+  payload[6] = static_cast<uint8_t>((ucp_state_.address.length >> 48) & 0xFF);
+  payload[7] = static_cast<uint8_t>((ucp_state_.address.length >> 56) & 0xFF);
+  // Client UCP address
+  std::memcpy(payload.data() + 8,
+              reinterpret_cast<const void*>(ucp_state_.address.address),
+              ucp_state_.address.length);
+  // Tag
+  uint8_t* buf = payload.data() + 8 + ucp_state_.address.length;
+  ucp_tag_t response_tag = 12345678;
+  buf[0] = static_cast<uint8_t>(response_tag & 0xFF);
+  buf[1] = static_cast<uint8_t>((response_tag >> 8) & 0xFF);
+  buf[2] = static_cast<uint8_t>((response_tag >> 16) & 0xFF);
+  buf[3] = static_cast<uint8_t>((response_tag >> 24) & 0xFF);
+  buf[4] = static_cast<uint8_t>((response_tag >> 32) & 0xFF);
+  buf[5] = static_cast<uint8_t>((response_tag >> 40) & 0xFF);
+  buf[6] = static_cast<uint8_t>((response_tag >> 48) & 0xFF);
+  buf[7] = static_cast<uint8_t>((response_tag >> 56) & 0xFF);
+  // FlightDescriptor
+  std::string temp;
+  descriptor.SerializeToString(&temp);
+  payload.insert(payload.end(), temp.data(), temp.data() + temp.size());
+
   constexpr ucp_tag_t kTag = 0xDEADBEEFu;
   void* request = ucp_tag_send_nb(
-      remote_endpoint_, reinterpret_cast<const void*>(ucp_state_.address.address),
-      ucp_state_.address.length, ucp_dt_make_contig(1), kTag,
-      [](void* request, ucs_status_t status) {});
+      remote_endpoint_, reinterpret_cast<const void*>(payload.data()), payload.size(),
+      ucp_dt_make_contig(1), kTag, [](void* request, ucs_status_t status) {});
   if (UCS_PTR_IS_ERR(request)) {
     return Status::IOError("ucp_tag_send_nb: unknown error sending message");
   } else if (UCS_PTR_IS_PTR(request)) {
@@ -176,9 +210,52 @@ Status UcxClientImpl::GetFlightInfo(const FlightCallOptions& options,
     // "Reset request state before recycling it"
     // request->completed = 0;
     ucp_request_release(request);
+  } else {
+    // Send was completed immediately
+    DCHECK_EQ(request, nullptr);
   }
 
-  return Status::NotImplemented("NYI: rest of flow");
+  // Listen for a response from the server on the given tag
+  const uint64_t tag_mask = std::numeric_limits<uint64_t>::max();
+  ucp_tag_recv_info_t info_tag;
+  ucp_tag_message_h msg_tag;
+  while (true) {
+    msg_tag = ucp_tag_probe_nb(ucp_state_.worker, response_tag, tag_mask, /*remove=*/1,
+                               &info_tag);
+    if (msg_tag) {
+      // Message received
+      break;
+    } else if (ucp_worker_progress(ucp_state_.worker)) {
+      continue;
+    }
+    // Go to sleep
+    RETURN_NOT_OK(FromUcsStatus("ucp_worker_wait", ucp_worker_wait(ucp_state_.worker)));
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateBuffer(info_tag.length));
+
+  request = ucp_tag_msg_recv_nb(
+      ucp_state_.worker, buffer->mutable_data(), info_tag.length, ucp_dt_make_contig(1),
+      msg_tag, [](void* request, ucs_status_t status, ucp_tag_recv_info_t* info) {});
+  if (UCS_PTR_IS_ERR(request)) {
+    return FromUcsStatus("ucp_tag_msg_recv_nb", UCS_PTR_STATUS(request));
+  } else {
+    DCHECK(UCS_PTR_IS_PTR(request));
+    while (true) {
+      auto status = ucp_request_check_status(request);
+      if (status == UCS_OK) {
+        break;
+      } else if (status != UCS_INPROGRESS) {
+        // TODO: RAII handler for request?
+        ucp_request_release(request);
+        return FromUcsStatus("ucp_request_check_status", status);
+      }
+      ucp_worker_progress(ucp_state_.worker);
+    }
+    ucp_request_release(request);
+  }
+
+  return Status::UnknownError(buffer->ToString());
 }
 
 }  // namespace ucx

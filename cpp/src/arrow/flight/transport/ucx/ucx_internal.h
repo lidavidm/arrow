@@ -76,8 +76,11 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
  private:
   void RunServer();
+  // Handle errors during server worker loop execution
+  void ReportError(Status st);
 
   UcpState ucp_state_;
+  FlightServerBase* service_;
   std::atomic_flag running_;
   std::thread server_thread_;
 };
@@ -104,103 +107,121 @@ static inline Status FromUcsStatus(const std::string& context, ucs_status_t ucs_
       return Status::OK();
     case UCS_INPROGRESS:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_INPROGRESS");
+                             ": ", "UCS_INPROGRESS ", ucs_status_string(ucs_status));
     case UCS_ERR_NO_MESSAGE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_NO_MESSAGE");
+                             ": ", "UCS_ERR_NO_MESSAGE ", ucs_status_string(ucs_status));
     case UCS_ERR_NO_RESOURCE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_NO_RESOURCE");
+                             ": ", "UCS_ERR_NO_RESOURCE ", ucs_status_string(ucs_status));
     case UCS_ERR_IO_ERROR:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_IO_ERROR");
+                             ": ", "UCS_ERR_IO_ERROR ", ucs_status_string(ucs_status));
     case UCS_ERR_NO_MEMORY:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_NO_MEMORY");
+                             ": ", "UCS_ERR_NO_MEMORY ", ucs_status_string(ucs_status));
     case UCS_ERR_INVALID_PARAM:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_INVALID_PARAM");
+                             ": ", "UCS_ERR_INVALID_PARAM ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_UNREACHABLE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_UNREACHABLE");
+                             ": ", "UCS_ERR_UNREACHABLE ", ucs_status_string(ucs_status));
     case UCS_ERR_INVALID_ADDR:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_INVALID_ADDR");
+                             ": ", "UCS_ERR_INVALID_ADDR ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_NOT_IMPLEMENTED:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_NOT_IMPLEMENTED");
+                             ": ", "UCS_ERR_NOT_IMPLEMENTED ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_MESSAGE_TRUNCATED:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_MESSAGE_TRUNCATED");
+                             ": ", "UCS_ERR_MESSAGE_TRUNCATED ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_NO_PROGRESS:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_NO_PROGRESS");
+                             ": ", "UCS_ERR_NO_PROGRESS ", ucs_status_string(ucs_status));
     case UCS_ERR_BUFFER_TOO_SMALL:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_BUFFER_TOO_SMALL");
+                             ": ", "UCS_ERR_BUFFER_TOO_SMALL ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_NO_ELEM:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_NO_ELEM");
+                             ": ", "UCS_ERR_NO_ELEM ", ucs_status_string(ucs_status));
     case UCS_ERR_SOME_CONNECTS_FAILED:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_SOME_CONNECTS_FAILED");
+                             ": ", "UCS_ERR_SOME_CONNECTS_FAILED ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_NO_DEVICE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_NO_DEVICE");
+                             ": ", "UCS_ERR_NO_DEVICE ", ucs_status_string(ucs_status));
     case UCS_ERR_BUSY:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_BUSY");
+                             ": ", "UCS_ERR_BUSY ", ucs_status_string(ucs_status));
     case UCS_ERR_CANCELED:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_CANCELED");
+                             ": ", "UCS_ERR_CANCELED ", ucs_status_string(ucs_status));
     case UCS_ERR_SHMEM_SEGMENT:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_SHMEM_SEGMENT");
+                             ": ", "UCS_ERR_SHMEM_SEGMENT ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_ALREADY_EXISTS:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_ALREADY_EXISTS");
+                             ": ", "UCS_ERR_ALREADY_EXISTS ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_OUT_OF_RANGE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_OUT_OF_RANGE");
+                             ": ", "UCS_ERR_OUT_OF_RANGE ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_TIMED_OUT:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_TIMED_OUT");
+                             ": ", "UCS_ERR_TIMED_OUT ", ucs_status_string(ucs_status));
     case UCS_ERR_EXCEEDS_LIMIT:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_EXCEEDS_LIMIT");
+                             ": ", "UCS_ERR_EXCEEDS_LIMIT ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_UNSUPPORTED:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_UNSUPPORTED");
+                             ": ", "UCS_ERR_UNSUPPORTED ", ucs_status_string(ucs_status));
     case UCS_ERR_REJECTED:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_REJECTED");
+                             ": ", "UCS_ERR_REJECTED ", ucs_status_string(ucs_status));
     case UCS_ERR_NOT_CONNECTED:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_NOT_CONNECTED");
+                             ": ", "UCS_ERR_NOT_CONNECTED ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_CONNECTION_RESET:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_CONNECTION_RESET");
+                             ": ", "UCS_ERR_CONNECTION_RESET ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_FIRST_LINK_FAILURE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_FIRST_LINK_FAILURE");
+                             ": ", "UCS_ERR_FIRST_LINK_FAILURE ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_LAST_LINK_FAILURE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_LAST_LINK_FAILURE");
+                             ": ", "UCS_ERR_LAST_LINK_FAILURE ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_FIRST_ENDPOINT_FAILURE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_FIRST_ENDPOINT_FAILURE");
+                             ": ", "UCS_ERR_FIRST_ENDPOINT_FAILURE ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_LAST_ENDPOINT_FAILURE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_LAST_ENDPOINT_FAILURE");
+                             ": ", "UCS_ERR_LAST_ENDPOINT_FAILURE ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_ENDPOINT_TIMEOUT:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_ENDPOINT_TIMEOUT");
+                             ": ", "UCS_ERR_ENDPOINT_TIMEOUT ",
+                             ucs_status_string(ucs_status));
     case UCS_ERR_LAST:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_LAST");
+                             ": ", "UCS_ERR_LAST ", ucs_status_string(ucs_status));
     default:
       return Status::UnknownError(
-          context, ": Unknown UCX error: ", static_cast<int32_t>(ucs_status));
+          context, ": Unknown UCX error: ", static_cast<int32_t>(ucs_status), " ",
+          ucs_status_string(ucs_status));
   }
 }
 
