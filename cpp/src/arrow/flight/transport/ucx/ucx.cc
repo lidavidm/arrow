@@ -19,12 +19,8 @@
 
 #include <mutex>
 
-#include <ucp/api/ucp.h>
-
 #include "arrow/flight/transport/ucx/ucx_internal.h"
-#include "arrow/flight/transport_impl.h"
 #include "arrow/util/logging.h"
-#include "arrow/util/make_unique.h"
 
 namespace arrow {
 namespace flight {
@@ -34,21 +30,20 @@ namespace ucx {
 std::once_flag kInitializeOnce;
 void InitializeFlightUcx() {
   std::call_once(kInitializeOnce, []() {
-    // TODO: is there a recognized URI scheme?
     auto* registry = flight::internal::GetDefaultTransportImplRegistry();
 
     DCHECK_OK(registry->RegisterClient(
         "ucx",
         []() -> arrow::Result<
                  std::unique_ptr<arrow::flight::internal::ClientTransportImpl>> {
-          return arrow::internal::make_unique<UcxClientImpl>();
+          return MakeUcxClientImpl();
         }));
 
     DCHECK_OK(registry->RegisterServer(
         "ucx",
         []() -> arrow::Result<
                  std::unique_ptr<arrow::flight::internal::ServerTransportImpl>> {
-          return arrow::internal::make_unique<UcxServerImpl>();
+          return MakeUcxServerImpl();
         }));
   });
 }

@@ -93,7 +93,9 @@ Status MakeServer(const Location& location, std::unique_ptr<FlightServerBase>* s
   RETURN_NOT_OK((*server)->Init(server_options));
   Location real_location;
   if ((*server)->port() > 0) {
-    RETURN_NOT_OK(Location::ForGrpcTcp("localhost", (*server)->port(), &real_location));
+    std::string uri =
+        location.scheme() + "://localhost:" + std::to_string((*server)->port());
+    RETURN_NOT_OK(Location::Parse(uri, &real_location));
   } else {
     real_location = (*server)->location();
   }

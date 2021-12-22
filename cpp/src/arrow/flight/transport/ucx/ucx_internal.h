@@ -19,7 +19,6 @@
 
 #include <ucp/api/ucp.h>
 #include <atomic>
-#include <thread>
 
 #include "arrow/flight/transport_impl.h"
 #include "arrow/flight/visibility.h"
@@ -63,43 +62,11 @@ struct UcpState {
   void Close();
 };
 
-class ARROW_FLIGHT_EXPORT UcxServerImpl
-    : public arrow::flight::internal::ServerTransportImpl {
- public:
-  UcxServerImpl();
+ARROW_FLIGHT_EXPORT
+std::unique_ptr<arrow::flight::internal::ClientTransportImpl> MakeUcxClientImpl();
 
-  Status Init(const FlightServerOptions& options, const arrow::internal::Uri& location,
-              FlightServerBase* server);
-  Status Shutdown() override;
-  Status Wait() override;
-  Location location() const override;
-
- private:
-  void RunServer();
-  // Handle errors during server worker loop execution
-  void ReportError(Status st);
-
-  UcpState ucp_state_;
-  FlightServerBase* service_;
-  std::atomic_flag running_;
-  std::thread server_thread_;
-};
-
-class ARROW_FLIGHT_EXPORT UcxClientImpl
-    : public arrow::flight::internal::ClientTransportImpl {
- public:
-  Status Init(const FlightClientOptions& options, const Location& location,
-              const arrow::internal::Uri& uri) override;
-  Status Close() override;
-
-  Status GetFlightInfo(const FlightCallOptions& options,
-                       const FlightDescriptor& descriptor,
-                       std::unique_ptr<FlightInfo>* info) override;
-
- private:
-  UcpState ucp_state_;
-  ucp_ep_h remote_endpoint_;
-};
+ARROW_FLIGHT_EXPORT
+std::unique_ptr<arrow::flight::internal::ServerTransportImpl> MakeUcxServerImpl();
 
 static inline Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
   switch (ucs_status) {

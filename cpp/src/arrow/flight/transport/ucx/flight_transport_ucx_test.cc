@@ -27,15 +27,25 @@
 namespace arrow {
 namespace flight {
 
+class SimpleTestServer : public FlightServerBase {
+ public:
+  Status GetFlightInfo(const ServerCallContext& context, const FlightDescriptor& request,
+                       std::unique_ptr<FlightInfo>* info) override {
+    auto examples = ExampleFlightInfo();
+    *info = std::unique_ptr<FlightInfo>(new FlightInfo(examples[0]));
+    return Status::OK();
+  }
+};
+
 class TestUcx : public ::testing::Test {
  public:
   void SetUp() {
     transport::ucx::InitializeFlightUcx();
 
     Location location;
-    ASSERT_OK(Location::Parse("ucx://", &location));
+    ASSERT_OK(Location::Parse("ucx://0.0.0.0:0", &location));
 
-    ASSERT_OK(MakeServer<FlightServerBase>(
+    ASSERT_OK(MakeServer<SimpleTestServer>(
         location, &server_, &client_,
         [](FlightServerOptions* options) { return Status::OK(); },
         [](FlightClientOptions* options) { return Status::OK(); }));
