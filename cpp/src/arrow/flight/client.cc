@@ -996,8 +996,8 @@ class GrpcClientImpl : public internal::ClientTransportImpl {
       grpc_uri << "unix://" << uri.path();
       creds = grpc::InsecureChannelCredentials();
     } else {
-      return Status::NotImplemented("Flight scheme " + scheme +
-                                    " is not supported by the gRPC transport.");
+      return Status::NotImplemented("Flight scheme ", scheme,
+                                    " is not supported by the gRPC transport");
     }
 
     grpc::ChannelArguments args;
