@@ -19,6 +19,7 @@
 
 #include "arrow/buffer.h"
 #include "arrow/util/base64.h"
+#include "arrow/util/logging.h"
 #include "arrow/util/uri.h"
 
 namespace arrow {
@@ -103,25 +104,6 @@ void UcpState::Close() {
   address.Close();
   ucp_worker_destroy(worker);
   ucp_cleanup(context);
-}
-
-arrow::Result<std::unique_ptr<Buffer>> UcpStartCallFrame::Serialize() const {
-  // TODO: memory pool
-  ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateBuffer(8 + method.size()));
-  uint8_t* payload = buffer->mutable_data();
-  payload[0] = static_cast<uint8_t>(length & 0xFF);
-  payload[1] = static_cast<uint8_t>((length >> 8) & 0xFF);
-  payload[2] = static_cast<uint8_t>((length >> 16) & 0xFF);
-  payload[3] = static_cast<uint8_t>((length >> 24) & 0xFF);
-  payload[4] = static_cast<uint8_t>((length >> 32) & 0xFF);
-  payload[5] = static_cast<uint8_t>((length >> 40) & 0xFF);
-  payload[6] = static_cast<uint8_t>((length >> 48) & 0xFF);
-  payload[7] = static_cast<uint8_t>((length >> 56) & 0xFF);
-  std::memcpy(payload + 8, method.data(), method.size());
-  return buffer;
-}
-UcpStartCallFrame UcpStartCallFrame::MakeFromMethod(const std::string& method) {
-  return UcpStartCallFrame{static_cast<int64_t>(method.size()), method};
 }
 
 Status UriToSockaddr(const arrow::internal::Uri& uri, sockaddr* addr) {
@@ -264,6 +246,81 @@ Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
           context, ": Unknown UCX error: ", static_cast<int32_t>(ucs_status), " ",
           ucs_status_string(ucs_status));
   }
+}
+
+UcpCallDriver::UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint)
+    : worker_(worker), endpoint_(endpoint) {}
+
+Status UcpCallDriver::StartCall(const std::string& method) {
+  ARROW_ASSIGN_OR_RAISE(auto start_call, AllocateBuffer(8 + method.size()));
+  const int64_t length = static_cast<int64_t>(method.size());
+  uint8_t* payload = start_call->mutable_data();
+  Int64ToBytesBe(length, payload);
+  std::memcpy(payload + 8, method.data(), method.size());
+
+  ucp_request_param_t request_param;
+  // TODO: must explicitly memset all these structs/set mask to 0
+  request_param.op_attr_mask = 0;
+  void* request = ucp_stream_send_nbx(endpoint_, start_call->data(), start_call->size(),
+                                      &request_param);
+  RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+  return Status::OK();
+}
+
+Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
+  // TODO: send message header
+
+  ucp_request_param_t request_param;
+  request_param.op_attr_mask = 0;
+  void* request = ucp_stream_send_nbx(endpoint_, data, size, &request_param);
+  RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+  return Status::OK();
+}
+
+arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::ReadNextPayload() {
+  // TODO: try ucp_stream_recv_data_nb which has UCX allocate memory instead
+  ARROW_ASSIGN_OR_RAISE(auto incoming_message, AllocateBuffer(590));
+  size_t actual_length = 0;
+
+  ucp_request_param_t request_param;
+  request_param.op_attr_mask =
+      UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
+  request_param.cb.recv_stream = UcpCallDriver::StreamRecvCallback;
+  request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
+  request_param.user_data = &actual_length;
+  void* request =
+      ucp_stream_recv_nbx(endpoint_, incoming_message->mutable_data(),
+                          incoming_message->size(), &actual_length, &request_param);
+  RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_recv_nbx", request));
+  return incoming_message;
+}
+
+void UcpCallDriver::StreamRecvCallback(void* request, ucs_status_t status, size_t length,
+                                       void* user_data) {
+  *reinterpret_cast<size_t*>(user_data) = length;
+}
+
+Status UcpCallDriver::CompleteRequestBlocking(const std::string& context, void* request) {
+  if (UCS_PTR_IS_ERR(request)) {
+    return FromUcsStatus(context, UCS_PTR_STATUS(request));
+  } else if (UCS_PTR_IS_PTR(request)) {
+    // TODO: callback based mode
+    while (true) {
+      auto status = ucp_request_check_status(request);
+      if (status == UCS_OK) {
+        break;
+      } else if (status != UCS_INPROGRESS) {
+        ucp_request_release(request);
+        return FromUcsStatus("ucp_request_check_status", status);
+      }
+      ucp_worker_progress(worker_);
+    }
+    ucp_request_release(request);
+  } else {
+    // Send was completed instantly
+    DCHECK(!request);
+  }
+  return Status::OK();
 }
 
 }  // namespace ucx

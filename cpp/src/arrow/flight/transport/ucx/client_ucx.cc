@@ -35,12 +35,6 @@ namespace flight {
 namespace transport {
 namespace ucx {
 
-void ClientStreamRecvCallback(void* request, ucs_status_t status, size_t length,
-                              void* user_data) {
-  ARROW_LOG(WARNING) << "CLIENT got message of length " << length;
-  *reinterpret_cast<size_t*>(user_data) = length;
-}
-
 class ARROW_FLIGHT_EXPORT UcxClientImpl
     : public arrow::flight::internal::ClientTransportImpl {
  public:
@@ -108,62 +102,17 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
                        const FlightDescriptor& descriptor,
                        std::unique_ptr<FlightInfo>* info) override {
     // TODO: respect options
-
+    UcpCallDriver driver(ucp_state_.worker, remote_endpoint_);
     // TODO: constant
-    // TODO: the length and method can be sent in separate buffers
-    auto start_call = UcpStartCallFrame::MakeFromMethod(
-        "arrow.flight.protocol.FlightService/GetFlightInfo");
-    {
-      ucp_request_param_t request_param;
-      ARROW_ASSIGN_OR_RAISE(auto payload, start_call.Serialize());
-      void* request = ucp_stream_send_nbx(remote_endpoint_, payload->data(),
-                                          payload->size(), &request_param);
-      RETURN_NOT_OK(CompleteRequestBlocking(request));
-    }
+    RETURN_NOT_OK(driver.StartCall("arrow.flight.protocol.FlightService/GetFlightInfo"));
 
     std::string payload;
     descriptor.SerializeToString(&payload);
 
-    ARROW_LOG(WARNING) << "Sending message of length " << payload.size();
+    RETURN_NOT_OK(driver.SendPayload(reinterpret_cast<const uint8_t*>(payload.data()),
+                                     static_cast<int64_t>(payload.size())));
 
-    ucp_request_param_t request_param;
-    void* request = ucp_stream_send_nbx(remote_endpoint_, payload.data(), payload.size(),
-                                        &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking(request));
-
-    ARROW_ASSIGN_OR_RAISE(auto incoming_message, AllocateBuffer(590));
-    size_t actual_length = 0;
-    request_param = ucp_request_param_t{};
-    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK |
-                                 UCP_OP_ATTR_FIELD_USER_DATA;
-    request_param.cb.recv_stream = ClientStreamRecvCallback;
-    request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
-    request_param.user_data = &actual_length;
-    ARROW_LOG(WARNING) << "Client getting response";
-    request =
-        ucp_stream_recv_nbx(remote_endpoint_, incoming_message->mutable_data(),
-                            incoming_message->size(), &actual_length, &request_param);
-    if (UCS_PTR_IS_ERR(request)) {
-      RETURN_NOT_OK(FromUcsStatus("ucp_stream_recv_nbx", UCS_PTR_STATUS(request)));
-    } else if (UCS_PTR_IS_PTR(request)) {
-      // TODO: factor out
-      // TODO: callback based mode
-      while (true) {
-        auto status = ucp_request_check_status(request);
-        if (status == UCS_OK) {
-          break;
-        } else if (status != UCS_INPROGRESS) {
-          ucp_request_release(request);
-          return FromUcsStatus("ucp_request_check_status", status);
-        }
-        ucp_worker_progress(ucp_state_.worker);
-      }
-      ucp_request_release(request);
-    } else {
-      // Send was completed instantly
-      DCHECK(!request);
-    }
-
+    ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver.ReadNextPayload());
     return FlightInfo::Deserialize(incoming_message->ToString(), info);
   }
 

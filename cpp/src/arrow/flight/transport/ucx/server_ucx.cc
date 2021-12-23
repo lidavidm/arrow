@@ -212,14 +212,8 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
       // TODO: factor into state machine
       // TODO: signedness?
-      int64_t length = static_cast<int64_t>(frame_length[0]) |
-                       (static_cast<int64_t>(frame_length[1]) << 8) |
-                       (static_cast<int64_t>(frame_length[2]) << 16) |
-                       (static_cast<int64_t>(frame_length[3]) << 24) |
-                       (static_cast<int64_t>(frame_length[4]) << 32) |
-                       (static_cast<int64_t>(frame_length[5]) << 40) |
-                       (static_cast<int64_t>(frame_length[6]) << 48) |
-                       (static_cast<int64_t>(frame_length[7]) << 56);
+      int64_t length = BeBytesToInt64(frame_length);
+      ARROW_LOG(WARNING) << "Expecting string of length " << length;
 
       ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> incoming_message,
                             AllocateBuffer(length));
