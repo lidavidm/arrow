@@ -258,6 +258,8 @@ Status UcpCallDriver::StartCall(const std::string& method) {
   Int64ToBytesBe(length, payload);
   std::memcpy(payload + 8, method.data(), method.size());
 
+  ARROW_LOG(WARNING) << "Sending payload of length " << length;
+
   ucp_request_param_t request_param;
   // TODO: must explicitly memset all these structs/set mask to 0
   request_param.op_attr_mask = 0;
@@ -268,18 +270,26 @@ Status UcpCallDriver::StartCall(const std::string& method) {
 }
 
 Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
-  // TODO: send message header
-
+  ARROW_LOG(WARNING) << "Sending payload of length " << size;
+  void* request = nullptr;
   ucp_request_param_t request_param;
   request_param.op_attr_mask = 0;
-  void* request = ucp_stream_send_nbx(endpoint_, data, size, &request_param);
+
+  // Send payload length
+  uint8_t payload[8] = {0};
+  Int64ToBytesBe(size, payload);
+  request = ucp_stream_send_nbx(endpoint_, payload, 8, &request_param);
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+
+  // Send payload
+  request = ucp_stream_send_nbx(endpoint_, data, size, &request_param);
+  RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+
   return Status::OK();
 }
 
 arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::ReadNextPayload() {
-  // TODO: try ucp_stream_recv_data_nb which has UCX allocate memory instead
-  ARROW_ASSIGN_OR_RAISE(auto incoming_message, AllocateBuffer(590));
+  void* request = nullptr;
   size_t actual_length = 0;
 
   ucp_request_param_t request_param;
@@ -288,15 +298,28 @@ arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::ReadNextPayload() {
   request_param.cb.recv_stream = UcpCallDriver::StreamRecvCallback;
   request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
   request_param.user_data = &actual_length;
-  void* request =
-      ucp_stream_recv_nbx(endpoint_, incoming_message->mutable_data(),
-                          incoming_message->size(), &actual_length, &request_param);
+
+  // Read payload length
+  uint8_t payload_length[8] = {0};
+  request =
+      ucp_stream_recv_nbx(endpoint_, payload_length, 8, &actual_length, &request_param);
+  RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_recv_nbx", request));
+  DCHECK_EQ(actual_length, 8);
+
+  ARROW_LOG(WARNING) << "Reading payload of length " << BeBytesToInt64(payload_length);
+
+  // TODO: try ucp_stream_recv_data_nb which has UCX allocate memory instead
+  ARROW_ASSIGN_OR_RAISE(auto incoming_message,
+                        AllocateBuffer(BeBytesToInt64(payload_length)));
+  request = ucp_stream_recv_nbx(endpoint_, incoming_message->mutable_data(),
+                                incoming_message->size(), &actual_length, &request_param);
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_recv_nbx", request));
   return incoming_message;
 }
 
 void UcpCallDriver::StreamRecvCallback(void* request, ucs_status_t status, size_t length,
                                        void* user_data) {
+  ARROW_LOG(WARNING) << "Incoming message of length " << length;
   *reinterpret_cast<size_t*>(user_data) = length;
 }
 

@@ -198,66 +198,32 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   }
 
   Status HandleOneCall(ucp_ep_h client_endpoint) {
-    {
-      ucp_request_param_t request_param;
-      request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK;
-      request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
-      request_param.cb.recv_stream = StreamRecvCallback;
+    UcpCallDriver driver(worker_service_, client_endpoint);
+    UcxServerCallContext context;
 
-      uint8_t frame_length[8] = {0};
-      size_t actual_length = 0;
-      void* request = ucp_stream_recv_nbx(client_endpoint, frame_length, 8,
-                                          &actual_length, &request_param);
-      RETURN_NOT_OK(CompleteRequestBlocking(request, "ucp_stream_recv_nbx"));
-
-      // TODO: factor into state machine
-      // TODO: signedness?
-      int64_t length = BeBytesToInt64(frame_length);
-      ARROW_LOG(WARNING) << "Expecting string of length " << length;
-
-      ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> incoming_message,
-                            AllocateBuffer(length));
-      request = ucp_stream_recv_nbx(client_endpoint, incoming_message->mutable_data(),
-                                    length, &actual_length, &request_param);
-      RETURN_NOT_OK(CompleteRequestBlocking(request, "ucp_stream_recv_nbx"));
-      if (incoming_message->ToString() !=
-          "arrow.flight.protocol.FlightService/GetFlightInfo") {
-        return Status::NotImplemented(incoming_message->ToString());
-      }
+    // Get method
+    ARROW_ASSIGN_OR_RAISE(auto payload, driver.ReadNextPayload());
+    if (payload->ToString() != "arrow.flight.protocol.FlightService/GetFlightInfo") {
+      // TODO: send error to client
+      return Status::NotImplemented(payload->ToString());
     }
 
-    ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> incoming_message, AllocateBuffer(12));
-
-    ucp_request_param_t request_param;
-    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK;
-    request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
-    request_param.cb.recv_stream = StreamRecvCallback;
-    size_t actual_length = 0;
-    void* request =
-        ucp_stream_recv_nbx(client_endpoint, incoming_message->mutable_data(),
-                            incoming_message->size(), &actual_length, &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking(request, "ucp_stream_recv_nbx"));
-
-    // TODO: actual_length is only valid if request == nullptr, else have to get it
-    // from the callback (ugh?)
-    auto str = incoming_message->ToString();
+    // Get payload
+    ARROW_ASSIGN_OR_RAISE(payload, driver.ReadNextPayload());
     FlightDescriptor descriptor;
-    RETURN_NOT_OK(FlightDescriptor::Deserialize(str, &descriptor));
+    RETURN_NOT_OK(FlightDescriptor::Deserialize(payload->ToString(), &descriptor));
     ARROW_LOG(WARNING) << "Descriptor: " << descriptor.ToString();
-    UcxServerCallContext context;
+
     std::unique_ptr<FlightInfo> info;
     // TODO: send error to client
     RETURN_NOT_OK(service_->GetFlightInfo(context, descriptor, &info));
 
     // Send response to client
-    std::string response_payload;
-    RETURN_NOT_OK(info->SerializeToString(&response_payload));
+    std::string response;
+    RETURN_NOT_OK(info->SerializeToString(&response));
 
-    request_param = ucp_request_param_t{};
-    request = ucp_stream_send_nbx(client_endpoint, response_payload.data(),
-                                  response_payload.size(), &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking(request, "ucp_stream_send_nbx"));
-    ARROW_LOG(WARNING) << "Server sent a reply of length " << response_payload.size();
+    RETURN_NOT_OK(driver.SendPayload(reinterpret_cast<const uint8_t*>(response.data()),
+                                     static_cast<int64_t>(response.size())));
     return Status::OK();
   }
 
