@@ -76,8 +76,8 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       ucp_params_t ucp_params;
       ucs_status_t status;
 
-      RETURN_NOT_OK(FromUcsStatus("ucp_config_read",
-                                  ucp_config_read(nullptr, nullptr, &ucp_config)));
+      status = ucp_config_read(nullptr, nullptr, &ucp_config);
+      RETURN_NOT_OK(FromUcsStatus("ucp_config_read", status));
 
       std::memset(&ucp_params, 0, sizeof(ucp_params));
       ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
@@ -147,8 +147,10 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     // TODO: determine if server was running in the first place
     running_.clear();
     ucp_listener_destroy(listener_);
+    // TODO: ucp_ep_close_nb
+    // TODO: ucp_worker_destroy
+    // TODO: ucp_cleanup
     RETURN_NOT_OK(Wait());
-    // ucp_state_.Close();
     return Status::OK();
   }
 

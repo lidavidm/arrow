@@ -31,45 +31,6 @@ namespace flight {
 namespace transport {
 namespace ucx {
 
-/// A UCP address (opaque handle and length).
-class UcpAddress {
- public:
-  // If not null, then this is a UCX-managed address and Close() needs
-  // to release the address. Else, this is an Arrow-allocated address
-  // and Close() just needs to free memory.
-  ucp_worker_h worker;
-  ucp_address_t* address;
-  uint64_t length;
-
-  UcpAddress() : worker(nullptr), address(nullptr), length(0) {}
-
-  arrow::Result<Location> ToLocation() const;
-  void Close();
-
-  static Status FromUri(const arrow::internal::Uri& uri, UcpAddress* address);
-
- private:
-  ARROW_DISALLOW_COPY_AND_ASSIGN(UcpAddress);
-};
-
-/// General UCP state that both server and client require.
-struct UcpState {
-  ucp_context_h context;
-  ucp_worker_h worker;
-  UcpAddress address;
-  Location location;
-
-  Status Init(const ucp_params_t& ucp_params);
-  void Close();
-};
-
-// struct UcpPayloadFrame {
-//   int64_t length;
-//   // TODO: owned vs unowned payload
-//   // TODO: manage UCX-allocated memory;
-//   std::unique_ptr<Buffer> payload;
-// };
-
 static inline void Int64ToBytesBe(const int64_t in, uint8_t* out) {
   const uint64_t val = static_cast<uint64_t>(in);
   out[0] = static_cast<uint8_t>((val >> 56) & 0xFF);

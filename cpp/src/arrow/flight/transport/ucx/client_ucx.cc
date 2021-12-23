@@ -41,13 +41,28 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   Status Init(const FlightClientOptions& options, const Location& location,
               const arrow::internal::Uri& uri) override {
     {
-      // Initialize client state
+      ucp_config_t* ucp_config;
       ucp_params_t ucp_params;
+      ucs_status_t status;
+
+      status = ucp_config_read(nullptr, nullptr, &ucp_config);
+      RETURN_NOT_OK(FromUcsStatus("ucp_config_read", status));
+
       std::memset(&ucp_params, 0, sizeof(ucp_params));
       ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
       ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_STREAM | UCP_FEATURE_WAKEUP;
 
-      RETURN_NOT_OK(ucp_state_.Init(ucp_params));
+      status = ucp_init(&ucp_params, ucp_config, &ucp_context_);
+      ucp_config_release(ucp_config);
+      RETURN_NOT_OK(FromUcsStatus("ucp_init", status));
+
+      ucp_worker_params_t worker_params;
+      std::memset(&worker_params, 0, sizeof(worker_params));
+      worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
+      worker_params.thread_mode = UCS_THREAD_MODE_MULTI;
+
+      status = ucp_worker_create(ucp_context_, &worker_params, &ucp_worker_);
+      RETURN_NOT_OK(FromUcsStatus("ucp_worker_create", status));
     }
 
     {
@@ -61,7 +76,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       params.sockaddr.addr = reinterpret_cast<const sockaddr*>(&listen_addr);
       params.sockaddr.addrlen = sizeof(listen_addr);
 
-      auto status = ucp_ep_create(ucp_state_.worker, &params, &remote_endpoint_);
+      auto status = ucp_ep_create(ucp_worker_, &params, &remote_endpoint_);
       RETURN_NOT_OK(FromUcsStatus("ucp_ep_create", status));
     }
 
@@ -69,32 +84,9 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   }
 
   Status Close() override {
-    // TODO: close remote endpoint
-    // TODO: get rid of ucp_state_
-    ucp_state_.Close();
-    return Status::OK();
-  }
-
-  Status CompleteRequestBlocking(void* request) {
-    if (UCS_PTR_IS_ERR(request)) {
-      return FromUcsStatus("ucp_stream_send_nbx", UCS_PTR_STATUS(request));
-    } else if (UCS_PTR_IS_PTR(request)) {
-      // TODO: callback based mode
-      while (true) {
-        auto status = ucp_request_check_status(request);
-        if (status == UCS_OK) {
-          break;
-        } else if (status != UCS_INPROGRESS) {
-          ucp_request_release(request);
-          return FromUcsStatus("ucp_request_check_status", status);
-        }
-        ucp_worker_progress(ucp_state_.worker);
-      }
-      ucp_request_release(request);
-    } else {
-      // Send was completed instantly
-      DCHECK(!request);
-    }
+    // TODO: ucp_ep_close_nb
+    // TODO: ucp_worker_destroy
+    // TODO: ucp_cleanup
     return Status::OK();
   }
 
@@ -102,7 +94,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
                        const FlightDescriptor& descriptor,
                        std::unique_ptr<FlightInfo>* info) override {
     // TODO: respect options
-    UcpCallDriver driver(ucp_state_.worker, remote_endpoint_);
+    UcpCallDriver driver(ucp_worker_, remote_endpoint_);
     // TODO: constant
     RETURN_NOT_OK(driver.StartCall("arrow.flight.protocol.FlightService/GetFlightInfo"));
 
@@ -117,7 +109,8 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   }
 
  private:
-  UcpState ucp_state_;
+  ucp_context_h ucp_context_;
+  ucp_worker_h ucp_worker_;
   ucp_ep_h remote_endpoint_;
 };
 
