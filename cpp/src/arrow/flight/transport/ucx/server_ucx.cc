@@ -174,6 +174,99 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
  private:
   friend void HandleIncomingConnection(ucp_conn_request_h, void*);
 
+  Status CompleteRequestBlocking(void* request, const std::string& context) {
+    if (UCS_PTR_IS_ERR(request)) {
+      return FromUcsStatus(context, UCS_PTR_STATUS(request));
+    } else if (UCS_PTR_IS_PTR(request)) {
+      // TODO: callback based mode
+      while (true) {
+        auto status = ucp_request_check_status(request);
+        if (status == UCS_OK) {
+          break;
+        } else if (status != UCS_INPROGRESS) {
+          ucp_request_release(request);
+          return FromUcsStatus("ucp_request_check_status", status);
+        }
+        ucp_worker_progress(worker_service_);
+      }
+      ucp_request_release(request);
+    } else {
+      // Send was completed instantly
+      DCHECK(!request);
+    }
+    return Status::OK();
+  }
+
+  Status HandleOneCall(ucp_ep_h client_endpoint) {
+    {
+      ucp_request_param_t request_param;
+      request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK;
+      request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
+      request_param.cb.recv_stream = StreamRecvCallback;
+
+      uint8_t frame_length[8] = {0};
+      size_t actual_length = 0;
+      void* request = ucp_stream_recv_nbx(client_endpoint, frame_length, 8,
+                                          &actual_length, &request_param);
+      RETURN_NOT_OK(CompleteRequestBlocking(request, "ucp_stream_recv_nbx"));
+
+      // TODO: factor into state machine
+      // TODO: signedness?
+      int64_t length = static_cast<int64_t>(frame_length[0]) |
+                       (static_cast<int64_t>(frame_length[1]) << 8) |
+                       (static_cast<int64_t>(frame_length[2]) << 16) |
+                       (static_cast<int64_t>(frame_length[3]) << 24) |
+                       (static_cast<int64_t>(frame_length[4]) << 32) |
+                       (static_cast<int64_t>(frame_length[5]) << 40) |
+                       (static_cast<int64_t>(frame_length[6]) << 48) |
+                       (static_cast<int64_t>(frame_length[7]) << 56);
+
+      ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> incoming_message,
+                            AllocateBuffer(length));
+      request = ucp_stream_recv_nbx(client_endpoint, incoming_message->mutable_data(),
+                                    length, &actual_length, &request_param);
+      RETURN_NOT_OK(CompleteRequestBlocking(request, "ucp_stream_recv_nbx"));
+      if (incoming_message->ToString() !=
+          "arrow.flight.protocol.FlightService/GetFlightInfo") {
+        return Status::NotImplemented(incoming_message->ToString());
+      }
+    }
+
+    ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> incoming_message, AllocateBuffer(12));
+
+    ucp_request_param_t request_param;
+    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK;
+    request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
+    request_param.cb.recv_stream = StreamRecvCallback;
+    size_t actual_length = 0;
+    void* request =
+        ucp_stream_recv_nbx(client_endpoint, incoming_message->mutable_data(),
+                            incoming_message->size(), &actual_length, &request_param);
+    RETURN_NOT_OK(CompleteRequestBlocking(request, "ucp_stream_recv_nbx"));
+
+    // TODO: actual_length is only valid if request == nullptr, else have to get it
+    // from the callback (ugh?)
+    auto str = incoming_message->ToString();
+    FlightDescriptor descriptor;
+    RETURN_NOT_OK(FlightDescriptor::Deserialize(str, &descriptor));
+    ARROW_LOG(WARNING) << "Descriptor: " << descriptor.ToString();
+    UcxServerCallContext context;
+    std::unique_ptr<FlightInfo> info;
+    // TODO: send error to client
+    RETURN_NOT_OK(service_->GetFlightInfo(context, descriptor, &info));
+
+    // Send response to client
+    std::string response_payload;
+    RETURN_NOT_OK(info->SerializeToString(&response_payload));
+
+    request_param = ucp_request_param_t{};
+    request = ucp_stream_send_nbx(client_endpoint, response_payload.data(),
+                                  response_payload.size(), &request_param);
+    RETURN_NOT_OK(CompleteRequestBlocking(request, "ucp_stream_send_nbx"));
+    ARROW_LOG(WARNING) << "Server sent a reply of length " << response_payload.size();
+    return Status::OK();
+  }
+
   void DriveWorker() {
     while (running_.test_and_set()) {
       ucp_worker_progress(worker_conn_);
@@ -201,98 +294,10 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
         // we hand this all off to another thread)
 
         {
-          std::unique_ptr<Buffer> incoming_message;
-          auto arrow_status = AllocateBuffer(12).Value(&incoming_message);
-          if (!arrow_status.ok()) {
-            ReportError(std::move(arrow_status));
-            // TODO: free resources
-            continue;
+          auto status = HandleOneCall(client_endpoint);
+          if (!status.ok()) {
+            ReportError(std::move(status));
           }
-
-          ucp_request_param_t request_param;
-          request_param.op_attr_mask =
-              UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK;
-          request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
-          request_param.cb.recv_stream = StreamRecvCallback;
-          size_t actual_length = 0;
-          void* request = ucp_stream_recv_nbx(
-              client_endpoint, incoming_message->mutable_data(), incoming_message->size(),
-              &actual_length, &request_param);
-
-          if (UCS_PTR_IS_ERR(request)) {
-            ReportError(FromUcsStatus("ucp_stream_recv_nbx", UCS_PTR_STATUS(request)));
-            continue;
-          } else if (UCS_PTR_IS_PTR(request)) {
-            // TODO: factor out
-            // TODO: callback based mode
-            while (true) {
-              auto status = ucp_request_check_status(request);
-              if (status == UCS_OK) {
-                break;
-              } else if (status != UCS_INPROGRESS) {
-                ucp_request_release(request);
-                ReportError(FromUcsStatus("ucp_request_check_status", status));
-                break;
-              }
-              ucp_worker_progress(worker_service_);
-            }
-            ucp_request_release(request);
-          } else {
-            // Send was completed instantly
-            DCHECK(!request);
-          }
-
-          // TODO: actual_length is only valid if request == nullptr, else have to get it
-          // from the callback (ugh?)
-          auto str = incoming_message->ToString();
-          FlightDescriptor descriptor;
-          arrow_status = FlightDescriptor::Deserialize(str, &descriptor);
-          if (!arrow_status.ok()) {
-            ReportError(std::move(arrow_status));
-            continue;
-          }
-          ARROW_LOG(WARNING) << "Descriptor: " << descriptor.ToString();
-          UcxServerCallContext context;
-          std::unique_ptr<FlightInfo> info;
-          arrow_status = service_->GetFlightInfo(context, descriptor, &info);
-          if (!arrow_status.ok()) {
-            ReportError(std::move(arrow_status));
-            // TODO: send error to client
-            continue;
-          }
-
-          // Send response to client
-          std::string response_payload;
-          // TODO:
-          ARROW_UNUSED(info->SerializeToString(&response_payload));
-
-          request_param = ucp_request_param_t{};
-          request = ucp_stream_send_nbx(client_endpoint, response_payload.data(),
-                                        response_payload.size(), &request_param);
-          if (UCS_PTR_IS_ERR(request)) {
-            ReportError(FromUcsStatus("ucp_stream_send_nbx", UCS_PTR_STATUS(request)));
-            continue;
-          } else if (UCS_PTR_IS_PTR(request)) {
-            // TODO: factor out
-            // TODO: callback based mode
-            while (true) {
-              auto status = ucp_request_check_status(request);
-              if (status == UCS_OK) {
-                break;
-              } else if (status != UCS_INPROGRESS) {
-                ucp_request_release(request);
-                ReportError(FromUcsStatus("ucp_request_check_status", status));
-                break;
-              }
-              ucp_worker_progress(worker_service_);
-            }
-            ucp_request_release(request);
-          } else {
-            // Send was completed instantly
-            DCHECK(!request);
-          }
-          ARROW_LOG(WARNING) << "Server sent a reply of length "
-                             << response_payload.size();
         }
 
         {

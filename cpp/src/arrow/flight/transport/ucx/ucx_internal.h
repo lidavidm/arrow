@@ -63,6 +63,22 @@ struct UcpState {
   void Close();
 };
 
+struct UcpStartCallFrame {
+  // TODO: version # or something?
+  int64_t length;
+  std::string method;
+
+  arrow::Result<std::unique_ptr<Buffer>> Serialize() const;
+  static UcpStartCallFrame MakeFromMethod(const std::string& method);
+};
+
+// struct UcpPayloadFrame {
+//   int64_t length;
+//   // TODO: owned vs unowned payload
+//   // TODO: manage UCX-allocated memory;
+//   std::unique_ptr<Buffer> payload;
+// };
+
 /// Helper to convert a Uri to a struct sockaddr (used in ucp_listener_params_t)
 ARROW_FLIGHT_EXPORT
 Status UriToSockaddr(const arrow::internal::Uri& uri, sockaddr* addr);

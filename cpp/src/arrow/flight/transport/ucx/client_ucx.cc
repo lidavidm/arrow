@@ -75,27 +75,16 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   }
 
   Status Close() override {
+    // TODO: close remote endpoint
+    // TODO: get rid of ucp_state_
     ucp_state_.Close();
     return Status::OK();
   }
 
-  Status GetFlightInfo(const FlightCallOptions& options,
-                       const FlightDescriptor& descriptor,
-                       std::unique_ptr<FlightInfo>* info) override {
-    // TODO: respect options
-
-    std::string payload;
-    descriptor.SerializeToString(&payload);
-
-    ARROW_LOG(WARNING) << "Sending message of length " << payload.size();
-
-    ucp_request_param_t request_param;
-    void* request = ucp_stream_send_nbx(remote_endpoint_, payload.data(), payload.size(),
-                                        &request_param);
+  Status CompleteRequestBlocking(void* request) {
     if (UCS_PTR_IS_ERR(request)) {
-      RETURN_NOT_OK(FromUcsStatus("ucp_stream_send_nbx", UCS_PTR_STATUS(request)));
+      return FromUcsStatus("ucp_stream_send_nbx", UCS_PTR_STATUS(request));
     } else if (UCS_PTR_IS_PTR(request)) {
-      // TODO: factor out
       // TODO: callback based mode
       while (true) {
         auto status = ucp_request_check_status(request);
@@ -112,6 +101,35 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       // Send was completed instantly
       DCHECK(!request);
     }
+    return Status::OK();
+  }
+
+  Status GetFlightInfo(const FlightCallOptions& options,
+                       const FlightDescriptor& descriptor,
+                       std::unique_ptr<FlightInfo>* info) override {
+    // TODO: respect options
+
+    // TODO: constant
+    // TODO: the length and method can be sent in separate buffers
+    auto start_call = UcpStartCallFrame::MakeFromMethod(
+        "arrow.flight.protocol.FlightService/GetFlightInfo");
+    {
+      ucp_request_param_t request_param;
+      ARROW_ASSIGN_OR_RAISE(auto payload, start_call.Serialize());
+      void* request = ucp_stream_send_nbx(remote_endpoint_, payload->data(),
+                                          payload->size(), &request_param);
+      RETURN_NOT_OK(CompleteRequestBlocking(request));
+    }
+
+    std::string payload;
+    descriptor.SerializeToString(&payload);
+
+    ARROW_LOG(WARNING) << "Sending message of length " << payload.size();
+
+    ucp_request_param_t request_param;
+    void* request = ucp_stream_send_nbx(remote_endpoint_, payload.data(), payload.size(),
+                                        &request_param);
+    RETURN_NOT_OK(CompleteRequestBlocking(request));
 
     ARROW_ASSIGN_OR_RAISE(auto incoming_message, AllocateBuffer(590));
     size_t actual_length = 0;
