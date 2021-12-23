@@ -171,42 +171,10 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
  private:
   friend void HandleIncomingConnection(ucp_conn_request_h, void*);
 
-  Status CompleteRequestBlocking(void* request, const std::string& context) {
-    if (UCS_PTR_IS_ERR(request)) {
-      return FromUcsStatus(context, UCS_PTR_STATUS(request));
-    } else if (UCS_PTR_IS_PTR(request)) {
-      // TODO: callback based mode
-      while (true) {
-        auto status = ucp_request_check_status(request);
-        if (status == UCS_OK) {
-          break;
-        } else if (status != UCS_INPROGRESS) {
-          ucp_request_release(request);
-          return FromUcsStatus("ucp_request_check_status", status);
-        }
-        ucp_worker_progress(worker_service_);
-      }
-      ucp_request_release(request);
-    } else {
-      // Send was completed instantly
-      DCHECK(!request);
-    }
-    return Status::OK();
-  }
-
-  Status HandleOneCall(ucp_ep_h client_endpoint) {
-    UcpCallDriver driver(worker_service_, client_endpoint);
+  Status HandleGetFlightInfo(UcpCallDriver driver) {
     UcxServerCallContext context;
 
-    // Get method
     ARROW_ASSIGN_OR_RAISE(auto payload, driver.ReadNextPayload());
-    if (payload->ToString() != "arrow.flight.protocol.FlightService/GetFlightInfo") {
-      // TODO: send error to client
-      return Status::NotImplemented(payload->ToString());
-    }
-
-    // Get payload
-    ARROW_ASSIGN_OR_RAISE(payload, driver.ReadNextPayload());
     FlightDescriptor descriptor;
     RETURN_NOT_OK(FlightDescriptor::Deserialize(payload->ToString(), &descriptor));
 
@@ -221,6 +189,43 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     RETURN_NOT_OK(driver.SendPayload(reinterpret_cast<const uint8_t*>(response.data()),
                                      static_cast<int64_t>(response.size())));
     return Status::OK();
+  }
+
+  Status HandleDoGet(UcpCallDriver driver) {
+    UcxServerCallContext context;
+
+    ARROW_ASSIGN_OR_RAISE(auto payload, driver.ReadNextPayload());
+    Ticket ticket;
+    // TODO: don't allocate a new string
+    RETURN_NOT_OK(Ticket::Deserialize(payload->ToString(), &ticket));
+
+    std::unique_ptr<FlightDataStream> response;
+    // TODO: send error to client
+    RETURN_NOT_OK(service_->DoGet(context, ticket, &response));
+
+    if (!response) {
+      // TODO: send error to client
+    }
+
+    // TODO: send response to client
+    return Status::OK();
+  }
+
+  Status HandleOneCall(ucp_ep_h client_endpoint) {
+    UcpCallDriver driver(worker_service_, client_endpoint);
+
+    // Get method
+    // TODO: do this like gRPC/HTTP2 and send the method in "pseudo-headers"?
+    ARROW_ASSIGN_OR_RAISE(auto payload, driver.ReadNextPayload());
+    auto method = payload->ToString();
+    if (payload->ToString() == "arrow.flight.protocol.FlightService/GetFlightInfo") {
+      return HandleGetFlightInfo(std::move(driver));
+    } else if (payload->ToString() == "arrow.flight.protocol.FlightService/DoGet") {
+      return HandleDoGet(std::move(driver));
+    } else {
+      // TODO: send error to client
+      return Status::NotImplemented(payload->ToString());
+    }
   }
 
   void DriveWorker() {
@@ -258,22 +263,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
         {
           // Close the connection
-          ucp_request_param_t request_param;
-          void* request = ucp_ep_flush_nbx(client_endpoint, &request_param);
-          if (UCS_PTR_IS_ERR(request)) {
-            ReportError(FromUcsStatus("ucp_ep_flush_nbx", UCS_PTR_STATUS(request)));
-            continue;
-          } else if (UCS_PTR_IS_PTR(request)) {
-            ucs_status_t status;
-            do {
-              ucp_worker_progress(worker_service_);
-              status = ucp_request_check_status(request);
-            } while (status == UCS_INPROGRESS);
-            ucp_request_free(request);
-          } else {
-            DCHECK(!request);
-          }
-          request = ucp_ep_close_nb(client_endpoint, UCP_EP_CLOSE_MODE_FLUSH);
+          void* request = ucp_ep_close_nb(client_endpoint, UCP_EP_CLOSE_MODE_FLUSH);
           if (UCS_PTR_IS_ERR(request)) {
             ReportError(FromUcsStatus("ucp_ep_close_nb", UCS_PTR_STATUS(request)));
             continue;
@@ -284,11 +274,13 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
               status = ucp_request_check_status(request);
             } while (status == UCS_INPROGRESS);
             ucp_request_free(request);
+            if (status != UCS_OK) {
+              ReportError(FromUcsStatus("ucp_request_check_status", status));
+            }
           } else {
             DCHECK(!request);
           }
         }
-        ARROW_LOG(WARNING) << "Server closed connection";
       }
     }
   }

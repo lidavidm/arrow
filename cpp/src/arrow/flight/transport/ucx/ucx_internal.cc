@@ -176,6 +176,33 @@ Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
 UcpCallDriver::UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint)
     : worker_(worker), endpoint_(endpoint) {}
 
+// Frame format
+
+// TODO: should we just implement http/http2 over ucx..?
+// should we make sure to 8-byte align everything?
+
+// TODO: do we need to multiplex here? do an experiment: set up two
+// endpoints in the client, do two parallel calls, and use netstat to
+// see how many sockets UCX opens. insert artificial delay between
+// headers/payload.
+
+// 4 bytes: padding? version tag?
+// 4 bytes: payload type (types follow)
+
+// type 00: headers
+// type 01: trailers
+// 4 bytes: number of headers
+// 4 byte total length?
+// header: 4-byte length, 4-byte length, header, value
+
+// type 02: payload
+// 8 bytes: length
+// payload
+
+// TODO: we may invert the implementation here. mimic the IPC reader:
+// feed byte buffers into a state machine, get back either (1) not
+// enough data or (2) directions on what to do next
+
 Status UcpCallDriver::StartCall(const std::string& method) {
   // TODO: does UCX do message coalescing? If we send this initial
   // message in two buffers, will it necessarily be worse?
@@ -206,6 +233,9 @@ Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
   // Send payload
   request = ucp_stream_send_nbx(endpoint_, data, size, &request_param);
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+
+  // TODO: need to frame payload with message type as well (headers, message, trailers)
+  // TODO: need methods to send headers/trailers
 
   return Status::OK();
 }
