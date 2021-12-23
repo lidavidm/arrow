@@ -26,7 +26,6 @@
 #include "arrow/flight/transport_impl.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
-#include "arrow/util/base64.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/make_unique.h"
 #include "arrow/util/uri.h"
@@ -35,86 +34,6 @@ namespace arrow {
 namespace flight {
 namespace transport {
 namespace ucx {
-
-// TODO: move all this into its own .cc file
-constexpr char kUcxScheme[] = "ucx";
-constexpr char kUcxHost[] = "worker_address";
-constexpr char kUcxUriPrefix[] = "ucx://worker_address/";
-
-arrow::Result<Location> UcpAddress::ToLocation() const {
-  Location location;
-  auto encoded =
-      util::base64_encode(util::string_view(reinterpret_cast<char*>(address), length));
-  RETURN_NOT_OK(Location::Parse(kUcxUriPrefix + encoded, &location));
-  return location;
-}
-
-void UcpAddress::Close() {
-  if (worker) {
-    ucp_worker_release_address(worker, address);
-  } else if (address) {
-    std::free(address);
-  }
-  worker = nullptr;
-  address = nullptr;
-  length = 0;
-}
-
-Status UcpAddress::FromUri(const arrow::internal::Uri& uri, UcpAddress* address) {
-  if (!address) {
-    return Status::Invalid("UcpAddress::FromUri requires an out argument");
-  } else if (address->worker || address->address) {
-    return Status::Invalid("Cannot overwrite existing allocated address");
-  } else if (uri.scheme() != kUcxScheme) {
-    return Status::NotImplemented("Flight scheme ", uri.scheme(),
-                                  " is not supported by the UCX transport");
-  } else if (uri.host() != kUcxHost) {
-    return Status::Invalid("Expected URI in the format ", kUcxUriPrefix,
-                           "..., but host was: ", uri.host());
-  }
-
-  // Remove the leading slash
-  auto decoded_worker_address =
-      util::base64_decode(util::string_view(uri.path()).substr(1));
-  address->address =
-      reinterpret_cast<ucp_address_t*>(std::malloc(decoded_worker_address.size()));
-  std::memcpy(address->address, decoded_worker_address.data(),
-              decoded_worker_address.size());
-  return Status::OK();
-}
-
-Status UcpState::Init(const ucp_params_t& ucp_params) {
-  // Initialize UCX
-  ucp_config_t* ucp_config;
-  RETURN_NOT_OK(
-      FromUcsStatus("ucp_config_read", ucp_config_read(nullptr, nullptr, &ucp_config)));
-
-  auto status = ucp_init(&ucp_params, ucp_config, &context);
-  ucp_config_release(ucp_config);
-  RETURN_NOT_OK(FromUcsStatus("ucp_init", status));
-
-  // Initialize the worker
-  ucp_worker_params_t worker_params;
-  std::memset(&worker_params, 0, sizeof(worker_params));
-  worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
-  worker_params.thread_mode = UCS_THREAD_MODE_MULTI;
-
-  // TODO: RAII release worker/context
-  status = ucp_worker_create(context, &worker_params, &worker);
-  RETURN_NOT_OK(FromUcsStatus("ucp_worker_create", status));
-  address.worker = worker;
-  status = ucp_worker_get_address(worker, &address.address, &address.length);
-  RETURN_NOT_OK(FromUcsStatus("ucp_worker_get_address", status));
-
-  ARROW_ASSIGN_OR_RAISE(location, address.ToLocation());
-  return Status::OK();
-}
-
-void UcpState::Close() {
-  address.Close();
-  ucp_worker_destroy(worker);
-  ucp_cleanup(context);
-}
 
 void ClientStreamRecvCallback(void* request, ucs_status_t status, size_t length,
                               void* user_data) {
@@ -139,14 +58,8 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
     {
       // Create endpoint for remote worker
-
-      // TODO: factor out URI-to-sockaddr (see server)
-      std::string host = uri.host();
-      sockaddr_in listen_addr;
-      std::memset(&listen_addr, 0, sizeof(sockaddr_in));
-      listen_addr.sin_family = AF_INET;
-      inet_pton(AF_INET, host.c_str(), &listen_addr.sin_addr);
-      listen_addr.sin_port = htons(uri.port());
+      sockaddr listen_addr;
+      UriToSockaddr(uri, &listen_addr);
 
       ucp_ep_params_t params;
       params.field_mask = UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR;

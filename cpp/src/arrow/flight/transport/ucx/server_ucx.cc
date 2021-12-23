@@ -71,7 +71,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     // TODO: ensure UCX is shut down
   }
 
-  Status Init(const FlightServerOptions& options, const arrow::internal::Uri& location,
+  Status Init(const FlightServerOptions& options, const arrow::internal::Uri& uri,
               FlightServerBase* server) {
     service_ = server;
 
@@ -86,6 +86,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
       std::memset(&ucp_params, 0, sizeof(ucp_params));
       ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
+      // NOTE: sending data hangs without WAKEUP, why?
       ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_STREAM | UCP_FEATURE_WAKEUP;
 
       status = ucp_init(&ucp_params, ucp_config, &ucp_context_);
@@ -111,19 +112,8 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       ucp_listener_params_t params;
       ucs_status_t status;
 
-      std::string host = location.host();
-      if (host.empty()) {
-        return Status::Invalid("TODO");
-      } else if (location.port() < 0) {
-        return Status::Invalid("TODO");
-      }
-
-      sockaddr_in listen_addr;
-      std::memset(&listen_addr, 0, sizeof(sockaddr_in));
-      // TODO: IPv6 support
-      listen_addr.sin_family = AF_INET;
-      inet_pton(AF_INET, host.c_str(), &listen_addr.sin_addr);
-      listen_addr.sin_port = htons(location.port());
+      sockaddr listen_addr;
+      UriToSockaddr(uri, &listen_addr);
 
       params.field_mask =
           UCP_LISTENER_PARAM_FIELD_SOCK_ADDR | UCP_LISTENER_PARAM_FIELD_CONN_HANDLER;
@@ -142,7 +132,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       RETURN_NOT_OK(FromUcsStatus("ucp_listener_query", status));
 
       std::string raw_uri = "ucx://";
-      raw_uri += host;
+      raw_uri += uri.host();
       raw_uri += ":";
       raw_uri += std::to_string(
           ntohs(reinterpret_cast<const sockaddr_in*>(&attr.sockaddr)->sin_port));
