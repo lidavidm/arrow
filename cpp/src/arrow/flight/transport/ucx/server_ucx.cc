@@ -57,11 +57,6 @@ class UcxServerCallContext : public flight::ServerCallContext {
 
 void HandleIncomingConnection(ucp_conn_request_h connection_request, void* server);
 
-void StreamRecvCallback(void* request, ucs_status_t status, size_t length,
-                        void* user_data) {
-  ARROW_LOG(WARNING) << "Got message of length " << length;
-}
-
 class ARROW_FLIGHT_EXPORT UcxServerImpl
     : public arrow::flight::internal::ServerTransportImpl {
  public:
@@ -212,7 +207,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     ARROW_ASSIGN_OR_RAISE(payload, driver.ReadNextPayload());
     FlightDescriptor descriptor;
     RETURN_NOT_OK(FlightDescriptor::Deserialize(payload->ToString(), &descriptor));
-    ARROW_LOG(WARNING) << "Descriptor: " << descriptor.ToString();
 
     std::unique_ptr<FlightInfo> info;
     // TODO: send error to client

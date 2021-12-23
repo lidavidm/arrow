@@ -252,16 +252,14 @@ UcpCallDriver::UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint)
     : worker_(worker), endpoint_(endpoint) {}
 
 Status UcpCallDriver::StartCall(const std::string& method) {
+  // TODO: does UCX do message coalescing? If we send this initial
+  // message in two buffers, will it necessarily be worse?
   ARROW_ASSIGN_OR_RAISE(auto start_call, AllocateBuffer(8 + method.size()));
-  const int64_t length = static_cast<int64_t>(method.size());
   uint8_t* payload = start_call->mutable_data();
-  Int64ToBytesBe(length, payload);
+  Int64ToBytesBe(static_cast<int64_t>(method.size()), payload);
   std::memcpy(payload + 8, method.data(), method.size());
 
-  ARROW_LOG(WARNING) << "Sending payload of length " << length;
-
   ucp_request_param_t request_param;
-  // TODO: must explicitly memset all these structs/set mask to 0
   request_param.op_attr_mask = 0;
   void* request = ucp_stream_send_nbx(endpoint_, start_call->data(), start_call->size(),
                                       &request_param);
@@ -270,7 +268,6 @@ Status UcpCallDriver::StartCall(const std::string& method) {
 }
 
 Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
-  ARROW_LOG(WARNING) << "Sending payload of length " << size;
   void* request = nullptr;
   ucp_request_param_t request_param;
   request_param.op_attr_mask = 0;
@@ -306,8 +303,7 @@ arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::ReadNextPayload() {
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_recv_nbx", request));
   DCHECK_EQ(actual_length, 8);
 
-  ARROW_LOG(WARNING) << "Reading payload of length " << BeBytesToInt64(payload_length);
-
+  // Read payload itself
   // TODO: try ucp_stream_recv_data_nb which has UCX allocate memory instead
   ARROW_ASSIGN_OR_RAISE(auto incoming_message,
                         AllocateBuffer(BeBytesToInt64(payload_length)));
@@ -319,7 +315,6 @@ arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::ReadNextPayload() {
 
 void UcpCallDriver::StreamRecvCallback(void* request, ucs_status_t status, size_t length,
                                        void* user_data) {
-  ARROW_LOG(WARNING) << "Incoming message of length " << length;
   *reinterpret_cast<size_t*>(user_data) = length;
 }
 
