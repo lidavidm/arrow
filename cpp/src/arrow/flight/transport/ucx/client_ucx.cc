@@ -38,6 +38,18 @@ namespace ucx {
 class ARROW_FLIGHT_EXPORT UcxClientImpl
     : public arrow::flight::internal::ClientTransportImpl {
  public:
+  UcxClientImpl()
+      : ucp_context_(nullptr), ucp_worker_(nullptr), remote_endpoint_(nullptr) {}
+
+  virtual ~UcxClientImpl() {
+    if (!ucp_context_) return;
+    auto status = Close();
+    if (!status.ok()) {
+      ARROW_LOG(WARNING) << "UcxClientImpl errored in Close() in destructor: "
+                         << status.ToString();
+    }
+  }
+
   Status Init(const FlightClientOptions& options, const Location& location,
               const arrow::internal::Uri& uri) override {
     {
@@ -84,10 +96,36 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   }
 
   Status Close() override {
-    // TODO: ucp_ep_close_nb
-    // TODO: ucp_worker_destroy
-    // TODO: ucp_cleanup
-    return Status::OK();
+    auto status = Status::OK();
+
+    void* request = ucp_ep_close_nb(remote_endpoint_, UCP_EP_CLOSE_MODE_FLUSH);
+    if (UCS_PTR_IS_ERR(request)) {
+      status = FromUcsStatus("ucp_ep_close_nb", UCS_PTR_STATUS(request));
+    } else if (UCS_PTR_IS_PTR(request)) {
+      // Synchronously close endpoint
+      while (true) {
+        auto ucp_status = ucp_request_check_status(request);
+        if (ucp_status == UCS_OK) {
+          break;
+        } else if (ucp_status != UCS_INPROGRESS) {
+          status = FromUcsStatus("ucp_request_check_status", ucp_status);
+          break;
+        }
+        ucp_worker_progress(ucp_worker_);
+      }
+      ucp_request_release(request);
+    } else {
+      // Closure happened immediately
+      DCHECK_EQ(request, nullptr);
+    }
+
+    ucp_worker_destroy(ucp_worker_);
+    ucp_cleanup(ucp_context_);
+
+    remote_endpoint_ = nullptr;
+    ucp_worker_ = nullptr;
+    ucp_context_ = nullptr;
+    return status;
   }
 
   Status GetFlightInfo(const FlightCallOptions& options,
