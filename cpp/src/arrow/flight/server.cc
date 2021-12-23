@@ -845,7 +845,7 @@ class ServerSignalHandler {
 // TODO: split all of this out into a subdir
 class GrpcServerImpl : public internal::ServerTransportImpl {
  public:
-  Status Init(const FlightServerOptions& options, const arrow::internal::Uri& location,
+  Status Init(const FlightServerOptions& options, const arrow::internal::Uri& uri,
               FlightServerBase* server) override {
     service_.reset(
         new FlightServiceImpl(options.auth_handler, options.middleware, server));
@@ -854,12 +854,11 @@ class GrpcServerImpl : public internal::ServerTransportImpl {
     // Allow uploading messages of any length
     builder.SetMaxReceiveMessageSize(-1);
 
-    const std::string scheme = location.scheme();
+    const std::string scheme = uri.scheme();
     int port = 0;
     if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp || scheme == kSchemeGrpcTls) {
       std::stringstream address;
-      address << arrow::internal::UriEncodeHost(location.host()) << ':'
-              << location.port_text();
+      address << arrow::internal::UriEncodeHost(uri.host()) << ':' << uri.port_text();
 
       std::shared_ptr<grpc::ServerCredentials> creds;
       if (scheme == kSchemeGrpcTls) {
@@ -882,7 +881,7 @@ class GrpcServerImpl : public internal::ServerTransportImpl {
       builder.AddListeningPort(address.str(), creds, &port);
     } else if (scheme == kSchemeGrpcUnix) {
       std::stringstream address;
-      address << "unix:" << location.path();
+      address << "unix:" << uri.path();
       builder.AddListeningPort(address.str(), grpc::InsecureServerCredentials());
       location_ = options.location;
     } else {
@@ -905,9 +904,9 @@ class GrpcServerImpl : public internal::ServerTransportImpl {
     }
 
     if (scheme == kSchemeGrpcTls) {
-      RETURN_NOT_OK(Location::ForGrpcTls(location.host(), port, &location_));
+      RETURN_NOT_OK(Location::ForGrpcTls(uri.host(), port, &location_));
     } else if (scheme == kSchemeGrpc || scheme == kSchemeGrpcTcp) {
-      RETURN_NOT_OK(Location::ForGrpcTcp(location.host(), port, &location_));
+      RETURN_NOT_OK(Location::ForGrpcTcp(uri.host(), port, &location_));
     }
     return Status::OK();
   }

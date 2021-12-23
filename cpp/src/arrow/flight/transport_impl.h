@@ -124,8 +124,8 @@ class ARROW_FLIGHT_EXPORT ServerTransportImpl {
   virtual ~ServerTransportImpl() = default;
 
   /// Initialize the server.
-  virtual Status Init(const FlightServerOptions& options,
-                      const arrow::internal::Uri& location, FlightServerBase* server) = 0;
+  virtual Status Init(const FlightServerOptions& options, const arrow::internal::Uri& uri,
+                      FlightServerBase* server) = 0;
   /// Shutdown the server. Once this returns, the server is no longer listening.
   virtual Status Shutdown() = 0;
   /// Wait for the server to shutdown. Once this returns, the server is no longer
