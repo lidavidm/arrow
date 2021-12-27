@@ -39,6 +39,15 @@ class SimpleTestServer : public FlightServerBase {
     }
     return Status::OK();
   }
+
+  Status DoGet(const ServerCallContext& context, const Ticket& request,
+               std::unique_ptr<FlightDataStream>* data_stream) override {
+    BatchVector batches;
+    RETURN_NOT_OK(ExampleIntBatches(&batches));
+    auto batch_reader = std::make_shared<BatchIterator>(batches[0]->schema(), batches);
+    *data_stream = std::unique_ptr<FlightDataStream>(new RecordBatchStream(batch_reader));
+    return Status::OK();
+  }
 };
 
 class TestUcx : public ::testing::Test {
@@ -62,10 +71,19 @@ class TestUcx : public ::testing::Test {
   std::unique_ptr<FlightServerBase> server_;
 };
 
-TEST_F(TestUcx, Basics) {
+TEST_F(TestUcx, GetFlightInfo) {
   auto descriptor = FlightDescriptor::Path({"foo", "bar"});
   std::unique_ptr<FlightInfo> info;
   ASSERT_OK(client_->GetFlightInfo(descriptor, &info));
+}
+
+TEST_F(TestUcx, DoGet) {
+  // TODO: zero-length ticket serializes to zero-length protobuf, trips assertion failure
+  // in UCX?
+  Ticket ticket{"a"};
+  std::unique_ptr<FlightStreamReader> stream;
+  ASSERT_OK(client_->DoGet(ticket, &stream));
+  // TODO: if we hit an NYI, we just hang on shutdown?
 }
 
 TEST_F(TestUcx, Errors) {

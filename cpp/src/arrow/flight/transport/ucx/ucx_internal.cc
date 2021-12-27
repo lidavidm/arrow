@@ -19,6 +19,7 @@
 
 #include "arrow/buffer.h"
 #include "arrow/util/base64.h"
+#include "arrow/util/bit_util.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/uri.h"
 
@@ -195,8 +196,9 @@ UcpCallDriver::UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint)
 // TODO: we may invert the implementation here. mimic the IPC reader:
 // feed byte buffers into a state machine, get back either (1) not
 // enough data or (2) directions on what to do next
+// This would make it easier to use UCX-allocated buffers
 
-constexpr uint8_t kFrameVersion = 0x01;
+constexpr uint8_t kFrameVersion = 0x42;
 constexpr char kHeaderMethod[] = ":method:";
 
 arrow::Result<HeadersFrame> HeadersFrame::Parse(std::unique_ptr<Buffer> buffer) {
@@ -235,7 +237,11 @@ Status UcpCallDriver::SendFrame(FrameType frame_type, const uint8_t* data,
   ucp_request_param_t request_param;
   request_param.op_attr_mask = 0;
 
-  // TODO: does UCX do message coalescing?
+  // TODO: does UCX coalesce small writes? Is there a penalty for two
+  // separate sends when both are small?
+
+  ARROW_LOG(WARNING) << "Sending payload of length " << size;
+  DCHECK_GT(size, 0);
 
   // Send frame header
   uint8_t header[8] = {0};
@@ -281,6 +287,8 @@ UcpCallDriver::ReadNextFrame() {
   // Read payload itself
   // TODO: try ucp_stream_recv_data_nb which has UCX allocate memory instead
   const int32_t payload_length = BeBytesToInt32(frame_header + 4);
+  ARROW_LOG(WARNING) << "Reading payload of length " << payload_length;
+  DCHECK_GT(payload_length, 0);
   ARROW_ASSIGN_OR_RAISE(auto incoming_message, AllocateBuffer(payload_length));
   request = ucp_stream_recv_nbx(endpoint_, incoming_message->mutable_data(),
                                 incoming_message->size(), &actual_length, &request_param);
@@ -327,6 +335,77 @@ Status UcpCallDriver::SendHeaders(
 
 Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
   RETURN_NOT_OK(SendFrame(FrameType::kPayload, data, size));
+  return Status::OK();
+}
+
+static const uint8_t kPaddingBytes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
+  const bool has_body = ipc::Message::HasBody(payload.ipc_message.type);
+  int32_t total_length = 0;
+  total_length += 4;
+  total_length += payload.ipc_message.metadata->size();
+  if (has_body) {
+    total_length += 4;
+    total_length += payload.ipc_message.body_length;
+  }
+
+  ARROW_LOG(WARNING) << "Sending payload of length " << total_length;
+
+  void* request = nullptr;
+  ucp_request_param_t request_param;
+  request_param.op_attr_mask = 0;
+
+  // TODO: does UCX coalesce small writes? Is there a penalty for two
+  // separate sends when both are small?
+
+  // Send frame header
+  uint8_t header[8] = {0};
+  header[0] = kFrameVersion;
+  header[1] = static_cast<uint8_t>(FrameType::kPayload);
+  DCHECK_GT(total_length, 0);
+  Int32ToBytesBe(total_length, header + 4);
+  request = ucp_stream_send_nbx(endpoint_, header, 8, &request_param);
+  RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+
+  // Send IPC header length
+  Int32ToBytesBe(payload.ipc_message.metadata->size(), header);
+  request = ucp_stream_send_nbx(endpoint_, header, 4, &request_param);
+  RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+
+  // Send IPC header
+  request = ucp_stream_send_nbx(endpoint_, payload.ipc_message.metadata->data(),
+                                payload.ipc_message.metadata->size(), &request_param);
+  RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+
+  if (!has_body) return Status::OK();
+
+  // Send IPC body length
+  Int32ToBytesBe(payload.ipc_message.body_length, header);
+  request = ucp_stream_send_nbx(endpoint_, header, 4, &request_param);
+  RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+
+  // Send IPC body buffers
+  int32_t actual_length = 0;
+  for (const auto& buffer : payload.ipc_message.body_buffers) {
+    if (!buffer) continue;
+
+    actual_length += buffer->size();
+    request =
+        ucp_stream_send_nbx(endpoint_, buffer->data(), buffer->size(), &request_param);
+    RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+
+    // Write padding if not multiple of 8
+    const auto remainder =
+        static_cast<int>(bit_util::RoundUpToMultipleOf8(buffer->size()) - buffer->size());
+    if (remainder) {
+      request = ucp_stream_send_nbx(endpoint_, kPaddingBytes, remainder, &request_param);
+      RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+      actual_length += remainder;
+    }
+  }
+
+  ARROW_CHECK_EQ(actual_length, payload.ipc_message.body_length);
   return Status::OK();
 }
 

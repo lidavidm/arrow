@@ -208,13 +208,48 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
     std::unique_ptr<FlightDataStream> response;
     // TODO: send error to client
-    RETURN_NOT_OK(service_->DoGet(context, ticket, &response));
-
-    if (!response) {
-      // TODO: send error to client
+    auto status = service_->DoGet(context, ticket, &response);
+    if (!status.ok()) {
+      std::vector<std::pair<std::string, std::string>> headers;
+      headers.emplace_back("flight-status-code",
+                           std::to_string(static_cast<int32_t>(status.code())));
+      headers.emplace_back("flight-status-message", status.ToString());
+      RETURN_NOT_OK(driver.SendHeaders(headers));
+      return Status::OK();
     }
 
-    // TODO: send response to client
+    if (!response) {
+      std::vector<std::pair<std::string, std::string>> headers;
+      headers.emplace_back("flight-status-code",
+                           std::to_string(static_cast<int32_t>(StatusCode::KeyError)));
+      headers.emplace_back("flight-status-message", "Flight not found");
+      RETURN_NOT_OK(driver.SendHeaders(headers));
+      return Status::OK();
+    }
+
+    // Write the schema as the first message in the stream
+    // TODO: send errors to client
+    {
+      FlightPayload schema_payload;
+      RETURN_NOT_OK(response->GetSchemaPayload(&schema_payload));
+      RETURN_NOT_OK(driver.SendFlightPayload(schema_payload));
+    }
+
+    // Consume data stream and write out payloads
+    while (true) {
+      FlightPayload payload;
+      RETURN_NOT_OK(response->Next(&payload));
+      // End of stream
+      if (payload.ipc_message.metadata == nullptr) break;
+      RETURN_NOT_OK(driver.SendFlightPayload(payload));
+    }
+
+    std::vector<std::pair<std::string, std::string>> headers;
+    headers.emplace_back("flight-status-code",
+                         std::to_string(static_cast<int32_t>(StatusCode::OK)));
+    headers.emplace_back("flight-status-message", "");
+    RETURN_NOT_OK(driver.SendHeaders(headers));
+
     return Status::OK();
   }
 
@@ -222,7 +257,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     UcpCallDriver driver(worker_service_, client_endpoint);
 
     // Get method
-    // TODO: do this like gRPC/HTTP2 and send the method in "pseudo-headers"?
     ARROW_ASSIGN_OR_RAISE(auto headers, driver.ReadHeaders());
     ARROW_ASSIGN_OR_RAISE(auto method, headers.Get(":method:"));
     if (method == "arrow.flight.protocol.FlightService/GetFlightInfo") {

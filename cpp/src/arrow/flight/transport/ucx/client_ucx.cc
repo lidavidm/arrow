@@ -164,6 +164,43 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
     return Status(status_code, std::string(message_str), nullptr);
   }
 
+  Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
+               std::unique_ptr<FlightStreamReader>* stream) override {
+    UcpCallDriver driver(ucp_worker_, remote_endpoint_);
+    RETURN_NOT_OK(driver.StartCall("arrow.flight.protocol.FlightService/DoGet"));
+
+    {
+      std::string payload;
+      ticket.SerializeToString(&payload);
+      RETURN_NOT_OK(driver.SendPayload(reinterpret_cast<const uint8_t*>(payload.data()),
+                                       static_cast<int64_t>(payload.size())));
+    }
+
+    while (true) {
+      // TODO: need a general reader abstraction
+      ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver.ReadNextFrame());
+      if (incoming_message.first == FrameType::kPayload) {
+        ARROW_ASSIGN_OR_RAISE(incoming_message, driver.ReadNextFrame());
+        // TODO: parse payload
+        continue;
+      } else if (incoming_message.first == FrameType::kHeaders) {
+        // Trailers, end of stream
+        ARROW_ASSIGN_OR_RAISE(auto headers,
+                              HeadersFrame::Parse(std::move(incoming_message.second)));
+        ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
+        ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));
+        auto code = std::strtol(code_str.data(), nullptr, /*base=*/10);
+        auto status_code = static_cast<StatusCode>(code);
+        if (status_code == StatusCode::OK) break;
+        return Status(status_code, std::string(message_str), nullptr);
+      } else {
+        return Status::IOError("Expected payload or trailers, not frame type ",
+                               static_cast<int32_t>(incoming_message.first));
+      }
+    }
+    return Status::OK();
+  }
+
  private:
   ucp_context_h ucp_context_;
   ucp_worker_h ucp_worker_;

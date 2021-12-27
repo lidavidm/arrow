@@ -103,6 +103,7 @@ class UcpCallDriver {
   Status StartCall(const std::string& method);
   Status SendHeaders(const std::vector<std::pair<std::string, std::string>>& headers);
   Status SendPayload(const uint8_t* data, const int64_t size);
+  Status SendFlightPayload(const FlightPayload& payload);
 
   arrow::Result<HeadersFrame> ReadHeaders();
   arrow::Result<std::unique_ptr<Buffer>> ReadNextPayload();
