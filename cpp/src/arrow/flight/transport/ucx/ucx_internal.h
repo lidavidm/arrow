@@ -19,18 +19,22 @@
 
 #include <arpa/inet.h>
 #include <ucp/api/ucp.h>
-#include <atomic>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "arrow/flight/transport_impl.h"
 #include "arrow/flight/visibility.h"
 #include "arrow/type_fwd.h"
 #include "arrow/util/macros.h"
+#include "arrow/util/string_view.h"
 
 namespace arrow {
 namespace flight {
 namespace transport {
 namespace ucx {
 
+// TODO: use unsigned integers?
 static inline void Int64ToBytesBe(const int64_t in, uint8_t* out) {
   const uint64_t val = static_cast<uint64_t>(in);
   out[0] = static_cast<uint8_t>((val >> 56) & 0xFF);
@@ -43,6 +47,15 @@ static inline void Int64ToBytesBe(const int64_t in, uint8_t* out) {
   out[7] = static_cast<uint8_t>(val & 0xFF);
 }
 
+static inline void Int32ToBytesBe(const int32_t in, uint8_t* out) {
+  const uint32_t val = static_cast<uint32_t>(in);
+  out[0] = static_cast<uint8_t>((val >> 24) & 0xFF);
+  out[1] = static_cast<uint8_t>((val >> 16) & 0xFF);
+  out[2] = static_cast<uint8_t>((val >> 8) & 0xFF);
+  out[3] = static_cast<uint8_t>(val & 0xFF);
+}
+
+// TODO: inconsistent naming (BytesBe)
 static inline int64_t BeBytesToInt64(const uint8_t* in) {
   uint64_t val =
       static_cast<uint64_t>(in[7]) | (static_cast<uint64_t>(in[6]) << 8) |
@@ -53,8 +66,34 @@ static inline int64_t BeBytesToInt64(const uint8_t* in) {
   return static_cast<int64_t>(val);
 }
 
+static inline int32_t BeBytesToInt32(const uint8_t* in) {
+  uint32_t val = static_cast<uint32_t>(in[3]) | (static_cast<uint32_t>(in[2]) << 8) |
+                 (static_cast<uint32_t>(in[1]) << 16) |
+                 (static_cast<uint32_t>(in[0]) << 24);
+  // TODO: this isn't technically right until C++20? P1236R1
+  return static_cast<int32_t>(val);
+}
+
 ARROW_FLIGHT_EXPORT
 Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status);
+
+enum class FrameType : uint8_t {
+  kHeaders = 0,
+  kPayload,
+  // Keep at end.
+  kMaxFrameType = kPayload,
+};
+
+class HeadersFrame {
+ public:
+  arrow::Result<util::string_view> Get(const std::string& key);
+
+  static arrow::Result<HeadersFrame> Parse(std::unique_ptr<Buffer> buffer);
+
+ private:
+  std::unique_ptr<Buffer> buffer_;
+  std::vector<std::pair<util::string_view, util::string_view>> headers_;
+};
 
 class UcpCallDriver {
  public:
@@ -62,15 +101,18 @@ class UcpCallDriver {
 
   // Client side only.
   Status StartCall(const std::string& method);
-
+  Status SendHeaders(const std::vector<std::pair<std::string, std::string>>& headers);
   Status SendPayload(const uint8_t* data, const int64_t size);
 
+  arrow::Result<HeadersFrame> ReadHeaders();
   arrow::Result<std::unique_ptr<Buffer>> ReadNextPayload();
+  arrow::Result<std::pair<FrameType, std::unique_ptr<Buffer>>> ReadNextFrame();
 
  private:
   static void StreamRecvCallback(void* request, ucs_status_t status, size_t length,
                                  void* user_data);
 
+  Status SendFrame(FrameType frame_type, const uint8_t* data, const int64_t size);
   Status CompleteRequestBlocking(const std::string& context, void* request);
 
   ucp_worker_h worker_;

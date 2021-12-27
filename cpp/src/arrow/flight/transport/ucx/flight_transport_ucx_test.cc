@@ -33,6 +33,10 @@ class SimpleTestServer : public FlightServerBase {
                        std::unique_ptr<FlightInfo>* info) override {
     auto examples = ExampleFlightInfo();
     *info = std::unique_ptr<FlightInfo>(new FlightInfo(examples[0]));
+
+    if (request.path.size() > 0 && request.path[0] == "error") {
+      return Status::Invalid("test");
+    }
     return Status::OK();
   }
 };
@@ -62,6 +66,12 @@ TEST_F(TestUcx, Basics) {
   auto descriptor = FlightDescriptor::Path({"foo", "bar"});
   std::unique_ptr<FlightInfo> info;
   ASSERT_OK(client_->GetFlightInfo(descriptor, &info));
+}
+
+TEST_F(TestUcx, Errors) {
+  auto descriptor = FlightDescriptor::Path({"error", "bar"});
+  std::unique_ptr<FlightInfo> info;
+  ASSERT_RAISES(Invalid, client_->GetFlightInfo(descriptor, &info));
 }
 
 }  // namespace flight

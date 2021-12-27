@@ -178,69 +178,82 @@ UcpCallDriver::UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint)
 
 // Frame format
 
-// TODO: should we just implement http/http2 over ucx..?
-// should we make sure to 8-byte align everything?
+// do we need to 8-byte align everything?
 
-// TODO: do we need to multiplex here? do an experiment: set up two
-// endpoints in the client, do two parallel calls, and use netstat to
-// see how many sockets UCX opens. insert artificial delay between
-// headers/payload.
-
-// 4 bytes: padding? version tag?
-// 4 bytes: payload type (types follow)
+// 1 byte: version tag
+// 1 byte: payload type
+// 4 bytes: frame length
 
 // type 00: headers
 // type 01: trailers
-// 4 bytes: number of headers
-// 4 byte total length?
-// header: 4-byte length, 4-byte length, header, value
+// # of headers, followed by headers
+// header: header length, value length, header, value
 
 // type 02: payload
-// 8 bytes: length
 // payload
 
 // TODO: we may invert the implementation here. mimic the IPC reader:
 // feed byte buffers into a state machine, get back either (1) not
 // enough data or (2) directions on what to do next
 
-Status UcpCallDriver::StartCall(const std::string& method) {
-  // TODO: does UCX do message coalescing? If we send this initial
-  // message in two buffers, will it necessarily be worse?
-  ARROW_ASSIGN_OR_RAISE(auto start_call, AllocateBuffer(8 + method.size()));
-  uint8_t* payload = start_call->mutable_data();
-  Int64ToBytesBe(static_cast<int64_t>(method.size()), payload);
-  std::memcpy(payload + 8, method.data(), method.size());
+constexpr uint8_t kFrameVersion = 0x01;
+constexpr char kHeaderMethod[] = ":method:";
 
-  ucp_request_param_t request_param;
-  request_param.op_attr_mask = 0;
-  void* request = ucp_stream_send_nbx(endpoint_, start_call->data(), start_call->size(),
-                                      &request_param);
-  RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
-  return Status::OK();
+arrow::Result<HeadersFrame> HeadersFrame::Parse(std::unique_ptr<Buffer> buffer) {
+  HeadersFrame result;
+
+  const uint8_t* payload = buffer->data();
+  const int32_t num_headers = BeBytesToInt32(payload);
+  payload += 4;
+  for (int32_t i = 0; i < num_headers; i++) {
+    // TODO: bounds checking
+    const int32_t key_length = BeBytesToInt32(payload);
+    payload += 4;
+    const int32_t value_length = BeBytesToInt32(payload);
+    payload += 4;
+    const util::string_view key(reinterpret_cast<const char*>(payload), key_length);
+    payload += key_length;
+    const util::string_view value(reinterpret_cast<const char*>(payload), value_length);
+    payload += value_length;
+    result.headers_.emplace_back(key, value);
+  }
+
+  result.buffer_ = std::move(buffer);
+  return result;
 }
 
-Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
+arrow::Result<util::string_view> HeadersFrame::Get(const std::string& key) {
+  for (const auto& pair : headers_) {
+    if (pair.first == key) return pair.second;
+  }
+  return Status::KeyError(key);
+}
+
+Status UcpCallDriver::SendFrame(FrameType frame_type, const uint8_t* data,
+                                const int64_t size) {
   void* request = nullptr;
   ucp_request_param_t request_param;
   request_param.op_attr_mask = 0;
 
-  // Send payload length
-  uint8_t payload[8] = {0};
-  Int64ToBytesBe(size, payload);
-  request = ucp_stream_send_nbx(endpoint_, payload, 8, &request_param);
+  // TODO: does UCX do message coalescing?
+
+  // Send frame header
+  uint8_t header[8] = {0};
+  header[0] = kFrameVersion;
+  header[1] = static_cast<uint8_t>(frame_type);
+  Int32ToBytesBe(size, header + 4);
+  request = ucp_stream_send_nbx(endpoint_, header, 8, &request_param);
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
 
   // Send payload
   request = ucp_stream_send_nbx(endpoint_, data, size, &request_param);
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
 
-  // TODO: need to frame payload with message type as well (headers, message, trailers)
-  // TODO: need methods to send headers/trailers
-
   return Status::OK();
 }
 
-arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::ReadNextPayload() {
+arrow::Result<std::pair<FrameType, std::unique_ptr<Buffer>>>
+UcpCallDriver::ReadNextFrame() {
   void* request = nullptr;
   size_t actual_length = 0;
 
@@ -251,21 +264,89 @@ arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::ReadNextPayload() {
   request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
   request_param.user_data = &actual_length;
 
-  // Read payload length
-  uint8_t payload_length[8] = {0};
+  // Read frame header
+  uint8_t frame_header[8] = {0};
   request =
-      ucp_stream_recv_nbx(endpoint_, payload_length, 8, &actual_length, &request_param);
+      ucp_stream_recv_nbx(endpoint_, frame_header, 8, &actual_length, &request_param);
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_recv_nbx", request));
   DCHECK_EQ(actual_length, 8);
 
+  if (frame_header[0] != kFrameVersion) {
+    return Status::IOError("Expected frame version ", kFrameVersion, " but got ",
+                           frame_header[0]);
+  } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
+    return Status::IOError("Unknown frame type ", frame_header[1]);
+  }
+
   // Read payload itself
   // TODO: try ucp_stream_recv_data_nb which has UCX allocate memory instead
-  ARROW_ASSIGN_OR_RAISE(auto incoming_message,
-                        AllocateBuffer(BeBytesToInt64(payload_length)));
+  const int32_t payload_length = BeBytesToInt32(frame_header + 4);
+  ARROW_ASSIGN_OR_RAISE(auto incoming_message, AllocateBuffer(payload_length));
   request = ucp_stream_recv_nbx(endpoint_, incoming_message->mutable_data(),
                                 incoming_message->size(), &actual_length, &request_param);
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_recv_nbx", request));
-  return incoming_message;
+  return std::make_pair(static_cast<FrameType>(frame_header[1]),
+                        std::move(incoming_message));
+}
+
+Status UcpCallDriver::StartCall(const std::string& method) {
+  // TODO: un-hard-code header serialization here
+  std::vector<std::pair<std::string, std::string>> headers;
+  headers.emplace_back(kHeaderMethod, method);
+  RETURN_NOT_OK(SendHeaders(headers));
+  return Status::OK();
+}
+
+Status UcpCallDriver::SendHeaders(
+    const std::vector<std::pair<std::string, std::string>>& headers) {
+  int32_t total_length = 4 /* # of headers */;
+  for (const auto& header : headers) {
+    total_length += 4 /* key length */ + 4 /* value length */ +
+                    header.first.size() /* key */ + header.second.size();
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateBuffer(total_length));
+  uint8_t* payload = buffer->mutable_data();
+
+  Int32ToBytesBe(headers.size(), payload);
+  payload += 4;
+  for (const auto& header : headers) {
+    Int32ToBytesBe(header.first.size(), payload);
+    payload += 4;
+    Int32ToBytesBe(header.second.size(), payload);
+    payload += 4;
+    std::memcpy(payload, header.first.data(), header.first.size());
+    payload += header.first.size();
+    std::memcpy(payload, header.second.data(), header.second.size());
+    payload += header.second.size();
+  }
+
+  RETURN_NOT_OK(SendFrame(FrameType::kHeaders, buffer->data(), buffer->size()));
+  return Status::OK();
+}
+
+Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
+  RETURN_NOT_OK(SendFrame(FrameType::kPayload, data, size));
+  return Status::OK();
+}
+
+arrow::Result<HeadersFrame> UcpCallDriver::ReadHeaders() {
+  ARROW_ASSIGN_OR_RAISE(auto frame, ReadNextFrame());
+  if (frame.first != FrameType::kHeaders) {
+    return Status::IOError("Expected headers frame, got ",
+                           static_cast<int32_t>(frame.first));
+  }
+  ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame.second)));
+  return headers;
+}
+
+arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::ReadNextPayload() {
+  ARROW_ASSIGN_OR_RAISE(auto frame, ReadNextFrame());
+  if (frame.first != FrameType::kPayload) {
+    return Status::IOError("Expected payload frame, got ",
+                           static_cast<int32_t>(frame.first));
+  }
+  return std::move(frame.second);
 }
 
 void UcpCallDriver::StreamRecvCallback(void* request, ucs_status_t status, size_t length,

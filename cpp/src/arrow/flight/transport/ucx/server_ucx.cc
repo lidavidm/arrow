@@ -179,15 +179,22 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     RETURN_NOT_OK(FlightDescriptor::Deserialize(payload->ToString(), &descriptor));
 
     std::unique_ptr<FlightInfo> info;
-    // TODO: send error to client
-    RETURN_NOT_OK(service_->GetFlightInfo(context, descriptor, &info));
+    // TODO: need to read client's trailers (for cancellations and such), asynchronously
+    auto status = service_->GetFlightInfo(context, descriptor, &info);
 
-    // Send response to client
-    std::string response;
-    RETURN_NOT_OK(info->SerializeToString(&response));
+    if (status.ok()) {
+      // Send response to client
+      std::string response;
+      RETURN_NOT_OK(info->SerializeToString(&response));
+      RETURN_NOT_OK(driver.SendPayload(reinterpret_cast<const uint8_t*>(response.data()),
+                                       static_cast<int64_t>(response.size())));
+    }
 
-    RETURN_NOT_OK(driver.SendPayload(reinterpret_cast<const uint8_t*>(response.data()),
-                                     static_cast<int64_t>(response.size())));
+    std::vector<std::pair<std::string, std::string>> headers;
+    headers.emplace_back("flight-status-code",
+                         std::to_string(static_cast<int32_t>(status.code())));
+    headers.emplace_back("flight-status-message", status.ToString());
+    RETURN_NOT_OK(driver.SendHeaders(headers));
     return Status::OK();
   }
 
@@ -216,15 +223,15 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
     // Get method
     // TODO: do this like gRPC/HTTP2 and send the method in "pseudo-headers"?
-    ARROW_ASSIGN_OR_RAISE(auto payload, driver.ReadNextPayload());
-    auto method = payload->ToString();
-    if (payload->ToString() == "arrow.flight.protocol.FlightService/GetFlightInfo") {
+    ARROW_ASSIGN_OR_RAISE(auto headers, driver.ReadHeaders());
+    ARROW_ASSIGN_OR_RAISE(auto method, headers.Get(":method:"));
+    if (method == "arrow.flight.protocol.FlightService/GetFlightInfo") {
       return HandleGetFlightInfo(std::move(driver));
-    } else if (payload->ToString() == "arrow.flight.protocol.FlightService/DoGet") {
+    } else if (method == "arrow.flight.protocol.FlightService/DoGet") {
       return HandleDoGet(std::move(driver));
     } else {
       // TODO: send error to client
-      return Status::NotImplemented(payload->ToString());
+      return Status::NotImplemented(method);
     }
   }
 

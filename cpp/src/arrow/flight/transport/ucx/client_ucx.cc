@@ -132,6 +132,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
                        const FlightDescriptor& descriptor,
                        std::unique_ptr<FlightInfo>* info) override {
     // TODO: respect options
+    // TODO: can we find a way to share code with the gRPC backend?
     UcpCallDriver driver(ucp_worker_, remote_endpoint_);
     // TODO: constant
     RETURN_NOT_OK(driver.StartCall("arrow.flight.protocol.FlightService/GetFlightInfo"));
@@ -142,8 +143,25 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
     RETURN_NOT_OK(driver.SendPayload(reinterpret_cast<const uint8_t*>(payload.data()),
                                      static_cast<int64_t>(payload.size())));
 
-    ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver.ReadNextPayload());
-    return FlightInfo::Deserialize(incoming_message->ToString(), info);
+    ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver.ReadNextFrame());
+    if (incoming_message.first == FrameType::kPayload) {
+      // TODO: avoid allocating string
+      RETURN_NOT_OK(FlightInfo::Deserialize(incoming_message.second->ToString(), info));
+      ARROW_ASSIGN_OR_RAISE(incoming_message, driver.ReadNextFrame());
+    }
+    if (incoming_message.first != FrameType::kHeaders) {
+      return Status::IOError("Expected trailers");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto headers,
+                          HeadersFrame::Parse(std::move(incoming_message.second)));
+    // TODO: annotate error messages
+    ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
+    ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));
+    auto code = std::strtol(code_str.data(), nullptr, /*base=*/10);
+    // TODO: validate
+    auto status_code = static_cast<StatusCode>(code);
+    if (status_code == StatusCode::OK) return Status::OK();
+    return Status(status_code, std::string(message_str), nullptr);
   }
 
  private:
