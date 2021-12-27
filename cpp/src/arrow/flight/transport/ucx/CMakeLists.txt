@@ -44,9 +44,11 @@ add_arrow_lib(arrow_flight_transport_ucx
               SHARED_LINK_LIBS
               arrow_shared
               arrow_flight_shared
+              ${ARROW_FLIGHT_TRANSPORT_UCX_LINK_LIBS}
               STATIC_LINK_LIBS
               arrow_static
-              arrow_flight_static)
+              arrow_flight_static
+              ${ARROW_FLIGHT_TRANSPORT_UCX_LINK_LIBS})
 # TODO: is this right?
 target_include_directories(arrow_flight_transport_ucx_shared SYSTEM
                            PRIVATE ${UCX_INCLUDE_DIRS})
@@ -59,6 +61,5 @@ add_arrow_test(flight_transport_ucx_test
                arrow_flight_testing_shared
                arrow_flight_transport_ucx_shared
                ${ARROW_TEST_LINK_LIBS}
-               ${ARROW_FLIGHT_TRANSPORT_UCX_LINK_LIBS}
                LABELS
                "arrow_flight")

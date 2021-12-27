@@ -240,7 +240,6 @@ Status UcpCallDriver::SendFrame(FrameType frame_type, const uint8_t* data,
   // TODO: does UCX coalesce small writes? Is there a penalty for two
   // separate sends when both are small?
 
-  ARROW_LOG(WARNING) << "Sending payload of length " << size;
   DCHECK_GT(size, 0);
 
   // Send frame header
@@ -287,7 +286,6 @@ UcpCallDriver::ReadNextFrame() {
   // Read payload itself
   // TODO: try ucp_stream_recv_data_nb which has UCX allocate memory instead
   const int32_t payload_length = BeBytesToInt32(frame_header + 4);
-  ARROW_LOG(WARNING) << "Reading payload of length " << payload_length;
   DCHECK_GT(payload_length, 0);
   ARROW_ASSIGN_OR_RAISE(auto incoming_message, AllocateBuffer(payload_length));
   request = ucp_stream_recv_nbx(endpoint_, incoming_message->mutable_data(),
@@ -349,8 +347,6 @@ Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
     total_length += 4;
     total_length += payload.ipc_message.body_length;
   }
-
-  ARROW_LOG(WARNING) << "Sending payload of length " << total_length;
 
   void* request = nullptr;
   ucp_request_param_t request_param;

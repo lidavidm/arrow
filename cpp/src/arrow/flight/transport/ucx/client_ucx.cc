@@ -279,6 +279,12 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
     return Status::OK();
   }
 
+  Status DoAction(const FlightCallOptions& options, const Action& action,
+                  std::unique_ptr<ResultStream>* results) override {
+    // Fake this for now to get the perf test to work
+    return Status::OK();
+  }
+
  private:
   ucp_context_h ucp_context_;
   ucp_worker_h ucp_worker_;
