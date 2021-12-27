@@ -23,6 +23,7 @@
 #include <ucp/api/ucp.h>
 
 #include "arrow/buffer.h"
+#include "arrow/flight/client.h"
 #include "arrow/flight/transport_impl.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
@@ -34,6 +35,103 @@ namespace arrow {
 namespace flight {
 namespace transport {
 namespace ucx {
+
+class UcxIpcMessageReader : public ipc::MessageReader {
+ public:
+  explicit UcxIpcMessageReader(UcpCallDriver driver)
+      : driver_(std::move(driver)), stream_finished_(false) {}
+
+  arrow::Result<std::unique_ptr<ipc::Message>> ReadNextMessage() override {
+    if (stream_finished_) return nullptr;
+
+    ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver_.ReadNextFrame());
+    if (incoming_message.first == FrameType::kHeaders) {
+      // Trailers, stream is over
+      stream_finished_ = true;
+      ARROW_ASSIGN_OR_RAISE(auto headers,
+                            HeadersFrame::Parse(std::move(incoming_message.second)));
+      ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
+      ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));
+      auto code = std::strtol(code_str.data(), nullptr, /*base=*/10);
+      auto status_code = static_cast<StatusCode>(code);
+      if (status_code == StatusCode::OK) {
+        stream_finished_ = true;
+        return nullptr;
+      }
+      return Status(status_code, std::string(message_str), nullptr);
+    } else if (incoming_message.first != FrameType::kPayload) {
+      // TODO: need equivalent of RST_STREAM
+      return Status::IOError("Expected payload or trailers, not frame type ",
+                             static_cast<int32_t>(incoming_message.first));
+    }
+
+    std::shared_ptr<Buffer> buffer = std::move(incoming_message.second);
+    const uint8_t* payload = buffer->data();
+    const int32_t metadata_len = BeBytesToInt32(payload);
+    auto metadata = SliceBuffer(buffer, 4, metadata_len);
+    std::shared_ptr<Buffer> body;
+    if (metadata_len < buffer->size()) {
+      const int32_t body_len = BeBytesToInt32(payload + 4 + metadata_len);
+      body = SliceBuffer(buffer, 4 + metadata_len + 4, body_len);
+    } else {
+      body = std::make_shared<Buffer>(nullptr, 0);
+    }
+
+    // TODO: errors here also need to end stream, drain the stream
+    // Validate IPC message
+    ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(metadata, body));
+    return message;
+  }
+
+ private:
+  UcpCallDriver driver_;
+  bool stream_finished_;
+};
+
+class ARROW_FLIGHT_EXPORT UcxFlightStreamReader : public FlightStreamReader {
+ public:
+  explicit UcxFlightStreamReader(std::unique_ptr<ipc::MessageReader> reader)
+      : message_reader_(std::move(reader)) {}
+  arrow::Result<std::shared_ptr<Schema>> GetSchema() override {
+    RETURN_NOT_OK(EnsureStarted());
+    return reader_->schema();
+  }
+  Status Next(FlightStreamChunk* next) override {
+    RETURN_NOT_OK(EnsureStarted());
+    next->app_metadata = nullptr;
+    RETURN_NOT_OK(reader_->ReadNext(&next->data));
+    return Status::OK();
+  }
+  void Cancel() override {}
+
+  Status ReadAll(std::vector<std::shared_ptr<RecordBatch>>* batches,
+                 const StopToken& stop_token) {
+    // TODO: this should be moved to a default method
+    FlightStreamChunk chunk;
+
+    while (true) {
+      if (stop_token.IsStopRequested()) {
+        Cancel();
+        return stop_token.Poll();
+      }
+      RETURN_NOT_OK(Next(&chunk));
+      if (!chunk.data) break;
+      batches->emplace_back(std::move(chunk.data));
+    }
+    return Status::OK();
+  }
+
+ private:
+  Status EnsureStarted() {
+    if (!message_reader_) return Status::OK();
+    ARROW_ASSIGN_OR_RAISE(reader_,
+                          ipc::RecordBatchStreamReader::Open(std::move(message_reader_)));
+    return Status::OK();
+  }
+
+  std::unique_ptr<ipc::MessageReader> message_reader_;
+  std::shared_ptr<ipc::RecordBatchReader> reader_;
+};
 
 class ARROW_FLIGHT_EXPORT UcxClientImpl
     : public arrow::flight::internal::ClientTransportImpl {
@@ -176,28 +274,8 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
                                        static_cast<int64_t>(payload.size())));
     }
 
-    while (true) {
-      // TODO: need a general reader abstraction
-      ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver.ReadNextFrame());
-      if (incoming_message.first == FrameType::kPayload) {
-        ARROW_ASSIGN_OR_RAISE(incoming_message, driver.ReadNextFrame());
-        // TODO: parse payload
-        continue;
-      } else if (incoming_message.first == FrameType::kHeaders) {
-        // Trailers, end of stream
-        ARROW_ASSIGN_OR_RAISE(auto headers,
-                              HeadersFrame::Parse(std::move(incoming_message.second)));
-        ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
-        ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));
-        auto code = std::strtol(code_str.data(), nullptr, /*base=*/10);
-        auto status_code = static_cast<StatusCode>(code);
-        if (status_code == StatusCode::OK) break;
-        return Status(status_code, std::string(message_str), nullptr);
-      } else {
-        return Status::IOError("Expected payload or trailers, not frame type ",
-                               static_cast<int32_t>(incoming_message.first));
-      }
-    }
+    auto reader = arrow::internal::make_unique<UcxIpcMessageReader>(std::move(driver));
+    *stream = arrow::internal::make_unique<UcxFlightStreamReader>(std::move(reader));
     return Status::OK();
   }
 

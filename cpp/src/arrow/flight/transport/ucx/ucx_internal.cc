@@ -374,6 +374,7 @@ Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
 
   // Send IPC header
+  DCHECK_GT(payload.ipc_message.metadata->size(), 0);
   request = ucp_stream_send_nbx(endpoint_, payload.ipc_message.metadata->data(),
                                 payload.ipc_message.metadata->size(), &request_param);
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
@@ -388,9 +389,10 @@ Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
   // Send IPC body buffers
   int32_t actual_length = 0;
   for (const auto& buffer : payload.ipc_message.body_buffers) {
-    if (!buffer) continue;
+    if (!buffer || buffer->size() == 0) continue;
 
     actual_length += buffer->size();
+    DCHECK_GT(buffer->size(), 0);
     request =
         ucp_stream_send_nbx(endpoint_, buffer->data(), buffer->size(), &request_param);
     RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
@@ -400,6 +402,7 @@ Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
         static_cast<int>(bit_util::RoundUpToMultipleOf8(buffer->size()) - buffer->size());
     if (remainder) {
       request = ucp_stream_send_nbx(endpoint_, kPaddingBytes, remainder, &request_param);
+      DCHECK_GT(remainder, 0);
       RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
       actual_length += remainder;
     }

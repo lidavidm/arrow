@@ -83,6 +83,8 @@ TEST_F(TestUcx, DoGet) {
   Ticket ticket{"a"};
   std::unique_ptr<FlightStreamReader> stream;
   ASSERT_OK(client_->DoGet(ticket, &stream));
+  std::shared_ptr<Table> table;
+  ASSERT_OK(stream->ReadAll(&table));
   // TODO: if we hit an NYI, we just hang on shutdown?
 }
 
