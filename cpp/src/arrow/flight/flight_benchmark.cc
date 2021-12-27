@@ -29,6 +29,7 @@
 #include "arrow/record_batch.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/util/compression.h"
+#include "arrow/util/config.h"
 #include "arrow/util/stopwatch.h"
 #include "arrow/util/tdigest.h"
 #include "arrow/util/thread_pool.h"
@@ -37,6 +38,11 @@
 #include "arrow/flight/perf.pb.h"
 #include "arrow/flight/test_util.h"
 
+#ifdef ARROW_WITH_UCX
+#include "arrow/flight/transport/ucx/ucx.h"
+#endif
+
+DEFINE_string(transport, "grpc", "Transport to use");
 DEFINE_string(server_host, "",
               "An existing performance server to benchmark against (leave blank to spawn "
               "one automatically)");
@@ -427,51 +433,76 @@ int main(int argc, char** argv) {
   std::unique_ptr<arrow::flight::TestServer> server;
   arrow::flight::Location location;
   auto options = arrow::flight::FlightClientOptions::Defaults();
-  if (FLAGS_test_unix || !FLAGS_server_unix.empty()) {
-    if (FLAGS_server_unix == "") {
-      FLAGS_server_unix = "/tmp/flight-bench-spawn.sock";
-      std::cout << "Using spawned Unix server" << std::endl;
-      server.reset(
-          new arrow::flight::TestServer("arrow-flight-perf-server", FLAGS_server_unix));
-      server->Start();
-    } else {
-      std::cout << "Using standalone Unix server" << std::endl;
-    }
-    std::cout << "Server unix socket: " << FLAGS_server_unix << std::endl;
-    ABORT_NOT_OK(arrow::flight::Location::ForGrpcUnix(FLAGS_server_unix, &location));
-  } else {
-    if (FLAGS_server_host == "") {
-      FLAGS_server_host = "localhost";
-      std::cout << "Using spawned TCP server" << std::endl;
-      server.reset(
-          new arrow::flight::TestServer("arrow-flight-perf-server", FLAGS_server_port));
-      std::vector<std::string> args;
-      if (!FLAGS_cert_file.empty() || !FLAGS_key_file.empty()) {
-        if (!FLAGS_cert_file.empty() && !FLAGS_key_file.empty()) {
-          std::cout << "Enabling TLS for spawned server" << std::endl;
-          args.push_back("-cert_file");
-          args.push_back(FLAGS_cert_file);
-          args.push_back("-key_file");
-          args.push_back(FLAGS_key_file);
-        } else {
-          std::cerr << "If providing TLS cert/key, must provide both" << std::endl;
-          return 1;
-        }
+  if (FLAGS_transport == "grpc") {
+    if (FLAGS_test_unix || !FLAGS_server_unix.empty()) {
+      if (FLAGS_server_unix == "") {
+        FLAGS_server_unix = "/tmp/flight-bench-spawn.sock";
+        std::cout << "Using spawned Unix server" << std::endl;
+        server.reset(
+            new arrow::flight::TestServer("arrow-flight-perf-server", FLAGS_server_unix));
+        server->Start();
+      } else {
+        std::cout << "Using standalone Unix server" << std::endl;
       }
-      server->Start(args);
+      std::cout << "Server unix socket: " << FLAGS_server_unix << std::endl;
+      ABORT_NOT_OK(arrow::flight::Location::ForGrpcUnix(FLAGS_server_unix, &location));
     } else {
-      std::cout << "Using standalone TCP server" << std::endl;
+      if (FLAGS_server_host == "") {
+        FLAGS_server_host = "localhost";
+        std::cout << "Using spawned TCP server" << std::endl;
+        server.reset(
+            new arrow::flight::TestServer("arrow-flight-perf-server", FLAGS_server_port));
+        std::vector<std::string> args;
+        if (!FLAGS_cert_file.empty() || !FLAGS_key_file.empty()) {
+          if (!FLAGS_cert_file.empty() && !FLAGS_key_file.empty()) {
+            std::cout << "Enabling TLS for spawned server" << std::endl;
+            args.push_back("-cert_file");
+            args.push_back(FLAGS_cert_file);
+            args.push_back("-key_file");
+            args.push_back(FLAGS_key_file);
+          } else {
+            std::cerr << "If providing TLS cert/key, must provide both" << std::endl;
+            return 1;
+          }
+        }
+        server->Start(args);
+      } else {
+        std::cout << "Using standalone TCP server" << std::endl;
+      }
+      std::cout << "Server host: " << FLAGS_server_host << std::endl
+                << "Server port: " << FLAGS_server_port << std::endl;
+      if (FLAGS_cert_file.empty()) {
+        ABORT_NOT_OK(arrow::flight::Location::ForGrpcTcp(FLAGS_server_host,
+                                                         FLAGS_server_port, &location));
+      } else {
+        ABORT_NOT_OK(arrow::flight::Location::ForGrpcTls(FLAGS_server_host,
+                                                         FLAGS_server_port, &location));
+        options.disable_server_verification = true;
+      }
     }
-    std::cout << "Server host: " << FLAGS_server_host << std::endl
-              << "Server port: " << FLAGS_server_port << std::endl;
-    if (FLAGS_cert_file.empty()) {
-      ABORT_NOT_OK(arrow::flight::Location::ForGrpcTcp(FLAGS_server_host,
-                                                       FLAGS_server_port, &location));
+  } else if (FLAGS_transport == "ucx") {
+#ifdef ARROW_WITH_UCX
+    arrow::flight::transport::ucx::InitializeFlightUcx();
+    if (FLAGS_test_unix || !FLAGS_server_unix.empty()) {
+      std::cerr << "Transport does not support domain sockets: " << FLAGS_transport
+                << std::endl;
+      return EXIT_FAILURE;
     } else {
-      ABORT_NOT_OK(arrow::flight::Location::ForGrpcTls(FLAGS_server_host,
-                                                       FLAGS_server_port, &location));
-      options.disable_server_verification = true;
+      if (!FLAGS_cert_file.empty() || !FLAGS_key_file.empty()) {
+        std::cerr << "Transport does not support TLS: " << FLAGS_transport << std::endl;
+        return EXIT_FAILURE;
+      }
+      ARROW_CHECK_OK(arrow::flight::Location::Parse(
+          "ucx://" + FLAGS_server_host + ":" + std::to_string(FLAGS_server_port),
+          &location));
     }
+#else
+    std::cerr << "Not built with transport: " << FLAGS_transport << std::endl;
+    return EXIT_FAILURE;
+#endif
+  } else {
+    std::cerr << "Unknown transport: " << FLAGS_transport << std::endl;
+    return EXIT_FAILURE;
   }
 
   std::unique_ptr<arrow::flight::FlightClient> client;

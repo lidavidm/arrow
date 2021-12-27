@@ -264,6 +264,11 @@ if(ARROW_BUILD_BENCHMARKS)
   target_link_libraries(arrow-flight-benchmark ${ARROW_FLIGHT_TEST_LINK_LIBS}
                         ${GFLAGS_LIBRARIES} GTest::gtest)
 
+  if(ARROW_WITH_UCX)
+    target_link_libraries(arrow-flight-perf-server arrow_flight_transport_ucx_shared)
+    target_link_libraries(arrow-flight-benchmark arrow_flight_transport_ucx_shared)
+  endif()
+
   add_dependencies(arrow-flight-benchmark arrow-flight-perf-server)
 
   add_dependencies(arrow_flight arrow-flight-benchmark)
