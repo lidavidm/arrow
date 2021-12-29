@@ -75,6 +75,8 @@ TEST_F(TestUcx, GetFlightInfo) {
   auto descriptor = FlightDescriptor::Path({"foo", "bar"});
   std::unique_ptr<FlightInfo> info;
   ASSERT_OK(client_->GetFlightInfo(descriptor, &info));
+  // Test that we can reuse the connection
+  ASSERT_OK(client_->GetFlightInfo(descriptor, &info));
 }
 
 TEST_F(TestUcx, DoGet) {

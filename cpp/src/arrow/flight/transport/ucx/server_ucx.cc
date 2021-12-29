@@ -195,11 +195,11 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
  private:
   friend void HandleIncomingConnection(ucp_conn_request_h, void*);
 
-  Status HandleGetFlightInfo(UcpCallDriver driver) {
+  Status HandleGetFlightInfo(UcpCallDriver* driver) {
     UcxServerCallContext context;
 
-    ARROW_ASSIGN_OR_RAISE(auto frame, driver.ReadNextFrame());
-    RETURN_NOT_OK(driver.ExpectFrameType(frame, FrameType::kPayload));
+    ARROW_ASSIGN_OR_RAISE(auto frame, driver->ReadNextFrame());
+    RETURN_NOT_OK(driver->ExpectFrameType(frame, FrameType::kPayload));
     FlightDescriptor descriptor;
     RETURN_NOT_OK(FlightDescriptor::Deserialize(frame.buffer->ToString(), &descriptor));
 
@@ -211,23 +211,23 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       // Send response to client
       std::string response;
       RETURN_NOT_OK(info->SerializeToString(&response));
-      RETURN_NOT_OK(driver.SendPayload(reinterpret_cast<const uint8_t*>(response.data()),
-                                       static_cast<int64_t>(response.size())));
+      RETURN_NOT_OK(driver->SendPayload(reinterpret_cast<const uint8_t*>(response.data()),
+                                        static_cast<int64_t>(response.size())));
     }
 
     std::vector<std::pair<std::string, std::string>> headers;
     headers.emplace_back("flight-status-code",
                          std::to_string(static_cast<int32_t>(status.code())));
     headers.emplace_back("flight-status-message", status.ToString());
-    RETURN_NOT_OK(driver.SendHeaders(headers));
+    RETURN_NOT_OK(driver->SendHeaders(headers));
     return Status::OK();
   }
 
-  Status HandleDoGet(UcpCallDriver driver) {
+  Status HandleDoGet(UcpCallDriver* driver) {
     UcxServerCallContext context;
 
-    ARROW_ASSIGN_OR_RAISE(auto frame, driver.ReadNextFrame());
-    RETURN_NOT_OK(driver.ExpectFrameType(frame, FrameType::kPayload));
+    ARROW_ASSIGN_OR_RAISE(auto frame, driver->ReadNextFrame());
+    RETURN_NOT_OK(driver->ExpectFrameType(frame, FrameType::kPayload));
     Ticket ticket;
     // TODO: don't allocate a new string
     RETURN_NOT_OK(Ticket::Deserialize(frame.buffer->ToString(), &ticket));
@@ -240,7 +240,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       headers.emplace_back("flight-status-code",
                            std::to_string(static_cast<int32_t>(status.code())));
       headers.emplace_back("flight-status-message", status.ToString());
-      RETURN_NOT_OK(driver.SendHeaders(headers));
+      RETURN_NOT_OK(driver->SendHeaders(headers));
       return Status::OK();
     }
 
@@ -249,7 +249,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       headers.emplace_back("flight-status-code",
                            std::to_string(static_cast<int32_t>(StatusCode::KeyError)));
       headers.emplace_back("flight-status-message", "Flight not found");
-      RETURN_NOT_OK(driver.SendHeaders(headers));
+      RETURN_NOT_OK(driver->SendHeaders(headers));
       return Status::OK();
     }
 
@@ -258,7 +258,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     {
       FlightPayload schema_payload;
       RETURN_NOT_OK(response->GetSchemaPayload(&schema_payload));
-      RETURN_NOT_OK(driver.SendFlightPayload(schema_payload));
+      RETURN_NOT_OK(driver->SendFlightPayload(schema_payload));
     }
 
     // Consume data stream and write out payloads
@@ -267,39 +267,79 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       RETURN_NOT_OK(response->Next(&payload));
       // End of stream
       if (payload.ipc_message.metadata == nullptr) break;
-      RETURN_NOT_OK(driver.SendFlightPayload(payload));
+      RETURN_NOT_OK(driver->SendFlightPayload(payload));
     }
 
     std::vector<std::pair<std::string, std::string>> headers;
     headers.emplace_back("flight-status-code",
                          std::to_string(static_cast<int32_t>(StatusCode::OK)));
     headers.emplace_back("flight-status-message", "");
-    RETURN_NOT_OK(driver.SendHeaders(headers));
+    RETURN_NOT_OK(driver->SendHeaders(headers));
 
     return Status::OK();
   }
 
-  Status HandleOneCall(ucp_ep_h client_endpoint) {
-    UcpCallDriver driver(worker_service_, client_endpoint);
-
-    // Get method
-    ARROW_ASSIGN_OR_RAISE(auto frame, driver.ReadNextFrame());
+  Status HandleOneCall(UcpCallDriver driver, Frame frame) {
     RETURN_NOT_OK(driver.ExpectFrameType(frame, FrameType::kHeaders));
     ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame.buffer)));
     ARROW_ASSIGN_OR_RAISE(auto method, headers.Get(":method:"));
     if (method == "arrow.flight.protocol.FlightService/GetFlightInfo") {
-      return HandleGetFlightInfo(std::move(driver));
+      RETURN_NOT_OK(HandleGetFlightInfo(&driver));
     } else if (method == "arrow.flight.protocol.FlightService/DoGet") {
-      return HandleDoGet(std::move(driver));
+      RETURN_NOT_OK(HandleDoGet(&driver));
     } else {
       // TODO: send error to client
       return Status::NotImplemented(method);
     }
+    WaitForRequestAsync(std::move(driver));
+    return Status::OK();
+  }
+
+  void WaitForRequestAsync(UcpCallDriver&& driver) {
+    CallbackOptions options;
+    options.should_schedule = ShouldSchedule::Always;
+    options.executor = rpc_pool_.get();
+
+    struct {
+      void operator()(const arrow::Result<Frame>& result) {
+        if (!result.ok()) {
+          // Break reference cycle?
+          future = Future<Frame>();
+          if (result.status().code() == StatusCode::Cancelled) {
+            // Client disconnected
+            return;
+          }
+          // TODO:
+          DCHECK(false) << "NYI failure: " << result.status().ToString();
+        }
+
+        auto status =
+            impl->HandleOneCall(std::move(driver), future.MoveResult().MoveValueUnsafe());
+        // Break reference cycle?
+        future = Future<Frame>();
+        if (!status.ok()) {
+          impl->ReportError(std::move(status));
+        }
+      }
+
+      UcxServerImpl* impl;
+      UcpCallDriver driver;
+      // TODO: Hmm. This will cause a memory leak.
+      Future<Frame> future;
+    } HandleRpc;
+
+    HandleRpc.impl = this;
+    HandleRpc.driver = std::move(driver);
+    HandleRpc.future = HandleRpc.driver.ReadFrameAsync();
+    auto future = HandleRpc.future;
+    future.AddCallback(std::move(HandleRpc), options);
   }
 
   void DriveWorker() {
     while (running_.test_and_set()) {
       ucp_worker_progress(worker_conn_);
+      // TODO: separate thread to progress worker
+      ucp_worker_progress(worker_service_);
 
       // Check for connect requests in queue
       std::unique_lock<std::mutex> guard(pending_connections_mutex_);
@@ -320,39 +360,29 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
           continue;
         }
 
-        auto spawn = rpc_pool_->Spawn([this, client_endpoint]() {
-          // TODO: what should happen is we read the header, with a
-          // callback that feeds data into this handler. need to
-          // refactor UcpCallDriver to accept data instead of
-          // synchronously reading it.
-          auto status = HandleOneCall(client_endpoint);
-          if (!status.ok()) {
-            ReportError(std::move(status));
-          }
+        UcpCallDriver driver(worker_service_, client_endpoint);
+        WaitForRequestAsync(std::move(driver));
 
-          {
-            // Close the connection
-            void* request = ucp_ep_close_nb(client_endpoint, UCP_EP_CLOSE_MODE_FLUSH);
-            if (UCS_PTR_IS_ERR(request)) {
-              ReportError(FromUcsStatus("ucp_ep_close_nb", UCS_PTR_STATUS(request)));
-            } else if (UCS_PTR_IS_PTR(request)) {
-              ucs_status_t status;
-              do {
-                ucp_worker_progress(worker_service_);
-                status = ucp_request_check_status(request);
-              } while (status == UCS_INPROGRESS);
-              ucp_request_free(request);
-              if (status != UCS_OK) {
-                ReportError(FromUcsStatus("ucp_request_check_status", status));
-              }
-            } else {
-              DCHECK(!request);
-            }
-          }
-        });
-        if (!spawn.ok()) {
-          ReportError(std::move(spawn));
-        }
+        //   {
+        //     // Close the connection
+        //     void* request = ucp_ep_close_nb(client_endpoint, UCP_EP_CLOSE_MODE_FLUSH);
+        //     if (UCS_PTR_IS_ERR(request)) {
+        //       ReportError(FromUcsStatus("ucp_ep_close_nb", UCS_PTR_STATUS(request)));
+        //     } else if (UCS_PTR_IS_PTR(request)) {
+        //       ucs_status_t status;
+        //       do {
+        //         ucp_worker_progress(worker_service_);
+        //         status = ucp_request_check_status(request);
+        //       } while (status == UCS_INPROGRESS);
+        //       ucp_request_free(request);
+        //       if (status != UCS_OK) {
+        //         ReportError(FromUcsStatus("ucp_request_check_status", status));
+        //       }
+        //     } else {
+        //       DCHECK(!request);
+        //     }
+        //   }
+        // });
       }
     }
   }

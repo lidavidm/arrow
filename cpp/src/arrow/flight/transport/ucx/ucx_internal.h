@@ -26,6 +26,7 @@
 #include "arrow/flight/transport_impl.h"
 #include "arrow/flight/visibility.h"
 #include "arrow/type_fwd.h"
+#include "arrow/util/future.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/string_view.h"
 
@@ -102,7 +103,15 @@ struct Frame {
 
 class UcpCallDriver {
  public:
+  UcpCallDriver();
   UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint);
+
+  UcpCallDriver(const UcpCallDriver&) = delete;
+  UcpCallDriver(UcpCallDriver&&);
+  void operator=(const UcpCallDriver&) = delete;
+  UcpCallDriver& operator=(UcpCallDriver&&);
+
+  ~UcpCallDriver();
 
   // Client side only.
   Status StartCall(const std::string& method);
@@ -111,18 +120,13 @@ class UcpCallDriver {
   Status SendFlightPayload(const FlightPayload& payload);
 
   arrow::Result<Frame> ReadNextFrame();
+  Future<Frame> ReadFrameAsync();
 
   Status ExpectFrameType(const Frame& frame, FrameType type);
 
  private:
-  static void StreamRecvCallback(void* request, ucs_status_t status, size_t length,
-                                 void* user_data);
-
-  Status SendFrame(FrameType frame_type, const uint8_t* data, const int64_t size);
-  Status CompleteRequestBlocking(const std::string& context, void* request);
-
-  ucp_worker_h worker_;
-  ucp_ep_h endpoint_;
+  class Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 /// Helper to convert a Uri to a struct sockaddr (used in ucp_listener_params_t)

@@ -38,7 +38,7 @@ namespace ucx {
 
 class UcxIpcMessageReader : public ipc::MessageReader {
  public:
-  explicit UcxIpcMessageReader(UcpCallDriver driver)
+  explicit UcxIpcMessageReader(UcpCallDriver&& driver)
       : driver_(std::move(driver)), stream_finished_(false) {}
 
   arrow::Result<std::unique_ptr<ipc::Message>> ReadNextMessage() override {
