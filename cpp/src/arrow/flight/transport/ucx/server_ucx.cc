@@ -33,6 +33,7 @@
 #include "arrow/util/base64.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/make_unique.h"
+#include "arrow/util/thread_pool.h"
 #include "arrow/util/uri.h"
 
 namespace arrow {
@@ -74,6 +75,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   Status Init(const FlightServerOptions& options, const arrow::internal::Uri& uri,
               FlightServerBase* server) {
     service_ = server;
+    ARROW_ASSIGN_OR_RAISE(rpc_pool_, arrow::internal::ThreadPool::Make(8));
 
     // Init UCX
     {
@@ -168,6 +170,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
     ucp_worker_destroy(worker_service_);
     ucp_cleanup(ucp_context_);
+
+    status &= rpc_pool_->Shutdown();
+    rpc_pool_.reset();
 
     ucp_context_ = nullptr;
     return status;
@@ -311,35 +316,38 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
           continue;
         }
 
-        // Drive the connection (TODO: what would *actually* happen is
-        // we hand this all off to another thread)
-
-        {
+        auto spawn = rpc_pool_->Spawn([this, client_endpoint]() {
+          // TODO: what should happen is we read the header, with a
+          // callback that feeds data into this handler. need to
+          // refactor UcpCallDriver to accept data instead of
+          // synchronously reading it.
           auto status = HandleOneCall(client_endpoint);
           if (!status.ok()) {
             ReportError(std::move(status));
           }
-        }
 
-        {
-          // Close the connection
-          void* request = ucp_ep_close_nb(client_endpoint, UCP_EP_CLOSE_MODE_FLUSH);
-          if (UCS_PTR_IS_ERR(request)) {
-            ReportError(FromUcsStatus("ucp_ep_close_nb", UCS_PTR_STATUS(request)));
-            continue;
-          } else if (UCS_PTR_IS_PTR(request)) {
-            ucs_status_t status;
-            do {
-              ucp_worker_progress(worker_service_);
-              status = ucp_request_check_status(request);
-            } while (status == UCS_INPROGRESS);
-            ucp_request_free(request);
-            if (status != UCS_OK) {
-              ReportError(FromUcsStatus("ucp_request_check_status", status));
+          {
+            // Close the connection
+            void* request = ucp_ep_close_nb(client_endpoint, UCP_EP_CLOSE_MODE_FLUSH);
+            if (UCS_PTR_IS_ERR(request)) {
+              ReportError(FromUcsStatus("ucp_ep_close_nb", UCS_PTR_STATUS(request)));
+            } else if (UCS_PTR_IS_PTR(request)) {
+              ucs_status_t status;
+              do {
+                ucp_worker_progress(worker_service_);
+                status = ucp_request_check_status(request);
+              } while (status == UCS_INPROGRESS);
+              ucp_request_free(request);
+              if (status != UCS_OK) {
+                ReportError(FromUcsStatus("ucp_request_check_status", status));
+              }
+            } else {
+              DCHECK(!request);
             }
-          } else {
-            DCHECK(!request);
           }
+        });
+        if (!spawn.ok()) {
+          ReportError(std::move(spawn));
         }
       }
     }
@@ -365,7 +373,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
   FlightServerBase* service_;
   std::atomic_flag running_;
-  // TODO: use Arrow pool?
+  std::shared_ptr<arrow::internal::ThreadPool> rpc_pool_;
   std::thread listener_thread_;
 
   std::mutex pending_connections_mutex_;
