@@ -198,9 +198,10 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   Status HandleGetFlightInfo(UcpCallDriver driver) {
     UcxServerCallContext context;
 
-    ARROW_ASSIGN_OR_RAISE(auto payload, driver.ReadNextPayload());
+    ARROW_ASSIGN_OR_RAISE(auto frame, driver.ReadNextFrame());
+    RETURN_NOT_OK(driver.ExpectFrameType(frame, FrameType::kPayload));
     FlightDescriptor descriptor;
-    RETURN_NOT_OK(FlightDescriptor::Deserialize(payload->ToString(), &descriptor));
+    RETURN_NOT_OK(FlightDescriptor::Deserialize(frame.buffer->ToString(), &descriptor));
 
     std::unique_ptr<FlightInfo> info;
     // TODO: need to read client's trailers (for cancellations and such), asynchronously
@@ -225,10 +226,11 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   Status HandleDoGet(UcpCallDriver driver) {
     UcxServerCallContext context;
 
-    ARROW_ASSIGN_OR_RAISE(auto payload, driver.ReadNextPayload());
+    ARROW_ASSIGN_OR_RAISE(auto frame, driver.ReadNextFrame());
+    RETURN_NOT_OK(driver.ExpectFrameType(frame, FrameType::kPayload));
     Ticket ticket;
     // TODO: don't allocate a new string
-    RETURN_NOT_OK(Ticket::Deserialize(payload->ToString(), &ticket));
+    RETURN_NOT_OK(Ticket::Deserialize(frame.buffer->ToString(), &ticket));
 
     std::unique_ptr<FlightDataStream> response;
     // TODO: send error to client
@@ -281,7 +283,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     UcpCallDriver driver(worker_service_, client_endpoint);
 
     // Get method
-    ARROW_ASSIGN_OR_RAISE(auto headers, driver.ReadHeaders());
+    ARROW_ASSIGN_OR_RAISE(auto frame, driver.ReadNextFrame());
+    RETURN_NOT_OK(driver.ExpectFrameType(frame, FrameType::kHeaders));
+    ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame.buffer)));
     ARROW_ASSIGN_OR_RAISE(auto method, headers.Get(":method:"));
     if (method == "arrow.flight.protocol.FlightService/GetFlightInfo") {
       return HandleGetFlightInfo(std::move(driver));

@@ -45,11 +45,11 @@ class UcxIpcMessageReader : public ipc::MessageReader {
     if (stream_finished_) return nullptr;
 
     ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver_.ReadNextFrame());
-    if (incoming_message.first == FrameType::kHeaders) {
+    if (incoming_message.type == FrameType::kHeaders) {
       // Trailers, stream is over
       stream_finished_ = true;
       ARROW_ASSIGN_OR_RAISE(auto headers,
-                            HeadersFrame::Parse(std::move(incoming_message.second)));
+                            HeadersFrame::Parse(std::move(incoming_message.buffer)));
       ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
       ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));
       auto code = std::strtol(code_str.data(), nullptr, /*base=*/10);
@@ -59,13 +59,10 @@ class UcxIpcMessageReader : public ipc::MessageReader {
         return nullptr;
       }
       return Status(status_code, std::string(message_str), nullptr);
-    } else if (incoming_message.first != FrameType::kPayload) {
-      // TODO: need equivalent of RST_STREAM
-      return Status::IOError("Expected payload or trailers, not frame type ",
-                             static_cast<int32_t>(incoming_message.first));
     }
+    RETURN_NOT_OK(driver_.ExpectFrameType(incoming_message, FrameType::kPayload));
 
-    std::shared_ptr<Buffer> buffer = std::move(incoming_message.second);
+    std::shared_ptr<Buffer> buffer = std::move(incoming_message.buffer);
     const uint8_t* payload = buffer->data();
     const int32_t metadata_len = BeBytesToInt32(payload);
     auto metadata = SliceBuffer(buffer, 4, metadata_len);
@@ -242,16 +239,14 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
                                      static_cast<int64_t>(payload.size())));
 
     ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver.ReadNextFrame());
-    if (incoming_message.first == FrameType::kPayload) {
+    if (incoming_message.type == FrameType::kPayload) {
       // TODO: avoid allocating string
-      RETURN_NOT_OK(FlightInfo::Deserialize(incoming_message.second->ToString(), info));
+      RETURN_NOT_OK(FlightInfo::Deserialize(incoming_message.buffer->ToString(), info));
       ARROW_ASSIGN_OR_RAISE(incoming_message, driver.ReadNextFrame());
     }
-    if (incoming_message.first != FrameType::kHeaders) {
-      return Status::IOError("Expected trailers");
-    }
+    RETURN_NOT_OK(driver.ExpectFrameType(incoming_message, FrameType::kHeaders));
     ARROW_ASSIGN_OR_RAISE(auto headers,
-                          HeadersFrame::Parse(std::move(incoming_message.second)));
+                          HeadersFrame::Parse(std::move(incoming_message.buffer)));
     // TODO: annotate error messages
     ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
     ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));

@@ -257,8 +257,7 @@ Status UcpCallDriver::SendFrame(FrameType frame_type, const uint8_t* data,
   return Status::OK();
 }
 
-arrow::Result<std::pair<FrameType, std::unique_ptr<Buffer>>>
-UcpCallDriver::ReadNextFrame() {
+arrow::Result<Frame> UcpCallDriver::ReadNextFrame() {
   void* request = nullptr;
   size_t actual_length = 0;
 
@@ -277,6 +276,7 @@ UcpCallDriver::ReadNextFrame() {
   DCHECK_EQ(actual_length, 8);
 
   if (frame_header[0] != kFrameVersion) {
+    // TODO: need RST_STREAM
     return Status::IOError("Expected frame version ", kFrameVersion, " but got ",
                            frame_header[0]);
   } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
@@ -291,12 +291,19 @@ UcpCallDriver::ReadNextFrame() {
   request = ucp_stream_recv_nbx(endpoint_, incoming_message->mutable_data(),
                                 incoming_message->size(), &actual_length, &request_param);
   RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_recv_nbx", request));
-  return std::make_pair(static_cast<FrameType>(frame_header[1]),
-                        std::move(incoming_message));
+  return Frame{static_cast<FrameType>(frame_header[1]), std::move(incoming_message)};
+}
+
+Status UcpCallDriver::ExpectFrameType(const Frame& frame, FrameType type) {
+  // TODO: need equivalent of RST_STREAM
+  if (frame.type != type) {
+    return Status::IOError("Expected frame type ", static_cast<int32_t>(type),
+                           ", but got frame type ", static_cast<int32_t>(frame.type));
+  }
+  return Status::OK();
 }
 
 Status UcpCallDriver::StartCall(const std::string& method) {
-  // TODO: un-hard-code header serialization here
   std::vector<std::pair<std::string, std::string>> headers;
   headers.emplace_back(kHeaderMethod, method);
   RETURN_NOT_OK(SendHeaders(headers));
@@ -406,25 +413,6 @@ Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
 
   ARROW_CHECK_EQ(actual_length, payload.ipc_message.body_length);
   return Status::OK();
-}
-
-arrow::Result<HeadersFrame> UcpCallDriver::ReadHeaders() {
-  ARROW_ASSIGN_OR_RAISE(auto frame, ReadNextFrame());
-  if (frame.first != FrameType::kHeaders) {
-    return Status::IOError("Expected headers frame, got ",
-                           static_cast<int32_t>(frame.first));
-  }
-  ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame.second)));
-  return headers;
-}
-
-arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::ReadNextPayload() {
-  ARROW_ASSIGN_OR_RAISE(auto frame, ReadNextFrame());
-  if (frame.first != FrameType::kPayload) {
-    return Status::IOError("Expected payload frame, got ",
-                           static_cast<int32_t>(frame.first));
-  }
-  return std::move(frame.second);
 }
 
 void UcpCallDriver::StreamRecvCallback(void* request, ucs_status_t status, size_t length,

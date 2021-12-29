@@ -95,6 +95,11 @@ class HeadersFrame {
   std::vector<std::pair<util::string_view, util::string_view>> headers_;
 };
 
+struct Frame {
+  FrameType type;
+  std::unique_ptr<Buffer> buffer;
+};
+
 class UcpCallDriver {
  public:
   UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint);
@@ -105,9 +110,9 @@ class UcpCallDriver {
   Status SendPayload(const uint8_t* data, const int64_t size);
   Status SendFlightPayload(const FlightPayload& payload);
 
-  arrow::Result<HeadersFrame> ReadHeaders();
-  arrow::Result<std::unique_ptr<Buffer>> ReadNextPayload();
-  arrow::Result<std::pair<FrameType, std::unique_ptr<Buffer>>> ReadNextFrame();
+  arrow::Result<Frame> ReadNextFrame();
+
+  Status ExpectFrameType(const Frame& frame, FrameType type);
 
  private:
   static void StreamRecvCallback(void* request, ucs_status_t status, size_t length,
