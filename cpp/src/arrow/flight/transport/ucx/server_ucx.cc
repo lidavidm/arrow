@@ -63,7 +63,12 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   UcxServerImpl() : service_(nullptr) {}
 
   virtual ~UcxServerImpl() {
-    // TODO: ensure UCX is shut down
+    if (ucp_context_) {
+      auto st = Shutdown();
+      if (!st.ok()) {
+        ARROW_LOG(WARNING) << "Server did not shut down properly: " << st.ToString();
+      }
+    }
   }
 
   Status Init(const FlightServerOptions& options, const arrow::internal::Uri& uri,
@@ -163,6 +168,8 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
     ucp_worker_destroy(worker_service_);
     ucp_cleanup(ucp_context_);
+
+    ucp_context_ = nullptr;
     return status;
   }
 
