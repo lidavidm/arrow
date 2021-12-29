@@ -144,14 +144,26 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   }
 
   Status Shutdown() override {
-    // TODO: determine if server was running in the first place
+    Status status;
+
+    // Wait for current RPCs to finish
     running_.clear();
+    status &= Wait();
+
+    // Reject all pending connections
+    std::unique_lock<std::mutex> guard(pending_connections_mutex_);
+    while (!pending_connections_.empty()) {
+      status &=
+          FromUcsStatus("ucp_listener_reject",
+                        ucp_listener_reject(listener_, pending_connections_.front()));
+      pending_connections_.pop();
+    }
     ucp_listener_destroy(listener_);
-    // TODO: ucp_ep_close_nb
-    // TODO: ucp_worker_destroy
-    // TODO: ucp_cleanup
-    RETURN_NOT_OK(Wait());
-    return Status::OK();
+    ucp_worker_destroy(worker_conn_);
+
+    ucp_worker_destroy(worker_service_);
+    ucp_cleanup(ucp_context_);
+    return status;
   }
 
   Status Wait() override {
@@ -356,6 +368,8 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 /// Callback handler. A new client has connected to the server.
 void HandleIncomingConnection(ucp_conn_request_h connection_request, void* data) {
   UcxServerImpl* server = reinterpret_cast<UcxServerImpl*>(data);
+  // TODO: enable shedding load above some threshold (which is a
+  // pitfall with gRPC/Java)
   server->EnqueueClient(connection_request);
 }
 
