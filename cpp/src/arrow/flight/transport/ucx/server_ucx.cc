@@ -66,6 +66,20 @@ class UcxServerCallContext : public flight::ServerCallContext {
  private:
   std::string peer_;
 };
+
+class UcxServerDataStream : public internal::ServerDataStream {
+ public:
+  explicit UcxServerDataStream(UcpCallDriver* driver) : driver_(driver) {}
+
+  Status Write(const FlightPayload& payload) override {
+    return driver_->SendFlightPayload(payload);
+  }
+
+  Status WritesDone() { return Status::OK(); }
+
+ private:
+  UcpCallDriver* driver_;
+};
 }  // namespace
 
 void HandleIncomingConnection(ucp_conn_request_h connection_request, void* server);
@@ -85,8 +99,8 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   }
 
   Status Init(const FlightServerOptions& options, const arrow::internal::Uri& uri,
-              FlightServerBase* server) {
-    service_ = server;
+              internal::FlightServiceImpl* service) {
+    service_ = service;
     ARROW_ASSIGN_OR_RAISE(rpc_pool_, arrow::internal::ThreadPool::Make(8));
 
     // Init UCX
@@ -223,7 +237,8 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
     std::unique_ptr<FlightInfo> info;
     // TODO: need to read client's trailers (for cancellations and such), asynchronously
-    SERVER_RETURN_NOT_OK(driver, service_->GetFlightInfo(context, descriptor, &info));
+    SERVER_RETURN_NOT_OK(driver,
+                         service_->base()->GetFlightInfo(context, descriptor, &info));
     // Send response to client
     std::string response;
     SERVER_RETURN_NOT_OK(driver, info->SerializeToString(&response));
@@ -242,26 +257,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     // TODO: don't allocate a new string
     SERVER_RETURN_NOT_OK(driver, Ticket::Deserialize(frame.buffer->ToString(), &ticket));
 
-    std::unique_ptr<FlightDataStream> response;
-    SERVER_RETURN_NOT_OK(driver, service_->DoGet(context, ticket, &response));
-    if (!response) {
-      RETURN_NOT_OK(driver->SendStatus(Status::KeyError("Flight not found")));
-      return Status::OK();
-    }
-
-    // Write the schema as the first message in the stream
-    FlightPayload payload;
-    SERVER_RETURN_NOT_OK(driver, response->GetSchemaPayload(&payload));
-    RETURN_NOT_OK(driver->SendFlightPayload(payload));
-
-    // Consume data stream and write out payloads
-    while (true) {
-      SERVER_RETURN_NOT_OK(driver, response->Next(&payload));
-      // End of stream
-      if (payload.ipc_message.metadata == nullptr) break;
-      RETURN_NOT_OK(driver->SendFlightPayload(payload));
-    }
-    RETURN_NOT_OK(driver->SendStatus(Status::OK()));
+    UcxServerDataStream stream(driver);
+    auto status = service_->DoGet(context, ticket, &stream);
+    RETURN_NOT_OK(driver->SendStatus(status));
     return Status::OK();
   }
 
@@ -378,7 +376,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   ucp_worker_h worker_service_;
   Location location_;
 
-  FlightServerBase* service_;
+  internal::FlightServiceImpl* service_;
   std::atomic_flag running_;
   std::shared_ptr<arrow::internal::ThreadPool> rpc_pool_;
   std::thread listener_thread_;

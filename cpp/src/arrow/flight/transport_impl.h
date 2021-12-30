@@ -54,6 +54,7 @@ class FlightStreamWriter;
 class Location;
 class ResultStream;
 class SchemaResult;
+class ServerCallContext;
 
 namespace internal {
 
@@ -118,6 +119,28 @@ class ARROW_FLIGHT_EXPORT ClientTransportImpl {
   }
 };
 
+class ARROW_FLIGHT_EXPORT ServerDataStream {
+ public:
+  virtual ~ServerDataStream() = default;
+  // virtual Status Read(FlightData* data) = 0;
+  virtual Status Write(const FlightPayload& payload) = 0;
+  virtual Status WritesDone() = 0;
+};
+
+/// The implementation of the Flight service. Transport
+/// implementations should implement the necessary interfaces and call
+/// methods of this service.
+class ARROW_FLIGHT_EXPORT FlightServiceImpl {
+ public:
+  explicit FlightServiceImpl(FlightServerBase* base) : service_(base) {}
+  Status DoGet(const ServerCallContext& context, const Ticket& request,
+               ServerDataStream* stream);
+  FlightServerBase* base() const { return service_; }
+
+ private:
+  FlightServerBase* service_;
+};
+
 /// An implementation of a Flight server for a particular transport.
 class ARROW_FLIGHT_EXPORT ServerTransportImpl {
  public:
@@ -125,7 +148,7 @@ class ARROW_FLIGHT_EXPORT ServerTransportImpl {
 
   /// Initialize the server.
   virtual Status Init(const FlightServerOptions& options, const arrow::internal::Uri& uri,
-                      FlightServerBase* server) = 0;
+                      FlightServiceImpl* service) = 0;
   /// Shutdown the server. Once this returns, the server is no longer listening.
   virtual Status Shutdown() = 0;
   /// Wait for the server to shutdown. Once this returns, the server is no longer

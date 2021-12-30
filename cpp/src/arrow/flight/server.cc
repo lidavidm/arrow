@@ -374,7 +374,7 @@ class DoExchangeMessageWriter : public FlightMessageWriter {
   bool dictionaries_written_ = false;
 };
 
-class FlightServiceImpl;
+class FlightGrpcServiceImpl;
 class GrpcServerCallContext : public ServerCallContext {
   explicit GrpcServerCallContext(grpc::ServerContext* context)
       : context_(context), peer_(context_->peer()) {}
@@ -410,7 +410,7 @@ class GrpcServerCallContext : public ServerCallContext {
   }
 
  private:
-  friend class FlightServiceImpl;
+  friend class FlightGrpcServiceImpl;
   ServerContext* context_;
   std::string peer_;
   std::string peer_identity_;
@@ -431,16 +431,35 @@ class GrpcAddCallHeaders : public AddCallHeaders {
   grpc::ServerContext* context_;
 };
 
+class GrpcServerDataStream : public internal::ServerDataStream {
+ public:
+  explicit GrpcServerDataStream(ServerWriter<pb::FlightData>* writer) : writer_(writer) {}
+  Status Write(const FlightPayload& payload) override {
+    return internal::WritePayload(payload, writer_);
+  }
+
+  Status WritesDone() {
+    // Cannot be implemented for gRPC servers.
+    return Status::OK();
+  }
+
+ private:
+  ServerWriter<pb::FlightData>* writer_;
+};
+
 // This class glues an implementation of FlightServerBase together with the
 // gRPC service definition, so the latter is not exposed in the public API
-class FlightServiceImpl : public FlightService::Service {
+class FlightGrpcServiceImpl : public FlightService::Service {
  public:
-  explicit FlightServiceImpl(
+  explicit FlightGrpcServiceImpl(
       std::shared_ptr<ServerAuthHandler> auth_handler,
       std::vector<std::pair<std::string, std::shared_ptr<ServerMiddlewareFactory>>>
           middleware,
-      FlightServerBase* server)
-      : auth_handler_(auth_handler), middleware_(middleware), server_(server) {}
+      internal::FlightServiceImpl* service)
+      : auth_handler_(auth_handler),
+        middleware_(middleware),
+        service_(service),
+        server_(service_->base()) {}
 
   template <typename UserType, typename Iterator, typename ProtoType>
   grpc::Status WriteStream(Iterator* iterator, ServerWriter<ProtoType>* writer) {
@@ -644,38 +663,9 @@ class FlightServiceImpl : public FlightService::Service {
     Ticket ticket;
     SERVICE_RETURN_NOT_OK(flight_context, internal::FromProto(*request, &ticket));
 
-    std::unique_ptr<FlightDataStream> data_stream;
-    SERVICE_RETURN_NOT_OK(flight_context,
-                          server_->DoGet(flight_context, ticket, &data_stream));
-
-    if (!data_stream) {
-      RETURN_WITH_MIDDLEWARE(flight_context, grpc::Status(grpc::StatusCode::NOT_FOUND,
-                                                          "No data in this flight"));
-    }
-
-    // Write the schema as the first message in the stream
-    FlightPayload schema_payload;
-    SERVICE_RETURN_NOT_OK(flight_context, data_stream->GetSchemaPayload(&schema_payload));
-    auto status = internal::WritePayload(schema_payload, writer);
-    if (status.IsIOError()) {
-      // gRPC doesn't give any way for us to know why the message
-      // could not be written.
-      RETURN_WITH_MIDDLEWARE(flight_context, grpc::Status::OK);
-    }
-    SERVICE_RETURN_NOT_OK(flight_context, status);
-
-    // Consume data stream and write out payloads
-    while (true) {
-      FlightPayload payload;
-      SERVICE_RETURN_NOT_OK(flight_context, data_stream->Next(&payload));
-      // End of stream
-      if (payload.ipc_message.metadata == nullptr) break;
-      auto status = internal::WritePayload(payload, writer);
-      // Connection terminated
-      if (status.IsIOError()) break;
-      SERVICE_RETURN_NOT_OK(flight_context, status);
-    }
-    RETURN_WITH_MIDDLEWARE(flight_context, grpc::Status::OK);
+    GrpcServerDataStream stream(writer);
+    RETURN_WITH_MIDDLEWARE(flight_context,
+                           service_->DoGet(flight_context, ticket, &stream));
   }
 
   grpc::Status DoPut(ServerContext* context,
@@ -756,6 +746,7 @@ class FlightServiceImpl : public FlightService::Service {
   std::shared_ptr<ServerAuthHandler> auth_handler_;
   std::vector<std::pair<std::string, std::shared_ptr<ServerMiddlewareFactory>>>
       middleware_;
+  internal::FlightServiceImpl* service_;
   FlightServerBase* server_;
 };
 
@@ -846,9 +837,9 @@ class ServerSignalHandler {
 class GrpcServerImpl : public internal::ServerTransportImpl {
  public:
   Status Init(const FlightServerOptions& options, const arrow::internal::Uri& uri,
-              FlightServerBase* server) override {
+              internal::FlightServiceImpl* server) override {
     service_.reset(
-        new FlightServiceImpl(options.auth_handler, options.middleware, server));
+        new FlightGrpcServiceImpl(options.auth_handler, options.middleware, server));
 
     grpc::ServerBuilder builder;
     // Allow uploading messages of any length
@@ -921,13 +912,14 @@ class GrpcServerImpl : public internal::ServerTransportImpl {
   Location location() const override { return location_; }
 
  private:
-  std::unique_ptr<FlightServiceImpl> service_;
+  std::unique_ptr<FlightGrpcServiceImpl> service_;
   std::unique_ptr<grpc::Server> server_;
   Location location_;
 };
 
 struct FlightServerBase::Impl {
   std::unique_ptr<internal::ServerTransportImpl> server_;
+  std::unique_ptr<internal::FlightServiceImpl> service_;
 
   // Signal handlers (on Windows) and the shutdown handler (other platforms)
   // are executed in a separate thread, so getting the current thread instance
@@ -1001,7 +993,8 @@ Status FlightServerBase::Init(const FlightServerOptions& options) {
         impl_->server_,
         internal::GetDefaultTransportImplRegistry()->MakeServerImpl(scheme));
   }
-  return impl_->server_->Init(options, *options.location.uri_, this);
+  impl_->service_.reset(new internal::FlightServiceImpl(this));
+  return impl_->server_->Init(options, *options.location.uri_, impl_->service_.get());
 }
 
 int FlightServerBase::port() const { return location().uri_->port(); }
