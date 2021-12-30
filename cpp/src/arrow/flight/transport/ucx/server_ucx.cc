@@ -18,6 +18,7 @@
 #include "arrow/flight/transport/ucx/ucx_internal.h"
 
 #include <atomic>
+#include <list>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -87,9 +88,11 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       RETURN_NOT_OK(FromUcsStatus("ucp_config_read", status));
 
       std::memset(&ucp_params, 0, sizeof(ucp_params));
-      ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
+      ucp_params.field_mask =
+          UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_MT_WORKERS_SHARED;
       // NOTE: sending data hangs without WAKEUP, why?
       ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_STREAM | UCP_FEATURE_WAKEUP;
+      ucp_params.mt_workers_shared = UCS_THREAD_MODE_MULTI;
 
       status = ucp_init(&ucp_params, ucp_config, &ucp_context_);
       ucp_config_release(ucp_config);
@@ -157,23 +160,26 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     running_.clear();
     status &= Wait();
 
-    // Reject all pending connections
-    std::unique_lock<std::mutex> guard(pending_connections_mutex_);
-    while (!pending_connections_.empty()) {
-      status &=
-          FromUcsStatus("ucp_listener_reject",
-                        ucp_listener_reject(listener_, pending_connections_.front()));
-      pending_connections_.pop();
+    {
+      // Reject all pending connections
+      std::unique_lock<std::mutex> guard(pending_connections_mutex_);
+      while (!pending_connections_.empty()) {
+        status &=
+            FromUcsStatus("ucp_listener_reject",
+                          ucp_listener_reject(listener_, pending_connections_.front()));
+        pending_connections_.pop();
+      }
+      ucp_listener_destroy(listener_);
+      ucp_worker_destroy(worker_conn_);
     }
-    ucp_listener_destroy(listener_);
-    ucp_worker_destroy(worker_conn_);
 
+    // Force cancellation of anything remaining
     ucp_worker_destroy(worker_service_);
-    ucp_cleanup(ucp_context_);
 
     status &= rpc_pool_->Shutdown();
     rpc_pool_.reset();
 
+    ucp_cleanup(ucp_context_);
     ucp_context_ = nullptr;
     return status;
   }
@@ -233,7 +239,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     RETURN_NOT_OK(Ticket::Deserialize(frame.buffer->ToString(), &ticket));
 
     std::unique_ptr<FlightDataStream> response;
-    // TODO: send error to client
     auto status = service_->DoGet(context, ticket, &response);
     if (!status.ok()) {
       std::vector<std::pair<std::string, std::string>> headers;
@@ -279,60 +284,53 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     return Status::OK();
   }
 
-  Status HandleOneCall(UcpCallDriver driver, Frame frame) {
-    RETURN_NOT_OK(driver.ExpectFrameType(frame, FrameType::kHeaders));
+  Status HandleOneCall(UcpCallDriver* driver, Frame frame) {
+    RETURN_NOT_OK(driver->ExpectFrameType(frame, FrameType::kHeaders));
     ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame.buffer)));
     ARROW_ASSIGN_OR_RAISE(auto method, headers.Get(":method:"));
     if (method == "arrow.flight.protocol.FlightService/GetFlightInfo") {
-      RETURN_NOT_OK(HandleGetFlightInfo(&driver));
+      return HandleGetFlightInfo(driver);
     } else if (method == "arrow.flight.protocol.FlightService/DoGet") {
-      RETURN_NOT_OK(HandleDoGet(&driver));
-    } else {
-      // TODO: send error to client
-      return Status::NotImplemented(method);
+      return HandleDoGet(driver);
     }
-    WaitForRequestAsync(std::move(driver));
-    return Status::OK();
+    // TODO: send error to client
+    // TODO: must drain messages before continuing
+    return Status::NotImplemented(method);
   }
 
-  void WaitForRequestAsync(UcpCallDriver&& driver) {
+  void WaitForRequestAsync(std::list<UcpCallDriver>::iterator driver) {
     CallbackOptions options;
     options.should_schedule = ShouldSchedule::Always;
     options.executor = rpc_pool_.get();
 
     struct {
-      void operator()(const arrow::Result<Frame>& result) {
-        if (!result.ok()) {
-          // Break reference cycle?
-          future = Future<Frame>();
-          if (result.status().code() == StatusCode::Cancelled) {
-            // Client disconnected
+      void operator()(const Status& st) {
+        if (st.code() == StatusCode::Cancelled) {
+          impl->DisconnectClient(driver);
+          return;
+        } else if (!st.ok()) {
+          // TODO:
+          DCHECK(false) << "NYI failure: " << st.ToString();
+          return;
+        } else {
+          auto status = impl->HandleOneCall(&*driver, driver->MoveLastFrame());
+          if (!status.ok()) {
+            // TODO: should be sent as an RST_STREAM or something
+            // TODO: disconnect
+            impl->ReportError(std::move(status));
             return;
           }
-          // TODO:
-          DCHECK(false) << "NYI failure: " << result.status().ToString();
         }
-
-        auto status =
-            impl->HandleOneCall(std::move(driver), future.MoveResult().MoveValueUnsafe());
-        // Break reference cycle?
-        future = Future<Frame>();
-        if (!status.ok()) {
-          impl->ReportError(std::move(status));
-        }
+        impl->WaitForRequestAsync(driver);
       }
 
       UcxServerImpl* impl;
-      UcpCallDriver driver;
-      // TODO: Hmm. This will cause a memory leak.
-      Future<Frame> future;
+      std::list<UcpCallDriver>::iterator driver;
     } HandleRpc;
 
     HandleRpc.impl = this;
-    HandleRpc.driver = std::move(driver);
-    HandleRpc.future = HandleRpc.driver.ReadFrameAsync();
-    auto future = HandleRpc.future;
-    future.AddCallback(std::move(HandleRpc), options);
+    HandleRpc.driver = driver;
+    HandleRpc.driver->ReadFrameAsync().AddCallback(std::move(HandleRpc), options);
   }
 
   void DriveWorker() {
@@ -360,29 +358,17 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
           continue;
         }
 
-        UcpCallDriver driver(worker_service_, client_endpoint);
-        WaitForRequestAsync(std::move(driver));
-
-        //   {
-        //     // Close the connection
-        //     void* request = ucp_ep_close_nb(client_endpoint, UCP_EP_CLOSE_MODE_FLUSH);
-        //     if (UCS_PTR_IS_ERR(request)) {
-        //       ReportError(FromUcsStatus("ucp_ep_close_nb", UCS_PTR_STATUS(request)));
-        //     } else if (UCS_PTR_IS_PTR(request)) {
-        //       ucs_status_t status;
-        //       do {
-        //         ucp_worker_progress(worker_service_);
-        //         status = ucp_request_check_status(request);
-        //       } while (status == UCS_INPROGRESS);
-        //       ucp_request_free(request);
-        //       if (status != UCS_OK) {
-        //         ReportError(FromUcsStatus("ucp_request_check_status", status));
-        //       }
-        //     } else {
-        //       DCHECK(!request);
-        //     }
-        //   }
-        // });
+        active_connections_.emplace_back(worker_service_, client_endpoint);
+        WaitForRequestAsync(--active_connections_.end());
+      }
+      while (!pending_close_.empty()) {
+        auto client = pending_close_.front();
+        pending_close_.pop();
+        auto status = client->Close();
+        if (!status.ok()) {
+          ReportError(std::move(status));
+        }
+        active_connections_.erase(client);
       }
     }
   }
@@ -390,6 +376,13 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   void EnqueueClient(ucp_conn_request_h connection_request) {
     std::unique_lock<std::mutex> guard(pending_connections_mutex_);
     pending_connections_.push(connection_request);
+  }
+
+  void DisconnectClient(std::list<UcpCallDriver>::iterator client) {
+    // Shutting down an endpoint has to be done from the same thread
+    // as it was created(?) so just enqueue it here
+    std::unique_lock<std::mutex> guard(pending_connections_mutex_);
+    pending_close_.push(client);
   }
 
   /// Handle errors during server worker loop execution
@@ -412,6 +405,8 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
   std::mutex pending_connections_mutex_;
   std::queue<ucp_conn_request_h> pending_connections_;
+  std::list<UcpCallDriver> active_connections_;
+  std::queue<std::list<UcpCallDriver>::iterator> pending_close_;
 };
 
 /// Callback handler. A new client has connected to the server.

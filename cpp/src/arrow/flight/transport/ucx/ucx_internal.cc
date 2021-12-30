@@ -272,7 +272,7 @@ class UcpCallDriver::Impl {
     return Frame{static_cast<FrameType>(frame_header[1]), std::move(incoming_message)};
   }
 
-  Future<Frame> ReadFrameAsync() {
+  Future<> ReadFrameAsync() {
     ucp_request_param_t request_param;
     request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK |
                                  UCP_OP_ATTR_FIELD_USER_DATA;
@@ -281,7 +281,7 @@ class UcpCallDriver::Impl {
     request_param.user_data = this;
 
     read_state_ = RequestState::kNeedBody;
-    auto result = Future<Frame>::Make();
+    auto result = Future<>::Make();
     read_future_ = result;
     void* request =
         ucp_stream_recv_nbx(endpoint_, frame_header_, 8, &read_length_, &request_param);
@@ -291,6 +291,8 @@ class UcpCallDriver::Impl {
     }
     return result;
   }
+
+  Frame&& MoveLastFrame() { return std::move(read_frame_); }
 
   Status SendFrame(FrameType frame_type, const uint8_t* data, const int64_t size) {
     void* request = nullptr;
@@ -390,6 +392,26 @@ class UcpCallDriver::Impl {
     return Status::OK();
   }
 
+  Status Close() {
+    void* request = ucp_ep_close_nb(endpoint_, UCP_EP_CLOSE_MODE_FLUSH);
+    if (UCS_PTR_IS_ERR(request)) {
+      return FromUcsStatus("ucp_ep_close_nb", UCS_PTR_STATUS(request));
+    } else if (UCS_PTR_IS_PTR(request)) {
+      ucs_status_t status;
+      do {
+        ucp_worker_progress(worker_);
+        status = ucp_request_check_status(request);
+      } while (status == UCS_INPROGRESS);
+      ucp_request_free(request);
+      if (status != UCS_OK) {
+        return FromUcsStatus("ucp_request_check_status", status);
+      }
+    } else {
+      DCHECK(!request);
+    }
+    return Status::OK();
+  }
+
  private:
   static void StreamRecvCallback(void* request, ucs_status_t status, size_t length,
                                  void* user_data) {
@@ -460,7 +482,7 @@ class UcpCallDriver::Impl {
               Status::IOError("Unknown frame type ", frame_header_[1]));
           return;
         }
-        read_type_ = static_cast<FrameType>(frame_header_[1]);
+        read_frame_.type = static_cast<FrameType>(frame_header_[1]);
 
         // Read the actual payload
         ucp_request_param_t request_param;
@@ -474,7 +496,7 @@ class UcpCallDriver::Impl {
         const int32_t payload_length = BeBytesToInt32(frame_header_ + 4);
         DCHECK_GT(payload_length, 0);
 
-        auto status = AllocateBuffer(payload_length).Value(&read_buffer_);
+        auto status = AllocateBuffer(payload_length).Value(&read_frame_.buffer);
         if (!status.ok()) {
           read_state_ = RequestState::kIdle;
           read_future_.MarkFinished(std::move(status));
@@ -482,8 +504,8 @@ class UcpCallDriver::Impl {
         }
 
         void* request =
-            ucp_stream_recv_nbx(endpoint_, read_buffer_->mutable_data(), payload_length,
-                                &read_length_, &request_param);
+            ucp_stream_recv_nbx(endpoint_, read_frame_.buffer->mutable_data(),
+                                payload_length, &read_length_, &request_param);
         if (!request) {
           // TODO:
           DCHECK(false) << "NYI";
@@ -492,20 +514,17 @@ class UcpCallDriver::Impl {
       }
       case RequestState::kFinished: {
         read_state_ = RequestState::kIdle;
-
-        Frame frame{read_type_, std::move(read_buffer_)};
-        read_future_.MarkFinished(std::move(frame));
+        read_future_.MarkFinished();
         break;
       }
     }
   }
   // Scratch space for async requests
   RequestState read_state_ = RequestState::kIdle;
-  Future<Frame> read_future_;
+  Future<> read_future_;
+  Frame read_frame_;
   uint8_t frame_header_[8] = {0};
   size_t read_length_ = 0;
-  FrameType read_type_;
-  std::unique_ptr<Buffer> read_buffer_;
 };
 
 UcpCallDriver::UcpCallDriver() : impl_(nullptr) {}
@@ -517,7 +536,9 @@ UcpCallDriver::~UcpCallDriver() = default;
 
 arrow::Result<Frame> UcpCallDriver::ReadNextFrame() { return impl_->ReadNextFrame(); }
 
-Future<Frame> UcpCallDriver::ReadFrameAsync() { return impl_->ReadFrameAsync(); }
+Future<> UcpCallDriver::ReadFrameAsync() { return impl_->ReadFrameAsync(); }
+
+Frame&& UcpCallDriver::MoveLastFrame() { return impl_->MoveLastFrame(); }
 
 Status UcpCallDriver::ExpectFrameType(const Frame& frame, FrameType type) {
   // TODO: need equivalent of RST_STREAM
@@ -571,6 +592,8 @@ Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
 Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
   return impl_->SendFlightPayload(payload);
 }
+
+Status UcpCallDriver::Close() { return impl_->Close(); }
 
 }  // namespace ucx
 }  // namespace transport

@@ -120,9 +120,17 @@ class UcpCallDriver {
   Status SendFlightPayload(const FlightPayload& payload);
 
   arrow::Result<Frame> ReadNextFrame();
-  Future<Frame> ReadFrameAsync();
+
+  /// Read the next frame asynchronously.
+  ///
+  /// Due to difficulties with Future<T> and move-only types, the read
+  /// frame must be retrieved separately with MoveLastFrame.
+  Future<> ReadFrameAsync();
+  Frame&& MoveLastFrame();
 
   Status ExpectFrameType(const Frame& frame, FrameType type);
+
+  Status Close();
 
  private:
   class Impl;
