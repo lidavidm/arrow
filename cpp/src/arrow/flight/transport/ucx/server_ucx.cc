@@ -42,6 +42,17 @@ namespace flight {
 namespace transport {
 namespace ucx {
 
+// Send an error to the client and return OK.
+// Statuses returned up to the main server loop trigger a kReset instead.
+#define SERVER_RETURN_NOT_OK(driver, status) \
+  do {                                       \
+    ::arrow::Status s = (status);            \
+    if (!s.ok()) {                           \
+      RETURN_NOT_OK(driver->SendStatus(s));  \
+      return ::arrow::Status::OK();          \
+    }                                        \
+  } while (false)
+
 namespace {
 class UcxServerCallContext : public flight::ServerCallContext {
  public:
@@ -207,25 +218,18 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     ARROW_ASSIGN_OR_RAISE(auto frame, driver->ReadNextFrame());
     RETURN_NOT_OK(driver->ExpectFrameType(frame, FrameType::kPayload));
     FlightDescriptor descriptor;
-    RETURN_NOT_OK(FlightDescriptor::Deserialize(frame.buffer->ToString(), &descriptor));
+    SERVER_RETURN_NOT_OK(
+        driver, FlightDescriptor::Deserialize(frame.buffer->ToString(), &descriptor));
 
     std::unique_ptr<FlightInfo> info;
     // TODO: need to read client's trailers (for cancellations and such), asynchronously
-    auto status = service_->GetFlightInfo(context, descriptor, &info);
-
-    if (status.ok()) {
-      // Send response to client
-      std::string response;
-      RETURN_NOT_OK(info->SerializeToString(&response));
-      RETURN_NOT_OK(driver->SendPayload(reinterpret_cast<const uint8_t*>(response.data()),
-                                        static_cast<int64_t>(response.size())));
-    }
-
-    std::vector<std::pair<std::string, std::string>> headers;
-    headers.emplace_back("flight-status-code",
-                         std::to_string(static_cast<int32_t>(status.code())));
-    headers.emplace_back("flight-status-message", status.ToString());
-    RETURN_NOT_OK(driver->SendHeaders(headers));
+    SERVER_RETURN_NOT_OK(driver, service_->GetFlightInfo(context, descriptor, &info));
+    // Send response to client
+    std::string response;
+    SERVER_RETURN_NOT_OK(driver, info->SerializeToString(&response));
+    RETURN_NOT_OK(driver->SendPayload(reinterpret_cast<const uint8_t*>(response.data()),
+                                      static_cast<int64_t>(response.size())));
+    RETURN_NOT_OK(driver->SendStatus(Status::OK()));
     return Status::OK();
   }
 
@@ -236,51 +240,28 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     RETURN_NOT_OK(driver->ExpectFrameType(frame, FrameType::kPayload));
     Ticket ticket;
     // TODO: don't allocate a new string
-    RETURN_NOT_OK(Ticket::Deserialize(frame.buffer->ToString(), &ticket));
+    SERVER_RETURN_NOT_OK(driver, Ticket::Deserialize(frame.buffer->ToString(), &ticket));
 
     std::unique_ptr<FlightDataStream> response;
-    auto status = service_->DoGet(context, ticket, &response);
-    if (!status.ok()) {
-      std::vector<std::pair<std::string, std::string>> headers;
-      headers.emplace_back("flight-status-code",
-                           std::to_string(static_cast<int32_t>(status.code())));
-      headers.emplace_back("flight-status-message", status.ToString());
-      RETURN_NOT_OK(driver->SendHeaders(headers));
-      return Status::OK();
-    }
-
+    SERVER_RETURN_NOT_OK(driver, service_->DoGet(context, ticket, &response));
     if (!response) {
-      std::vector<std::pair<std::string, std::string>> headers;
-      headers.emplace_back("flight-status-code",
-                           std::to_string(static_cast<int32_t>(StatusCode::KeyError)));
-      headers.emplace_back("flight-status-message", "Flight not found");
-      RETURN_NOT_OK(driver->SendHeaders(headers));
+      RETURN_NOT_OK(driver->SendStatus(Status::KeyError("Flight not found")));
       return Status::OK();
     }
 
     // Write the schema as the first message in the stream
-    // TODO: send errors to client
-    {
-      FlightPayload schema_payload;
-      RETURN_NOT_OK(response->GetSchemaPayload(&schema_payload));
-      RETURN_NOT_OK(driver->SendFlightPayload(schema_payload));
-    }
+    FlightPayload payload;
+    SERVER_RETURN_NOT_OK(driver, response->GetSchemaPayload(&payload));
+    RETURN_NOT_OK(driver->SendFlightPayload(payload));
 
     // Consume data stream and write out payloads
     while (true) {
-      FlightPayload payload;
-      RETURN_NOT_OK(response->Next(&payload));
+      SERVER_RETURN_NOT_OK(driver, response->Next(&payload));
       // End of stream
       if (payload.ipc_message.metadata == nullptr) break;
       RETURN_NOT_OK(driver->SendFlightPayload(payload));
     }
-
-    std::vector<std::pair<std::string, std::string>> headers;
-    headers.emplace_back("flight-status-code",
-                         std::to_string(static_cast<int32_t>(StatusCode::OK)));
-    headers.emplace_back("flight-status-message", "");
-    RETURN_NOT_OK(driver->SendHeaders(headers));
-
+    RETURN_NOT_OK(driver->SendStatus(Status::OK()));
     return Status::OK();
   }
 

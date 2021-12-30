@@ -584,6 +584,17 @@ Status UcpCallDriver::SendHeaders(
   return Status::OK();
 }
 
+Status UcpCallDriver::SendStatus(
+    const Status& status,
+    const std::vector<std::pair<std::string, std::string>>& headers) {
+  // TODO: need to translate status codes
+  auto all_headers = headers;
+  all_headers.emplace_back("flight-status-code",
+                           std::to_string(static_cast<int32_t>(status.code())));
+  all_headers.emplace_back("flight-status-message", status.ToString());
+  return SendHeaders(all_headers);
+}
+
 Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
   RETURN_NOT_OK(impl_->SendFrame(FrameType::kPayload, data, size));
   return Status::OK();

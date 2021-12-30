@@ -116,6 +116,8 @@ class UcpCallDriver {
   // Client side only.
   Status StartCall(const std::string& method);
   Status SendHeaders(const std::vector<std::pair<std::string, std::string>>& headers);
+  Status SendStatus(const Status& status,
+                    const std::vector<std::pair<std::string, std::string>>& headers = {});
   Status SendPayload(const uint8_t* data, const int64_t size);
   Status SendFlightPayload(const FlightPayload& payload);
 
