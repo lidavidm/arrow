@@ -274,9 +274,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     } else if (method == "arrow.flight.protocol.FlightService/DoGet") {
       return HandleDoGet(driver);
     }
-    // TODO: send error to client
+    RETURN_NOT_OK(driver->SendStatus(Status::NotImplemented(method)));
     // TODO: must drain messages before continuing
-    return Status::NotImplemented(method);
+    return Status::OK();
   }
 
   void WaitForRequestAsync(std::list<UcpCallDriver>::iterator driver) {
@@ -290,15 +290,14 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
           impl->DisconnectClient(driver);
           return;
         } else if (!st.ok()) {
-          // TODO:
-          DCHECK(false) << "NYI failure: " << st.ToString();
+          impl->ReportError(st);
+          impl->DisconnectClient(driver);
           return;
         } else {
           auto status = impl->HandleOneCall(&*driver, driver->MoveLastFrame());
           if (!status.ok()) {
-            // TODO: should be sent as an RST_STREAM or something
-            // TODO: disconnect
             impl->ReportError(std::move(status));
+            impl->DisconnectClient(driver);
             return;
           }
         }

@@ -253,7 +253,6 @@ class UcpCallDriver::Impl {
     DCHECK_EQ(actual_length, 8);
 
     if (frame_header[0] != kFrameVersion) {
-      // TODO: need RST_STREAM
       return Status::IOError("Expected frame version ", kFrameVersion, " but got ",
                              frame_header[0]);
     } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
@@ -286,8 +285,8 @@ class UcpCallDriver::Impl {
     void* request =
         ucp_stream_recv_nbx(endpoint_, frame_header_, 8, &read_length_, &request_param);
     if (!request) {
-      // TODO:
-      return Status::NotImplemented("NYI");
+      // Request completed immediately
+      OnAsyncRecv(request, UCS_OK, read_length_, this);
     }
     return result;
   }
@@ -334,9 +333,6 @@ class UcpCallDriver::Impl {
     void* request = nullptr;
     ucp_request_param_t request_param;
     request_param.op_attr_mask = 0;
-
-    // TODO: does UCX coalesce small writes? Is there a penalty for two
-    // separate sends when both are small?
 
     // Send frame header
     uint8_t header[8] = {0};
@@ -427,7 +423,6 @@ class UcpCallDriver::Impl {
     if (UCS_PTR_IS_ERR(request)) {
       return FromUcsStatus(context, UCS_PTR_STATUS(request));
     } else if (UCS_PTR_IS_PTR(request)) {
-      // TODO: callback based mode
       while (true) {
         auto status = ucp_request_check_status(request);
         if (status == UCS_OK) {
@@ -471,7 +466,6 @@ class UcpCallDriver::Impl {
         read_state_ = RequestState::kFinished;
 
         if (frame_header_[0] != kFrameVersion) {
-          // TODO: need RST_STREAM
           read_state_ = RequestState::kIdle;
           read_future_.MarkFinished(Status::IOError(
               "Expected frame version ", kFrameVersion, " but got ", frame_header_[0]));
@@ -507,8 +501,9 @@ class UcpCallDriver::Impl {
             ucp_stream_recv_nbx(endpoint_, read_frame_.buffer->mutable_data(),
                                 payload_length, &read_length_, &request_param);
         if (!request) {
-          // TODO:
-          DCHECK(false) << "NYI";
+          // Request completed immediately
+          read_state_ = RequestState::kIdle;
+          read_future_.MarkFinished();
         }
         break;
       }
@@ -541,7 +536,6 @@ Future<> UcpCallDriver::ReadFrameAsync() { return impl_->ReadFrameAsync(); }
 Frame&& UcpCallDriver::MoveLastFrame() { return impl_->MoveLastFrame(); }
 
 Status UcpCallDriver::ExpectFrameType(const Frame& frame, FrameType type) {
-  // TODO: need equivalent of RST_STREAM
   if (frame.type != type) {
     return Status::IOError("Expected frame type ", static_cast<int32_t>(type),
                            ", but got frame type ", static_cast<int32_t>(frame.type));
