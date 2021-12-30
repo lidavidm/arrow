@@ -67,9 +67,11 @@ class UcxServerCallContext : public flight::ServerCallContext {
   std::string peer_;
 };
 
-class UcxServerDataStream : public internal::ServerDataStream {
+class UcxTransportDataStream : public internal::TransportDataStream {
  public:
-  explicit UcxServerDataStream(UcpCallDriver* driver) : driver_(driver) {}
+  explicit UcxTransportDataStream(UcpCallDriver* driver) : driver_(driver) {}
+
+  bool Read(internal::FlightData* data) override { return false; }
 
   Status Write(const FlightPayload& payload) override {
     return driver_->SendFlightPayload(payload);
@@ -257,7 +259,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     // TODO: don't allocate a new string
     SERVER_RETURN_NOT_OK(driver, Ticket::Deserialize(frame.buffer->ToString(), &ticket));
 
-    UcxServerDataStream stream(driver);
+    UcxTransportDataStream stream(driver);
     auto status = service_->DoGet(context, ticket, &stream);
     RETURN_NOT_OK(driver->SendStatus(status));
     return Status::OK();

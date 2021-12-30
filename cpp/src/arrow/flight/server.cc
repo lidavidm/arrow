@@ -431,9 +431,13 @@ class GrpcAddCallHeaders : public AddCallHeaders {
   grpc::ServerContext* context_;
 };
 
-class GrpcServerDataStream : public internal::ServerDataStream {
+class GrpcTransportDataStream : public internal::TransportDataStream {
  public:
-  explicit GrpcServerDataStream(ServerWriter<pb::FlightData>* writer) : writer_(writer) {}
+  explicit GrpcTransportDataStream(ServerWriter<pb::FlightData>* writer)
+      : writer_(writer) {}
+
+  bool Read(internal::FlightData* data) override { return false; }
+
   Status Write(const FlightPayload& payload) override {
     return internal::WritePayload(payload, writer_);
   }
@@ -663,7 +667,7 @@ class FlightGrpcServiceImpl : public FlightService::Service {
     Ticket ticket;
     SERVICE_RETURN_NOT_OK(flight_context, internal::FromProto(*request, &ticket));
 
-    GrpcServerDataStream stream(writer);
+    GrpcTransportDataStream stream(writer);
     RETURN_WITH_MIDDLEWARE(flight_context,
                            service_->DoGet(flight_context, ticket, &stream));
   }

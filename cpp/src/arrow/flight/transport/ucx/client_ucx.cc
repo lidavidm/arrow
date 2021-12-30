@@ -36,98 +36,90 @@ namespace flight {
 namespace transport {
 namespace ucx {
 
-class UcxIpcMessageReader : public ipc::MessageReader {
+class UcxClientDataStream : public internal::ClientDataStream {
  public:
-  explicit UcxIpcMessageReader(UcpCallDriver&& driver)
-      : driver_(std::move(driver)), stream_finished_(false) {}
+  explicit UcxClientDataStream(UcpCallDriver&& driver)
+      : driver_(std::move(driver)), finished_(false) {}
 
-  arrow::Result<std::unique_ptr<ipc::Message>> ReadNextMessage() override {
-    if (stream_finished_) return nullptr;
+  bool Read(internal::FlightData* data) {
+    if (finished_) return false;
 
-    ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver_.ReadNextFrame());
-    if (incoming_message.type == FrameType::kHeaders) {
+    bool success = true;
+    io_status_ = ReadImpl(data).Value(&success);
+
+    if (!io_status_.ok() || !success) {
+      finished_ = true;
+      return false;
+    }
+    return true;
+  }
+
+  ::arrow::Result<bool> ReadImpl(internal::FlightData* data) {
+    ARROW_ASSIGN_OR_RAISE(auto frame, driver_.ReadNextFrame());
+
+    if (frame.type == FrameType::kHeaders) {
       // Trailers, stream is over
-      stream_finished_ = true;
-      ARROW_ASSIGN_OR_RAISE(auto headers,
-                            HeadersFrame::Parse(std::move(incoming_message.buffer)));
+      ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame.buffer)));
       ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
       ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));
       auto code = std::strtol(code_str.data(), nullptr, /*base=*/10);
       auto status_code = static_cast<StatusCode>(code);
       if (status_code == StatusCode::OK) {
-        stream_finished_ = true;
-        return nullptr;
+        server_status_ = Status::OK();
+      } else {
+        server_status_ = Status(status_code, std::string(message_str), nullptr);
       }
-      return Status(status_code, std::string(message_str), nullptr);
+      return false;
     }
-    RETURN_NOT_OK(driver_.ExpectFrameType(incoming_message, FrameType::kPayload));
+    RETURN_NOT_OK(driver_.ExpectFrameType(frame, FrameType::kPayload));
 
-    std::shared_ptr<Buffer> buffer = std::move(incoming_message.buffer);
+    std::shared_ptr<Buffer> buffer = std::move(frame.buffer);
     const uint8_t* payload = buffer->data();
     const int32_t metadata_len = BeBytesToInt32(payload);
-    auto metadata = SliceBuffer(buffer, 4, metadata_len);
-    std::shared_ptr<Buffer> body;
+    data->metadata = SliceBuffer(buffer, 4, metadata_len);
     if (metadata_len < buffer->size()) {
       const int32_t body_len = BeBytesToInt32(payload + 4 + metadata_len);
-      body = SliceBuffer(buffer, 4 + metadata_len + 4, body_len);
+      data->body = SliceBuffer(buffer, 4 + metadata_len + 4, body_len);
     } else {
-      body = std::make_shared<Buffer>(nullptr, 0);
+      data->body = std::make_shared<Buffer>(nullptr, 0);
+    }
+    return true;
+  }
+
+  Status Write(const FlightPayload& payload) { return Status::NotImplemented("NYI"); }
+  Status WritesDone() { return Status::NotImplemented("NYI"); }
+  Status Finish(Status st) {
+    if (finished_) {
+      return MergeStatus(std::move(st));
     }
 
-    // TODO: errors here also need to end stream, drain the stream
-    // Validate IPC message
-    ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(metadata, body));
-    return message;
+    internal::FlightData message;
+    while (Read(&message)) {
+    }
+
+    // TODO: frankly, this can get refactored back out into client.cc
+    finished_ = true;
+    return MergeStatus(std::move(st));
+  }
+  void TryCancel() {
+    // TODO: not implemented
   }
 
  private:
+  Status MergeStatus(Status&& st) {
+    if (server_status_.ok()) {
+      return std::move(st);
+    }
+    return Status::FromDetailAndArgs(server_status_.code(), server_status_.detail(),
+                                     server_status_.message(),
+                                     ". Client context: ", st.ToString(),
+                                     ". Transport context: ", io_status_.ToString());
+  }
+
   UcpCallDriver driver_;
-  bool stream_finished_;
-};
-
-class ARROW_FLIGHT_EXPORT UcxFlightStreamReader : public FlightStreamReader {
- public:
-  explicit UcxFlightStreamReader(std::unique_ptr<ipc::MessageReader> reader)
-      : message_reader_(std::move(reader)) {}
-  arrow::Result<std::shared_ptr<Schema>> GetSchema() override {
-    RETURN_NOT_OK(EnsureStarted());
-    return reader_->schema();
-  }
-  Status Next(FlightStreamChunk* next) override {
-    RETURN_NOT_OK(EnsureStarted());
-    next->app_metadata = nullptr;
-    RETURN_NOT_OK(reader_->ReadNext(&next->data));
-    return Status::OK();
-  }
-  void Cancel() override {}
-
-  Status ReadAll(std::vector<std::shared_ptr<RecordBatch>>* batches,
-                 const StopToken& stop_token) {
-    // TODO: this should be moved to a default method
-    FlightStreamChunk chunk;
-
-    while (true) {
-      if (stop_token.IsStopRequested()) {
-        Cancel();
-        return stop_token.Poll();
-      }
-      RETURN_NOT_OK(Next(&chunk));
-      if (!chunk.data) break;
-      batches->emplace_back(std::move(chunk.data));
-    }
-    return Status::OK();
-  }
-
- private:
-  Status EnsureStarted() {
-    if (!message_reader_) return Status::OK();
-    ARROW_ASSIGN_OR_RAISE(reader_,
-                          ipc::RecordBatchStreamReader::Open(std::move(message_reader_)));
-    return Status::OK();
-  }
-
-  std::unique_ptr<ipc::MessageReader> message_reader_;
-  std::shared_ptr<ipc::RecordBatchReader> reader_;
+  bool finished_;
+  Status io_status_;
+  Status server_status_;
 };
 
 class ARROW_FLIGHT_EXPORT UcxClientImpl
@@ -258,7 +250,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   }
 
   Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
-               std::unique_ptr<FlightStreamReader>* stream) override {
+               std::unique_ptr<internal::ClientDataStream>* stream) override {
     UcpCallDriver driver(ucp_worker_, remote_endpoint_);
     RETURN_NOT_OK(driver.StartCall("arrow.flight.protocol.FlightService/DoGet"));
 
@@ -269,8 +261,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
                                        static_cast<int64_t>(payload.size())));
     }
 
-    auto reader = arrow::internal::make_unique<UcxIpcMessageReader>(std::move(driver));
-    *stream = arrow::internal::make_unique<UcxFlightStreamReader>(std::move(reader));
+    *stream = arrow::internal::make_unique<UcxClientDataStream>(std::move(driver));
     return Status::OK();
   }
 

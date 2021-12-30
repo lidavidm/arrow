@@ -58,6 +58,39 @@ class ServerCallContext;
 
 namespace internal {
 
+/// Internal, not user-visible type used for memory-efficient reads from gRPC
+/// stream
+struct FlightData {
+  /// Used only for puts, may be null
+  std::unique_ptr<FlightDescriptor> descriptor;
+
+  /// Non-length-prefixed Message header as described in format/Message.fbs
+  std::shared_ptr<Buffer> metadata;
+
+  /// Application-defined metadata
+  std::shared_ptr<Buffer> app_metadata;
+
+  /// Message body
+  std::shared_ptr<Buffer> body;
+
+  /// Open IPC message from the metadata and body
+  ::arrow::Result<std::unique_ptr<ipc::Message>> OpenMessage();
+};
+
+class ARROW_FLIGHT_EXPORT TransportDataStream {
+ public:
+  virtual ~TransportDataStream() = default;
+  virtual bool Read(FlightData* data) = 0;
+  virtual Status Write(const FlightPayload& payload) = 0;
+  virtual Status WritesDone() = 0;
+};
+class ARROW_FLIGHT_EXPORT ClientDataStream : public TransportDataStream {
+ public:
+  /// \brief Finish the call, adding server context to the given status.
+  virtual Status Finish(Status status) = 0;
+  virtual void TryCancel() {}
+};
+
 /// An implementation of a Flight client for a particular transport.
 class ARROW_FLIGHT_EXPORT ClientTransportImpl {
  public:
@@ -101,7 +134,7 @@ class ARROW_FLIGHT_EXPORT ClientTransportImpl {
     return Status::NotImplemented("NYI");
   }
   virtual Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
-                       std::unique_ptr<FlightStreamReader>* stream) {
+                       std::unique_ptr<ClientDataStream>* stream) {
     return Status::NotImplemented("NYI");
   }
   virtual Status DoPut(const FlightCallOptions& options,
@@ -119,14 +152,6 @@ class ARROW_FLIGHT_EXPORT ClientTransportImpl {
   }
 };
 
-class ARROW_FLIGHT_EXPORT ServerDataStream {
- public:
-  virtual ~ServerDataStream() = default;
-  // virtual Status Read(FlightData* data) = 0;
-  virtual Status Write(const FlightPayload& payload) = 0;
-  virtual Status WritesDone() = 0;
-};
-
 /// The implementation of the Flight service. Transport
 /// implementations should implement the necessary interfaces and call
 /// methods of this service.
@@ -134,7 +159,7 @@ class ARROW_FLIGHT_EXPORT FlightServiceImpl {
  public:
   explicit FlightServiceImpl(FlightServerBase* base) : service_(base) {}
   Status DoGet(const ServerCallContext& context, const Ticket& request,
-               ServerDataStream* stream);
+               TransportDataStream* stream);
   FlightServerBase* base() const { return service_; }
 
  private:

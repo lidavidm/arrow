@@ -29,7 +29,7 @@ namespace flight {
 namespace internal {
 
 Status FlightServiceImpl::DoGet(const ServerCallContext& context, const Ticket& ticket,
-                                ServerDataStream* stream) {
+                                TransportDataStream* stream) {
   std::unique_ptr<FlightDataStream> data_stream;
   RETURN_NOT_OK(service_->DoGet(context, ticket, &data_stream));
 

@@ -23,6 +23,7 @@
 #include <memory>
 
 #include "arrow/flight/internal.h"
+#include "arrow/flight/transport_impl.h"
 #include "arrow/flight/types.h"
 #include "arrow/ipc/message.h"
 #include "arrow/result.h"
@@ -33,25 +34,6 @@ class Buffer;
 
 namespace flight {
 namespace internal {
-
-/// Internal, not user-visible type used for memory-efficient reads from gRPC
-/// stream
-struct FlightData {
-  /// Used only for puts, may be null
-  std::unique_ptr<FlightDescriptor> descriptor;
-
-  /// Non-length-prefixed Message header as described in format/Message.fbs
-  std::shared_ptr<Buffer> metadata;
-
-  /// Application-defined metadata
-  std::shared_ptr<Buffer> app_metadata;
-
-  /// Message body
-  std::shared_ptr<Buffer> body;
-
-  /// Open IPC message from the metadata and body
-  ::arrow::Result<std::unique_ptr<ipc::Message>> OpenMessage();
-};
 
 /// Write Flight message on gRPC stream with zero-copy optimizations.
 // Returns Invalid if the payload is ill-formed
@@ -78,6 +60,10 @@ bool ReadPayload(grpc::ServerReaderWriter<pb::FlightData, pb::FlightData>* reade
 // Overload to make genericity easier in DoPutPayloadWriter
 bool ReadPayload(grpc::ClientReaderWriter<pb::FlightData, pb::PutResult>* reader,
                  pb::PutResult* data);
+
+static inline bool ReadPayload(ClientDataStream* reader, FlightData* data) {
+  return reader->Read(data);
+}
 
 // We want to reuse RecordBatchStreamReader's implementation while
 // (1) Adapting it to the Flight message format
