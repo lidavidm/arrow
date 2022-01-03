@@ -235,40 +235,13 @@ class UcpCallDriver::Impl {
   Impl(ucp_worker_h worker, ucp_ep_h endpoint) : worker_(worker), endpoint_(endpoint) {}
 
   arrow::Result<Frame> ReadNextFrame() {
-    void* request = nullptr;
-    size_t actual_length = 0;
-
-    ucp_request_param_t request_param;
-    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK |
-                                 UCP_OP_ATTR_FIELD_USER_DATA;
-    request_param.cb.recv_stream = StreamRecvCallback;
-    request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
-    request_param.user_data = &actual_length;
-
-    // Read frame header
-    uint8_t frame_header[8] = {0};
-    request =
-        ucp_stream_recv_nbx(endpoint_, frame_header, 8, &actual_length, &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_recv_nbx", request));
-    DCHECK_EQ(actual_length, 8);
-
-    if (frame_header[0] != kFrameVersion) {
-      return Status::IOError("Expected frame version ", kFrameVersion, " but got ",
-                             frame_header[0]);
-    } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
-      return Status::IOError("Unknown frame type ", frame_header[1]);
+    // TODO: reimplement the client/server async, get rid of sync methods here
+    auto fut = ReadFrameAsync();
+    while (!fut.is_finished()) {
+      ucp_worker_progress(worker_);
     }
-
-    // Read payload itself
-    // TODO: try ucp_stream_recv_data_nb which has UCX allocate memory instead
-    const int32_t payload_length = BeBytesToInt32(frame_header + 4);
-    DCHECK_GT(payload_length, 0);
-    ARROW_ASSIGN_OR_RAISE(auto incoming_message, AllocateBuffer(payload_length));
-    request =
-        ucp_stream_recv_nbx(endpoint_, incoming_message->mutable_data(),
-                            incoming_message->size(), &actual_length, &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_recv_nbx", request));
-    return Frame{static_cast<FrameType>(frame_header[1]), std::move(incoming_message)};
+    RETURN_NOT_OK(fut.status());
+    return MoveLastFrame();
   }
 
   Future<> ReadFrameAsync() {
@@ -282,6 +255,7 @@ class UcpCallDriver::Impl {
     read_state_ = RequestState::kNeedBody;
     auto result = Future<>::Make();
     read_future_ = result;
+    // TODO: try ucp_stream_recv_data_nb which has UCX allocate memory instead
     void* request =
         ucp_stream_recv_nbx(endpoint_, frame_header_, 8, &read_length_, &request_param);
     if (!request) {
@@ -452,7 +426,7 @@ class UcpCallDriver::Impl {
 
   void OnAsyncRecv(void* request, ucs_status_t status, size_t length, void* user_data) {
     read_length_ = length;
-    ucp_request_free(request);
+    if (request) ucp_request_free(request);
     if (status != UCS_OK) {
       read_future_.MarkFinished(FromUcsStatus("ucp_stream_recv_nbx (async)", status));
       return;
