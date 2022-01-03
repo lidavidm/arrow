@@ -67,23 +67,24 @@ Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_IO_ERROR ", ucs_status_string(ucs_status));
     case UCS_ERR_NO_MEMORY:
-      return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_NO_MEMORY ", ucs_status_string(ucs_status));
+      return Status::OutOfMemory(context, ": UCX error ",
+                                 static_cast<int32_t>(ucs_status), ": ",
+                                 "UCS_ERR_NO_MEMORY ", ucs_status_string(ucs_status));
     case UCS_ERR_INVALID_PARAM:
-      return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
+      return Status::Invalid(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_INVALID_PARAM ",
                              ucs_status_string(ucs_status));
     case UCS_ERR_UNREACHABLE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_UNREACHABLE ", ucs_status_string(ucs_status));
     case UCS_ERR_INVALID_ADDR:
-      return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
+      return Status::Invalid(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_INVALID_ADDR ",
                              ucs_status_string(ucs_status));
     case UCS_ERR_NOT_IMPLEMENTED:
-      return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_NOT_IMPLEMENTED ",
-                             ucs_status_string(ucs_status));
+      return Status::NotImplemented(
+          context, ": UCX error ", static_cast<int32_t>(ucs_status), ": ",
+          "UCS_ERR_NOT_IMPLEMENTED ", ucs_status_string(ucs_status));
     case UCS_ERR_MESSAGE_TRUNCATED:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_MESSAGE_TRUNCATED ",
@@ -92,7 +93,7 @@ Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_NO_PROGRESS ", ucs_status_string(ucs_status));
     case UCS_ERR_BUFFER_TOO_SMALL:
-      return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
+      return Status::Invalid(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_BUFFER_TOO_SMALL ",
                              ucs_status_string(ucs_status));
     case UCS_ERR_NO_ELEM:
@@ -116,22 +117,22 @@ Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
                              ": ", "UCS_ERR_SHMEM_SEGMENT ",
                              ucs_status_string(ucs_status));
     case UCS_ERR_ALREADY_EXISTS:
-      return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_ALREADY_EXISTS ",
-                             ucs_status_string(ucs_status));
+      return Status::AlreadyExists(
+          context, ": UCX error ", static_cast<int32_t>(ucs_status), ": ",
+          "UCS_ERR_ALREADY_EXISTS ", ucs_status_string(ucs_status));
     case UCS_ERR_OUT_OF_RANGE:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_OUT_OF_RANGE ",
                              ucs_status_string(ucs_status));
     case UCS_ERR_TIMED_OUT:
-      return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_TIMED_OUT ", ucs_status_string(ucs_status));
+      return Status::Cancelled(context, ": UCX error ", static_cast<int32_t>(ucs_status),
+                               ": ", "UCS_ERR_TIMED_OUT ", ucs_status_string(ucs_status));
     case UCS_ERR_EXCEEDS_LIMIT:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_EXCEEDS_LIMIT ",
                              ucs_status_string(ucs_status));
     case UCS_ERR_UNSUPPORTED:
-      return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
+      return Status::Invalid(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_UNSUPPORTED ", ucs_status_string(ucs_status));
     case UCS_ERR_REJECTED:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
@@ -173,22 +174,6 @@ Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
           ucs_status_string(ucs_status));
   }
 }
-
-// Frame format
-
-// do we need to 8-byte align everything?
-
-// 1 byte: version tag
-// 1 byte: payload type
-// 4 bytes: frame length
-
-// type 00: headers
-// type 01: trailers
-// # of headers, followed by headers
-// header: header length, value length, header, value
-
-// type 02: payload
-// payload
 
 // TODO: we may invert the implementation here. mimic the IPC reader:
 // feed byte buffers into a state machine, get back either (1) not
