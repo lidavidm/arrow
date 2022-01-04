@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "arrow/buffer.h"
 #include "arrow/flight/transport_impl.h"
 #include "arrow/flight/visibility.h"
 #include "arrow/type_fwd.h"
@@ -79,10 +80,25 @@ ARROW_FLIGHT_EXPORT
 Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status);
 
 enum class FrameType : uint8_t {
+  // Key-value headers.
   kHeaders = 0,
+  // Binary blob.
   kPayload,
+  // A fragment of a FlightPayload. With the Active Message (AM) API,
+  // we send distinct buffers, so a payload has to get fragmented and
+  // sent as its constituent components (1x IPC header, 0-Nx buffers,
+  // ...) In that case the frame header contains an index and type
+  kFlightPayload,
   // Keep at end.
-  kMaxFrameType = kPayload,
+  kMaxFrameType = kFlightPayload,
+};
+
+enum class FlightPayloadSegmentType : uint8_t {
+  kInvalid = 0,
+  kIpcHeader = 1,
+  kIpcBodyBuffer = 2,
+  // Keep at end.
+  kMaxSegment = kIpcBodyBuffer,
 };
 
 class HeadersFrame {
@@ -98,8 +114,23 @@ class HeadersFrame {
 
 struct Frame {
   FrameType type;
+  // Only applicable if type == kFlightPayload
+  FlightPayloadSegmentType payload_segment_type;
+  int32_t segment_index;
+  int32_t total_segments;
   std::unique_ptr<Buffer> buffer;
+
+  Frame() = default;
+  Frame(FrameType type_, std::unique_ptr<Buffer> buffer_)
+      : type(type_),
+        payload_segment_type(FlightPayloadSegmentType::kInvalid),
+        segment_index(0),
+        total_segments(0),
+        buffer(std::move(buffer_)) {}
 };
+
+constexpr uint8_t kFrameVersion = 0x42;
+constexpr uint32_t kUcpAmHandlerId = 0x1024;
 
 class UcpCallDriver {
  public:
@@ -121,18 +152,17 @@ class UcpCallDriver {
   Status SendPayload(const uint8_t* data, const int64_t size);
   Status SendFlightPayload(const FlightPayload& payload);
 
-  arrow::Result<Frame> ReadNextFrame();
+  arrow::Result<std::shared_ptr<Frame>> ReadNextFrame();
 
   /// Read the next frame asynchronously.
-  ///
-  /// Due to difficulties with Future<T> and move-only types, the read
-  /// frame must be retrieved separately with MoveLastFrame.
-  Future<> ReadFrameAsync();
-  Frame&& MoveLastFrame();
+  Future<std::shared_ptr<Frame>> ReadFrameAsync();
 
   Status ExpectFrameType(const Frame& frame, FrameType type);
 
   Status Close();
+
+  void Push(std::shared_ptr<Frame> frame);
+  void Push(Status status);
 
  private:
   class Impl;

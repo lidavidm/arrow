@@ -18,10 +18,10 @@
 #include "arrow/flight/transport/ucx/ucx_internal.h"
 
 #include <atomic>
-#include <list>
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <unordered_map>
 
 #include <arpa/inet.h>
 #include <ucp/api/ucp.h>
@@ -84,8 +84,6 @@ class UcxTransportDataStream : public internal::TransportDataStream {
 };
 }  // namespace
 
-void HandleIncomingConnection(ucp_conn_request_h connection_request, void* server);
-
 class ARROW_FLIGHT_EXPORT UcxServerImpl
     : public arrow::flight::internal::ServerTransportImpl {
  public:
@@ -132,6 +130,10 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
       worker_params.thread_mode = UCS_THREAD_MODE_MULTI;
 
+      // TODO: consolidate these workers since it doesn't appear
+      // necessary and we don't really want to double our hardware
+      // resource consumption
+
       // Create one worker to listen for incoming connections.
       status = ucp_worker_create(ucp_context_, &worker_params, &worker_conn_);
       RETURN_NOT_OK(FromUcsStatus("ucp_worker_create", status));
@@ -139,6 +141,16 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       // Create another worker to actually service requests.
       status = ucp_worker_create(ucp_context_, &worker_params, &worker_service_);
       RETURN_NOT_OK(FromUcsStatus("ucp_worker_create", status));
+
+      // Set up Active Message (AM) handler
+      ucp_am_handler_param_t handler_params;
+      handler_params.field_mask = UCP_AM_HANDLER_PARAM_FIELD_ID |
+                                  UCP_AM_HANDLER_PARAM_FIELD_CB |
+                                  UCP_AM_HANDLER_PARAM_FIELD_ARG;
+      handler_params.id = kUcpAmHandlerId;
+      handler_params.cb = HandleIncomingActiveMessage;
+      handler_params.arg = this;
+      ucp_worker_set_am_recv_handler(worker_service_, &handler_params);
     }
 
     // Start listening for connections.
@@ -234,10 +246,10 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     UcxServerCallContext context;
 
     ARROW_ASSIGN_OR_RAISE(auto frame, driver->ReadNextFrame());
-    RETURN_NOT_OK(driver->ExpectFrameType(frame, FrameType::kPayload));
+    RETURN_NOT_OK(driver->ExpectFrameType(*frame, FrameType::kPayload));
     FlightDescriptor descriptor;
     SERVER_RETURN_NOT_OK(
-        driver, FlightDescriptor::Deserialize(frame.buffer->ToString(), &descriptor));
+        driver, FlightDescriptor::Deserialize(frame->buffer->ToString(), &descriptor));
 
     std::unique_ptr<FlightInfo> info;
     // TODO: need to read client's trailers (for cancellations and such), asynchronously
@@ -256,10 +268,10 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     UcxServerCallContext context;
 
     ARROW_ASSIGN_OR_RAISE(auto frame, driver->ReadNextFrame());
-    RETURN_NOT_OK(driver->ExpectFrameType(frame, FrameType::kPayload));
+    RETURN_NOT_OK(driver->ExpectFrameType(*frame, FrameType::kPayload));
     Ticket ticket;
     // TODO: don't allocate a new string
-    SERVER_RETURN_NOT_OK(driver, Ticket::Deserialize(frame.buffer->ToString(), &ticket));
+    SERVER_RETURN_NOT_OK(driver, Ticket::Deserialize(frame->buffer->ToString(), &ticket));
 
     UcxTransportDataStream stream(driver);
     auto status = service_->DoGet(context, ticket, &stream);
@@ -267,9 +279,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     return Status::OK();
   }
 
-  Status HandleOneCall(UcpCallDriver* driver, Frame frame) {
-    RETURN_NOT_OK(driver->ExpectFrameType(frame, FrameType::kHeaders));
-    ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame.buffer)));
+  Status HandleOneCall(UcpCallDriver* driver, Frame* frame) {
+    RETURN_NOT_OK(driver->ExpectFrameType(*frame, FrameType::kHeaders));
+    ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame->buffer)));
     ARROW_ASSIGN_OR_RAISE(auto method, headers.Get(":method:"));
     if (method == "arrow.flight.protocol.FlightService/GetFlightInfo") {
       return HandleGetFlightInfo(driver);
@@ -281,38 +293,29 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     return Status::OK();
   }
 
-  void WaitForRequestAsync(std::list<UcpCallDriver>::iterator driver) {
+  void WaitForRequestAsync(const uintptr_t connection_id, UcpCallDriver* driver) {
     CallbackOptions options;
     options.should_schedule = ShouldSchedule::Always;
     options.executor = rpc_pool_.get();
 
-    struct {
-      void operator()(const Status& st) {
-        if (st.code() == StatusCode::Cancelled) {
-          impl->DisconnectClient(driver);
-          return;
-        } else if (!st.ok()) {
-          impl->ReportError(st);
-          impl->DisconnectClient(driver);
-          return;
-        } else {
-          auto status = impl->HandleOneCall(&*driver, driver->MoveLastFrame());
-          if (!status.ok()) {
-            impl->ReportError(std::move(status));
-            impl->DisconnectClient(driver);
+    driver->ReadFrameAsync().AddCallback(
+        [=](const arrow::Result<std::shared_ptr<Frame>>& maybe_frame) {
+          if (!maybe_frame.ok()) {
+            if (maybe_frame.status().code() != StatusCode::Cancelled) {
+              this->ReportError(maybe_frame.status());
+            }
+            this->DisconnectClient(connection_id);
             return;
           }
-        }
-        impl->WaitForRequestAsync(driver);
-      }
-
-      UcxServerImpl* impl;
-      std::list<UcpCallDriver>::iterator driver;
-    } HandleRpc;
-
-    HandleRpc.impl = this;
-    HandleRpc.driver = driver;
-    HandleRpc.driver->ReadFrameAsync().AddCallback(std::move(HandleRpc), options);
+          auto status = this->HandleOneCall(&*driver, maybe_frame->get());
+          if (!status.ok()) {
+            this->ReportError(std::move(status));
+            this->DisconnectClient(connection_id);
+            return;
+          }
+          this->WaitForRequestAsync(connection_id, driver);
+        },
+        options);
   }
 
   void DriveWorker() {
@@ -340,17 +343,22 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
           continue;
         }
 
-        active_connections_.emplace_back(worker_service_, client_endpoint);
-        WaitForRequestAsync(--active_connections_.end());
+        const uintptr_t connection_id = reinterpret_cast<uintptr_t>(client_endpoint);
+        auto inserted = active_connections_.emplace(
+            connection_id, UcpCallDriver(worker_service_, client_endpoint));
+        DCHECK(inserted.second);
+        WaitForRequestAsync(connection_id, &inserted.first->second);
       }
       while (!pending_close_.empty()) {
-        auto client = pending_close_.front();
+        auto connection_id = pending_close_.front();
         pending_close_.pop();
-        auto status = client->Close();
+        auto it = active_connections_.find(connection_id);
+        if (it == active_connections_.end()) continue;
+        auto status = it->second.Close();
         if (!status.ok()) {
           ReportError(std::move(status));
         }
-        active_connections_.erase(client);
+        active_connections_.erase(connection_id);
       }
     }
   }
@@ -360,16 +368,92 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     pending_connections_.push(connection_request);
   }
 
-  void DisconnectClient(std::list<UcpCallDriver>::iterator client) {
-    // Shutting down an endpoint has to be done from the same thread
-    // as it was created(?) so just enqueue it here
+  void DisconnectClient(uintptr_t connection_id) {
     std::unique_lock<std::mutex> guard(pending_connections_mutex_);
-    pending_close_.push(client);
+    pending_close_.push(connection_id);
   }
 
   /// Handle errors during server worker loop execution
   void ReportError(Status st) {
     ARROW_LOG(WARNING) << "Error in Flight UCX server loop: " << st.ToString();
+  }
+
+  /// Callback handler. A new client has connected to the server.
+  static void HandleIncomingConnection(ucp_conn_request_h connection_request,
+                                       void* data) {
+    UcxServerImpl* server = reinterpret_cast<UcxServerImpl*>(data);
+    // TODO: enable shedding load above some threshold (which is a
+    // pitfall with gRPC/Java)
+    server->EnqueueClient(connection_request);
+  }
+
+  static ucs_status_t HandleIncomingActiveMessage(void* self, const void* header,
+                                                  size_t header_length, void* data,
+                                                  size_t data_length,
+                                                  const ucp_am_recv_param_t* param) {
+    auto* impl = reinterpret_cast<UcxServerImpl*>(self);
+    return impl->DoHandleIncomingActiveMessage(header, header_length, data, data_length,
+                                               param);
+  }
+
+  ucs_status_t DoHandleIncomingActiveMessage(const void* header, size_t header_length,
+                                             void* data, size_t data_length,
+                                             const ucp_am_recv_param_t* param) {
+    DCHECK(param->recv_attr & UCP_AM_RECV_ATTR_FIELD_REPLY_EP);
+    const uintptr_t connection_id = reinterpret_cast<uintptr_t>(param->reply_ep);
+    const bool is_data = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA;
+    const bool is_rndv = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV;
+
+    UcpCallDriver* driver = nullptr;
+    {
+      std::unique_lock<std::mutex> guard(pending_connections_mutex_);
+      auto it = this->active_connections_.find(connection_id);
+      // No such connection
+      if (it == this->active_connections_.end()) return UCS_OK;
+      driver = &it->second;
+    }
+
+    DCHECK_GE(header_length, 8);
+
+    const uint8_t* frame_header = reinterpret_cast<const uint8_t*>(header);
+    if (frame_header[0] != kFrameVersion) {
+      driver->Push(Status::IOError("Expected frame version ", kFrameVersion, " but got ",
+                                   frame_header[0]));
+      // Can only return non-OK if the incoming message used rendezvous mode
+      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
+    } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
+      driver->Push(Status::IOError("Unknown frame type ", frame_header[1]));
+      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
+    }
+
+    // Hmm. How can we get zero-copy here with long lifetimes?
+    // TODO: we can refactor most of this into a common handler
+    std::unique_ptr<Buffer> buffer;
+    ucs_status_t result = UCS_OK;
+    if (is_rndv) {
+      DCHECK(false) << "NYI RNDV";
+    } else if (is_data) {
+      // Keep data alive
+      result = UCS_INPROGRESS;
+      // TODO: bounds check the size_t
+      // TODO: need to free this buffer
+      // TODO: will doing this exhaust any UCX resources?
+      buffer = arrow::internal::make_unique<Buffer>(
+          reinterpret_cast<const uint8_t*>(data), static_cast<int64_t>(data_length));
+    } else {
+      // Data will be freed after callback returns - copy to buffer
+      auto status = AllocateBuffer(data_length).Value(&buffer);
+      if (!status.ok()) {
+        driver->Push(std::move(status));
+        return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
+      }
+      std::memcpy(buffer->mutable_data(), data, data_length);
+    }
+
+    auto frame = std::make_shared<Frame>(static_cast<FrameType>(frame_header[1]),
+                                         std::move(buffer));
+    driver->Push(std::move(frame));
+    return result;
   }
 
   ucp_context_h ucp_context_;
@@ -387,17 +471,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
   std::mutex pending_connections_mutex_;
   std::queue<ucp_conn_request_h> pending_connections_;
-  std::list<UcpCallDriver> active_connections_;
-  std::queue<std::list<UcpCallDriver>::iterator> pending_close_;
+  std::unordered_map<uintptr_t, UcpCallDriver> active_connections_;
+  std::queue<uintptr_t> pending_close_;
 };
-
-/// Callback handler. A new client has connected to the server.
-void HandleIncomingConnection(ucp_conn_request_h connection_request, void* data) {
-  UcxServerImpl* server = reinterpret_cast<UcxServerImpl*>(data);
-  // TODO: enable shedding load above some threshold (which is a
-  // pitfall with gRPC/Java)
-  server->EnqueueClient(connection_request);
-}
 
 std::unique_ptr<arrow::flight::internal::ServerTransportImpl> MakeUcxServerImpl() {
   return arrow::internal::make_unique<UcxServerImpl>();

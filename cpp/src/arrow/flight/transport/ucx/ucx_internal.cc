@@ -17,6 +17,9 @@
 
 #include "arrow/flight/transport/ucx/ucx_internal.h"
 
+#include <deque>
+#include <mutex>
+
 #include "arrow/buffer.h"
 #include "arrow/util/base64.h"
 #include "arrow/util/bit_util.h"
@@ -180,7 +183,6 @@ Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
 // enough data or (2) directions on what to do next
 // This would make it easier to use UCX-allocated buffers
 
-constexpr uint8_t kFrameVersion = 0x42;
 constexpr char kHeaderMethod[] = ":method:";
 
 arrow::Result<HeadersFrame> HeadersFrame::Parse(std::unique_ptr<Buffer> buffer) {
@@ -219,47 +221,34 @@ class UcpCallDriver::Impl {
   Impl() : worker_(nullptr), endpoint_(nullptr) {}
   Impl(ucp_worker_h worker, ucp_ep_h endpoint) : worker_(worker), endpoint_(endpoint) {}
 
-  arrow::Result<Frame> ReadNextFrame() {
+  arrow::Result<std::shared_ptr<Frame>> ReadNextFrame() {
     // TODO: reimplement the client/server async, get rid of sync methods here
     auto fut = ReadFrameAsync();
     while (!fut.is_finished()) {
       ucp_worker_progress(worker_);
     }
     RETURN_NOT_OK(fut.status());
-    return MoveLastFrame();
+    return fut.MoveResult();
   }
 
-  Future<> ReadFrameAsync() {
-    ucp_request_param_t request_param;
-    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK |
-                                 UCP_OP_ATTR_FIELD_USER_DATA;
-    request_param.cb.recv_stream = AsyncStreamRecvCallback;
-    request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
-    request_param.user_data = this;
-
-    read_state_ = RequestState::kNeedBody;
-    auto result = Future<>::Make();
-    read_future_ = result;
-    // TODO: try ucp_stream_recv_data_nb which has UCX allocate memory instead
-    void* request =
-        ucp_stream_recv_nbx(endpoint_, frame_header_, 8, &read_length_, &request_param);
-    if (!request) {
-      // Request completed immediately
-      OnAsyncRecv(request, UCS_OK, read_length_, this);
+  Future<std::shared_ptr<Frame>> ReadFrameAsync() {
+    std::unique_lock<std::mutex> guard(frame_mutex_);
+    if (!frames_.empty() && frames_.front().is_finished()) {
+      auto fut = frames_.front();
+      frames_.pop_front();
+      return fut;
     }
-    return result;
+    frames_.push_back(Future<std::shared_ptr<Frame>>::Make());
+    return frames_.back();
   }
-
-  Frame&& MoveLastFrame() { return std::move(read_frame_); }
 
   Status SendFrame(FrameType frame_type, const uint8_t* data, const int64_t size) {
     void* request = nullptr;
     ucp_request_param_t request_param;
-    request_param.op_attr_mask = 0;
+    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
+    request_param.flags = UCP_AM_SEND_FLAG_REPLY;
 
-    // TODO: does UCX coalesce small writes? Is there a penalty for two
-    // separate sends when both are small?
-
+    // UCX appears to crash on zero-byte payloads
     DCHECK_GT(size, 0);
 
     // Send frame header
@@ -267,83 +256,63 @@ class UcpCallDriver::Impl {
     header[0] = kFrameVersion;
     header[1] = static_cast<uint8_t>(frame_type);
     Int32ToBytesBe(size, header + 4);
-    request = ucp_stream_send_nbx(endpoint_, header, 8, &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
 
-    // Send payload
-    request = ucp_stream_send_nbx(endpoint_, data, size, &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
+    // TODO: is the active message API ordered?
+    request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 8, data, size,
+                              &request_param);
+    RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
 
     return Status::OK();
   }
 
   Status SendFlightPayload(const FlightPayload& payload) {
-    static const uint8_t kPaddingBytes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-
-    const bool has_body = ipc::Message::HasBody(payload.ipc_message.type);
-    int32_t total_length = 0;
-    total_length += 4;
-    total_length += payload.ipc_message.metadata->size();
-    if (has_body) {
-      total_length += 4;
-      total_length += payload.ipc_message.body_length;
-    }
-
+    int32_t counter = 0;
     void* request = nullptr;
     ucp_request_param_t request_param;
-    request_param.op_attr_mask = 0;
+    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
+    request_param.flags = UCP_AM_SEND_FLAG_REPLY;
 
-    // Send frame header
-    uint8_t header[8] = {0};
-    header[0] = kFrameVersion;
-    header[1] = static_cast<uint8_t>(FrameType::kPayload);
-    DCHECK_GT(total_length, 0);
-    Int32ToBytesBe(total_length, header + 4);
-    request = ucp_stream_send_nbx(endpoint_, header, 8, &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
-
-    // Send IPC header length
-    Int32ToBytesBe(payload.ipc_message.metadata->size(), header);
-    request = ucp_stream_send_nbx(endpoint_, header, 4, &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
-
-    // Send IPC header
-    DCHECK_GT(payload.ipc_message.metadata->size(), 0);
-    request = ucp_stream_send_nbx(endpoint_, payload.ipc_message.metadata->data(),
-                                  payload.ipc_message.metadata->size(), &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
-
-    if (!has_body) return Status::OK();
-
-    // Send IPC body length
-    Int32ToBytesBe(payload.ipc_message.body_length, header);
-    request = ucp_stream_send_nbx(endpoint_, header, 4, &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
-
-    // Send IPC body buffers
-    int32_t actual_length = 0;
+    int32_t total_messages = 1;
     for (const auto& buffer : payload.ipc_message.body_buffers) {
       if (!buffer || buffer->size() == 0) continue;
-
-      actual_length += buffer->size();
-      DCHECK_GT(buffer->size(), 0);
-      request =
-          ucp_stream_send_nbx(endpoint_, buffer->data(), buffer->size(), &request_param);
-      RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
-
-      // Write padding if not multiple of 8
-      const auto remainder = static_cast<int>(
-          bit_util::RoundUpToMultipleOf8(buffer->size()) - buffer->size());
-      if (remainder) {
-        request =
-            ucp_stream_send_nbx(endpoint_, kPaddingBytes, remainder, &request_param);
-        DCHECK_GT(remainder, 0);
-        RETURN_NOT_OK(CompleteRequestBlocking("ucp_stream_send_nbx", request));
-        actual_length += remainder;
-      }
+      total_messages++;
     }
 
-    ARROW_CHECK_EQ(actual_length, payload.ipc_message.body_length);
+    // AM models sends of individual buffers with lengths, so unlike
+    // the stream API, we can't implicitly concatenate messages "on
+    // the wire" by writing them sequentially. Consequently, the IPC
+    // message needs to be sent as individual buffers (perhaps not
+    // ideal) Also, we can't abuse custom datatypes to do the transfer
+    // in one go since the API doesn't accept that parameter.
+
+    uint8_t header[20] = {0};
+    header[0] = kFrameVersion;
+    header[1] = static_cast<uint8_t>(FrameType::kFlightPayload);
+    Int32ToBytesBe(total_messages, header + 16);
+
+    // Send IPC header
+    Int32ToBytesBe(payload.ipc_message.metadata->size(), header + 4);
+    header[8] = static_cast<uint8_t>(FlightPayloadSegmentType::kIpcHeader);
+    Int32ToBytesBe(counter++, header + 12);
+    request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 20,
+                              payload.ipc_message.metadata->data(),
+                              payload.ipc_message.metadata->size(), &request_param);
+    RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
+
+    if (!ipc::Message::HasBody(payload.ipc_message.type)) return Status::OK();
+
+    // Send individual IPC body buffers
+    header[8] = static_cast<uint8_t>(FlightPayloadSegmentType::kIpcBodyBuffer);
+    for (const auto& buffer : payload.ipc_message.body_buffers) {
+      if (!buffer || buffer->size() == 0) continue;
+      Int32ToBytesBe(buffer->size(), header + 4);
+      Int32ToBytesBe(counter++, header + 12);
+      request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 20, buffer->data(),
+                                buffer->size(), &request_param);
+      RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
+      // No need to add padding
+    }
+
     return Status::OK();
   }
 
@@ -367,17 +336,29 @@ class UcpCallDriver::Impl {
     return Status::OK();
   }
 
- private:
-  static void StreamRecvCallback(void* request, ucs_status_t status, size_t length,
-                                 void* user_data) {
-    *reinterpret_cast<size_t*>(user_data) = length;
-  }
-  static void AsyncStreamRecvCallback(void* request, ucs_status_t status, size_t length,
-                                      void* user_data) {
-    auto* driver = reinterpret_cast<UcpCallDriver::Impl*>(user_data);
-    driver->OnAsyncRecv(request, status, length, user_data);
+  void Push(std::shared_ptr<Frame> frame) {
+    std::unique_lock<std::mutex> guard(frame_mutex_);
+    ARROW_LOG(WARNING) << "Got frame of type " << static_cast<int32_t>(frame->type);
+    if (!frames_.empty() && !frames_.front().is_finished()) {
+      frames_.front().MarkFinished(std::move(frame));
+      frames_.pop_front();
+    } else {
+      frames_.push_back(Future<std::shared_ptr<Frame>>::MakeFinished(std::move(frame)));
+    }
   }
 
+  void Push(Status status) {
+    std::unique_lock<std::mutex> guard(frame_mutex_);
+    ARROW_LOG(WARNING) << "Got error " << status.ToString();
+    if (!frames_.empty() && !frames_.front().is_finished()) {
+      frames_.front().MarkFinished(std::move(status));
+      frames_.pop_front();
+    } else {
+      frames_.push_back(Future<std::shared_ptr<Frame>>::MakeFinished(std::move(status)));
+    }
+  }
+
+ private:
   Status CompleteRequestBlocking(const std::string& context, void* request) {
     if (UCS_PTR_IS_ERR(request)) {
       return FromUcsStatus(context, UCS_PTR_STATUS(request));
@@ -403,82 +384,8 @@ class UcpCallDriver::Impl {
   ucp_worker_h worker_;
   ucp_ep_h endpoint_;
 
-  enum class RequestState {
-    kIdle,
-    kNeedBody,
-    kFinished,
-  };
-
-  void OnAsyncRecv(void* request, ucs_status_t status, size_t length, void* user_data) {
-    read_length_ = length;
-    if (request) ucp_request_free(request);
-    if (status != UCS_OK) {
-      read_future_.MarkFinished(FromUcsStatus("ucp_stream_recv_nbx (async)", status));
-      return;
-    }
-    switch (read_state_) {
-      case RequestState::kIdle: {
-        DCHECK(false) << "UcpCallDriver.read_state_ should not be kIdle";
-        break;
-      }
-      case RequestState::kNeedBody: {
-        read_state_ = RequestState::kFinished;
-
-        if (frame_header_[0] != kFrameVersion) {
-          read_state_ = RequestState::kIdle;
-          read_future_.MarkFinished(Status::IOError(
-              "Expected frame version ", kFrameVersion, " but got ", frame_header_[0]));
-          return;
-        } else if (frame_header_[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
-          read_state_ = RequestState::kIdle;
-          read_future_.MarkFinished(
-              Status::IOError("Unknown frame type ", frame_header_[1]));
-          return;
-        }
-        read_frame_.type = static_cast<FrameType>(frame_header_[1]);
-
-        // Read the actual payload
-        ucp_request_param_t request_param;
-        request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS |
-                                     UCP_OP_ATTR_FIELD_CALLBACK |
-                                     UCP_OP_ATTR_FIELD_USER_DATA;
-        request_param.cb.recv_stream = AsyncStreamRecvCallback;
-        request_param.flags = UCP_STREAM_RECV_FLAG_WAITALL;
-        request_param.user_data = this;
-
-        const int32_t payload_length = BeBytesToInt32(frame_header_ + 4);
-        DCHECK_GT(payload_length, 0);
-
-        auto status = AllocateBuffer(payload_length).Value(&read_frame_.buffer);
-        if (!status.ok()) {
-          read_state_ = RequestState::kIdle;
-          read_future_.MarkFinished(std::move(status));
-          return;
-        }
-
-        void* request =
-            ucp_stream_recv_nbx(endpoint_, read_frame_.buffer->mutable_data(),
-                                payload_length, &read_length_, &request_param);
-        if (!request) {
-          // Request completed immediately
-          read_state_ = RequestState::kIdle;
-          read_future_.MarkFinished();
-        }
-        break;
-      }
-      case RequestState::kFinished: {
-        read_state_ = RequestState::kIdle;
-        read_future_.MarkFinished();
-        break;
-      }
-    }
-  }
-  // Scratch space for async requests
-  RequestState read_state_ = RequestState::kIdle;
-  Future<> read_future_;
-  Frame read_frame_;
-  uint8_t frame_header_[8] = {0};
-  size_t read_length_ = 0;
+  std::mutex frame_mutex_;
+  std::deque<Future<std::shared_ptr<Frame>>> frames_;
 };
 
 UcpCallDriver::UcpCallDriver() : impl_(nullptr) {}
@@ -488,11 +395,13 @@ UcpCallDriver::UcpCallDriver(UcpCallDriver&&) = default;
 UcpCallDriver& UcpCallDriver::operator=(UcpCallDriver&&) = default;
 UcpCallDriver::~UcpCallDriver() = default;
 
-arrow::Result<Frame> UcpCallDriver::ReadNextFrame() { return impl_->ReadNextFrame(); }
+arrow::Result<std::shared_ptr<Frame>> UcpCallDriver::ReadNextFrame() {
+  return impl_->ReadNextFrame();
+}
 
-Future<> UcpCallDriver::ReadFrameAsync() { return impl_->ReadFrameAsync(); }
-
-Frame&& UcpCallDriver::MoveLastFrame() { return impl_->MoveLastFrame(); }
+Future<std::shared_ptr<Frame>> UcpCallDriver::ReadFrameAsync() {
+  return impl_->ReadFrameAsync();
+}
 
 Status UcpCallDriver::ExpectFrameType(const Frame& frame, FrameType type) {
   if (frame.type != type) {
@@ -558,6 +467,11 @@ Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
 }
 
 Status UcpCallDriver::Close() { return impl_->Close(); }
+
+void UcpCallDriver::Push(std::shared_ptr<Frame> frame) {
+  return impl_->Push(std::move(frame));
+}
+void UcpCallDriver::Push(Status status) { return impl_->Push(std::move(status)); }
 
 }  // namespace ucx
 }  // namespace transport

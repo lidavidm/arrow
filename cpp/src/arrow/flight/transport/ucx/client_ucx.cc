@@ -38,7 +38,7 @@ namespace ucx {
 
 class UcxClientDataStream : public internal::ClientDataStream {
  public:
-  explicit UcxClientDataStream(UcpCallDriver&& driver)
+  explicit UcxClientDataStream(std::unique_ptr<UcpCallDriver>&& driver)
       : driver_(std::move(driver)), finished_(false) {}
 
   bool Read(internal::FlightData* data) {
@@ -55,11 +55,11 @@ class UcxClientDataStream : public internal::ClientDataStream {
   }
 
   ::arrow::Result<bool> ReadImpl(internal::FlightData* data) {
-    ARROW_ASSIGN_OR_RAISE(auto frame, driver_.ReadNextFrame());
+    ARROW_ASSIGN_OR_RAISE(auto frame, driver_->ReadNextFrame());
 
-    if (frame.type == FrameType::kHeaders) {
+    if (frame->type == FrameType::kHeaders) {
       // Trailers, stream is over
-      ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame.buffer)));
+      ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame->buffer)));
       ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
       ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));
       auto code = std::strtol(code_str.data(), nullptr, /*base=*/10);
@@ -71,17 +71,32 @@ class UcxClientDataStream : public internal::ClientDataStream {
       }
       return false;
     }
-    RETURN_NOT_OK(driver_.ExpectFrameType(frame, FrameType::kPayload));
+    RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kFlightPayload));
 
-    std::shared_ptr<Buffer> buffer = std::move(frame.buffer);
-    const uint8_t* payload = buffer->data();
-    const int32_t metadata_len = BeBytesToInt32(payload);
-    data->metadata = SliceBuffer(buffer, 4, metadata_len);
-    if (metadata_len < buffer->size()) {
-      const int32_t body_len = BeBytesToInt32(payload + 4 + metadata_len);
-      data->body = SliceBuffer(buffer, 4 + metadata_len + 4, body_len);
-    } else {
-      data->body = std::make_shared<Buffer>(nullptr, 0);
+    // First buffer contains the IPC header
+    data->metadata = std::move(frame->buffer);
+    ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(data->metadata, nullptr));
+    // TODO: need custom deserializer to preserve zero-copyness
+    ARROW_ASSIGN_OR_RAISE(data->body, AllocateBuffer(message->body_length()));
+
+    // Remaining buffers contain the IPC payload
+    int32_t counter = 1;
+    const int32_t total_segments = frame->total_segments;
+    uint8_t* body = data->body->mutable_data();
+    while (counter < total_segments) {
+      ARROW_ASSIGN_OR_RAISE(auto frame, driver_->ReadNextFrame());
+      RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kFlightPayload));
+      std::memcpy(body, frame->buffer->data(), frame->buffer->size());
+      body += frame->buffer->size();
+
+      // Align
+      const auto remainder = static_cast<int>(
+          bit_util::RoundUpToMultipleOf8(frame->buffer->size()) - frame->buffer->size());
+      if (remainder) {
+        std::memset(body, 0, remainder);
+        body += remainder;
+      }
+      counter++;
     }
     return true;
   }
@@ -116,7 +131,7 @@ class UcxClientDataStream : public internal::ClientDataStream {
                                      ". Transport context: ", io_status_.ToString());
   }
 
-  UcpCallDriver driver_;
+  std::unique_ptr<UcpCallDriver> driver_;
   bool finished_;
   Status io_status_;
   Status server_status_;
@@ -126,7 +141,10 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
     : public arrow::flight::internal::ClientTransportImpl {
  public:
   UcxClientImpl()
-      : ucp_context_(nullptr), ucp_worker_(nullptr), remote_endpoint_(nullptr) {}
+      : ucp_context_(nullptr),
+        ucp_worker_(nullptr),
+        remote_endpoint_(nullptr),
+        driver_(nullptr) {}
 
   virtual ~UcxClientImpl() {
     if (!ucp_context_) return;
@@ -162,6 +180,16 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
       status = ucp_worker_create(ucp_context_, &worker_params, &ucp_worker_);
       RETURN_NOT_OK(FromUcsStatus("ucp_worker_create", status));
+
+      // Set up Active Message (AM) handler
+      ucp_am_handler_param_t handler_params;
+      handler_params.field_mask = UCP_AM_HANDLER_PARAM_FIELD_ID |
+                                  UCP_AM_HANDLER_PARAM_FIELD_CB |
+                                  UCP_AM_HANDLER_PARAM_FIELD_ARG;
+      handler_params.id = kUcpAmHandlerId;
+      handler_params.cb = HandleIncomingActiveMessage;
+      handler_params.arg = this;
+      ucp_worker_set_am_recv_handler(ucp_worker_, &handler_params);
     }
 
     {
@@ -195,6 +223,8 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
         if (ucp_status == UCS_OK) {
           break;
         } else if (ucp_status != UCS_INPROGRESS) {
+          // Ignore UCS_ERR_NOT_CONNECTED
+          if (ucp_status == UCS_ERR_NOT_CONNECTED) break;
           status = FromUcsStatus("ucp_request_check_status", ucp_status);
           break;
         }
@@ -221,6 +251,9 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
     // TODO: respect options
     // TODO: can we find a way to share code with the gRPC backend?
     UcpCallDriver driver(ucp_worker_, remote_endpoint_);
+    // TODO: need to clear this
+    // TODO: maybe set the callback on demand??
+    driver_ = &driver;
     // TODO: constant
     RETURN_NOT_OK(driver.StartCall("arrow.flight.protocol.FlightService/GetFlightInfo"));
 
@@ -231,14 +264,14 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
                                      static_cast<int64_t>(payload.size())));
 
     ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver.ReadNextFrame());
-    if (incoming_message.type == FrameType::kPayload) {
+    if (incoming_message->type == FrameType::kPayload) {
       // TODO: avoid allocating string
-      RETURN_NOT_OK(FlightInfo::Deserialize(incoming_message.buffer->ToString(), info));
+      RETURN_NOT_OK(FlightInfo::Deserialize(incoming_message->buffer->ToString(), info));
       ARROW_ASSIGN_OR_RAISE(incoming_message, driver.ReadNextFrame());
     }
-    RETURN_NOT_OK(driver.ExpectFrameType(incoming_message, FrameType::kHeaders));
+    RETURN_NOT_OK(driver.ExpectFrameType(*incoming_message, FrameType::kHeaders));
     ARROW_ASSIGN_OR_RAISE(auto headers,
-                          HeadersFrame::Parse(std::move(incoming_message.buffer)));
+                          HeadersFrame::Parse(std::move(incoming_message->buffer)));
     // TODO: annotate error messages
     ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
     ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));
@@ -251,14 +284,16 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
   Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
                std::unique_ptr<internal::ClientDataStream>* stream) override {
-    UcpCallDriver driver(ucp_worker_, remote_endpoint_);
-    RETURN_NOT_OK(driver.StartCall("arrow.flight.protocol.FlightService/DoGet"));
+    auto driver =
+        arrow::internal::make_unique<UcpCallDriver>(ucp_worker_, remote_endpoint_);
+    RETURN_NOT_OK(driver->StartCall("arrow.flight.protocol.FlightService/DoGet"));
+    driver_ = driver.get();
 
     {
       std::string payload;
       ticket.SerializeToString(&payload);
-      RETURN_NOT_OK(driver.SendPayload(reinterpret_cast<const uint8_t*>(payload.data()),
-                                       static_cast<int64_t>(payload.size())));
+      RETURN_NOT_OK(driver->SendPayload(reinterpret_cast<const uint8_t*>(payload.data()),
+                                        static_cast<int64_t>(payload.size())));
     }
 
     *stream = arrow::internal::make_unique<UcxClientDataStream>(std::move(driver));
@@ -272,9 +307,80 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   }
 
  private:
+  static ucs_status_t HandleIncomingActiveMessage(void* self, const void* header,
+                                                  size_t header_length, void* data,
+                                                  size_t data_length,
+                                                  const ucp_am_recv_param_t* param) {
+    auto* impl = reinterpret_cast<UcxClientImpl*>(self);
+    return impl->DoHandleIncomingActiveMessage(header, header_length, data, data_length,
+                                               param);
+  }
+
+  ucs_status_t DoHandleIncomingActiveMessage(const void* header, size_t header_length,
+                                             void* data, size_t data_length,
+                                             const ucp_am_recv_param_t* param) {
+    DCHECK(param->recv_attr & UCP_AM_RECV_ATTR_FIELD_REPLY_EP);
+    const bool is_data = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA;
+    const bool is_rndv = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV;
+
+    // Got message with no active call, ignore
+    if (!driver_) return UCS_OK;
+
+    DCHECK_GE(header_length, 8);
+
+    const uint8_t* frame_header = reinterpret_cast<const uint8_t*>(header);
+    if (frame_header[0] != kFrameVersion) {
+      driver_->Push(Status::IOError("Expected frame version ", kFrameVersion, " but got ",
+                                    frame_header[0]));
+      // Can only return non-OK if the incoming message used rendezvous mode
+      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
+    } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
+      driver_->Push(Status::IOError("Unknown frame type ", frame_header[1]));
+      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
+    }
+
+    ARROW_LOG(WARNING) << "Got frame type " << static_cast<int32_t>(frame_header[1]);
+
+    // Hmm. How can we get zero-copy here with long lifetimes?
+    // TODO: we can refactor most of this into a common handler
+    std::unique_ptr<Buffer> buffer;
+    ucs_status_t result = UCS_OK;
+    if (is_rndv) {
+      DCHECK(false) << "NYI RNDV";
+    } else if (is_data) {
+      // Keep data alive
+      result = UCS_INPROGRESS;
+      // TODO: bounds check the size_t
+      buffer = arrow::internal::make_unique<Buffer>(
+          reinterpret_cast<const uint8_t*>(data), static_cast<int64_t>(data_length));
+    } else {
+      // Data will be freed after callback returns - copy to buffer
+      auto status = AllocateBuffer(data_length).Value(&buffer);
+      if (!status.ok()) {
+        driver_->Push(std::move(status));
+        return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
+      }
+      std::memcpy(buffer->mutable_data(), data, data_length);
+    }
+
+    auto frame = std::make_shared<Frame>(static_cast<FrameType>(frame_header[1]),
+                                         std::move(buffer));
+    if (frame->type == FrameType::kFlightPayload) {
+      DCHECK_GE(header_length, 20) << "length was: " << header_length;
+      frame->payload_segment_type =
+          static_cast<FlightPayloadSegmentType>(frame_header[8]);
+      frame->segment_index = BeBytesToInt32(frame_header + 12);
+      frame->total_segments = BeBytesToInt32(frame_header + 16);
+    }
+    driver_->Push(std::move(frame));
+    return result;
+  }
+
   ucp_context_h ucp_context_;
   ucp_worker_h ucp_worker_;
   ucp_ep_h remote_endpoint_;
+  // TODO: needs to be atomic
+  UcpCallDriver* driver_;
 };
 
 std::unique_ptr<arrow::flight::internal::ClientTransportImpl> MakeUcxClientImpl() {
