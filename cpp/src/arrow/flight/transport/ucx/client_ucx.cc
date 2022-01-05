@@ -320,7 +320,6 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
                                              void* data, size_t data_length,
                                              const ucp_am_recv_param_t* param) {
     DCHECK(param->recv_attr & UCP_AM_RECV_ATTR_FIELD_REPLY_EP);
-    const bool is_data = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA;
     const bool is_rndv = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV;
 
     // Got message with no active call, ignore
@@ -339,28 +338,13 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
     }
 
-    ARROW_LOG(WARNING) << "Got frame type " << static_cast<int32_t>(frame_header[1]);
-
-    // Hmm. How can we get zero-copy here with long lifetimes?
-    // TODO: we can refactor most of this into a common handler
     std::unique_ptr<Buffer> buffer;
     ucs_status_t result = UCS_OK;
-    if (is_rndv) {
-      DCHECK(false) << "NYI RNDV";
-    } else if (is_data) {
-      // Keep data alive
-      result = UCS_INPROGRESS;
-      // TODO: bounds check the size_t
-      buffer = arrow::internal::make_unique<Buffer>(
-          reinterpret_cast<const uint8_t*>(data), static_cast<int64_t>(data_length));
-    } else {
-      // Data will be freed after callback returns - copy to buffer
-      auto status = AllocateBuffer(data_length).Value(&buffer);
-      if (!status.ok()) {
-        driver_->Push(std::move(status));
-        return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
-      }
-      std::memcpy(buffer->mutable_data(), data, data_length);
+    auto status = driver_->MakeActiveMessageBuffer(data, data_length, param, &result)
+                      .Value(&buffer);
+    if (!status.ok()) {
+      driver_->Push(std::move(status));
+      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
     }
 
     auto frame = std::make_shared<Frame>(static_cast<FrameType>(frame_header[1]),

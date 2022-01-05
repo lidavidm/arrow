@@ -24,6 +24,7 @@
 #include "arrow/util/base64.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/make_unique.h"
 #include "arrow/util/uri.h"
 
 namespace arrow {
@@ -338,7 +339,6 @@ class UcpCallDriver::Impl {
 
   void Push(std::shared_ptr<Frame> frame) {
     std::unique_lock<std::mutex> guard(frame_mutex_);
-    ARROW_LOG(WARNING) << "Got frame of type " << static_cast<int32_t>(frame->type);
     if (!frames_.empty() && !frames_.front().is_finished()) {
       frames_.front().MarkFinished(std::move(frame));
       frames_.pop_front();
@@ -349,7 +349,6 @@ class UcpCallDriver::Impl {
 
   void Push(Status status) {
     std::unique_lock<std::mutex> guard(frame_mutex_);
-    ARROW_LOG(WARNING) << "Got error " << status.ToString();
     if (!frames_.empty() && !frames_.front().is_finished()) {
       frames_.front().MarkFinished(std::move(status));
       frames_.pop_front();
@@ -359,6 +358,8 @@ class UcpCallDriver::Impl {
   }
 
  private:
+  friend class UcpCallDriver;
+
   Status CompleteRequestBlocking(const std::string& context, void* request) {
     if (UCS_PTR_IS_ERR(request)) {
       return FromUcsStatus(context, UCS_PTR_STATUS(request));
@@ -472,6 +473,43 @@ void UcpCallDriver::Push(std::shared_ptr<Frame> frame) {
   return impl_->Push(std::move(frame));
 }
 void UcpCallDriver::Push(Status status) { return impl_->Push(std::move(status)); }
+
+namespace {
+/// A buffer backed by an incoming UCP active message buffer with
+/// UCP_AM_RECV_ATTR_FLAG_DATA set.
+class UcpAmDataBuffer : public Buffer {
+ public:
+  explicit UcpAmDataBuffer(ucp_worker_h worker, const uint8_t* data, const int64_t size)
+      : Buffer(data, size), worker_(worker) {}
+
+  ~UcpAmDataBuffer() {
+    ucp_am_data_release(worker_,
+                        const_cast<void*>(reinterpret_cast<const void*>(data())));
+  }
+
+ private:
+  ucp_worker_h worker_;
+};
+}  // namespace
+
+arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::MakeActiveMessageBuffer(
+    const void* data, const size_t data_length, const ucp_am_recv_param_t* param,
+    ucs_status_t* status) {
+  if (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV) {
+    return Status::NotImplemented("Rendezvous buffers");
+  } else if (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) {
+    // Keep data alive
+    *status = UCS_INPROGRESS;
+    // TODO: bounds check the size_t
+    return arrow::internal::make_unique<UcpAmDataBuffer>(
+        impl_->worker_, reinterpret_cast<const uint8_t*>(data),
+        static_cast<int64_t>(data_length));
+  }
+  // Data will be freed after callback returns - copy to buffer
+  ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateBuffer(data_length));
+  std::memcpy(buffer->mutable_data(), data, data_length);
+  return buffer;
+}
 
 }  // namespace ucx
 }  // namespace transport

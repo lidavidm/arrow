@@ -401,7 +401,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
                                              const ucp_am_recv_param_t* param) {
     DCHECK(param->recv_attr & UCP_AM_RECV_ATTR_FIELD_REPLY_EP);
     const uintptr_t connection_id = reinterpret_cast<uintptr_t>(param->reply_ep);
-    const bool is_data = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA;
     const bool is_rndv = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV;
 
     UcpCallDriver* driver = nullptr;
@@ -430,24 +429,11 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     // TODO: we can refactor most of this into a common handler
     std::unique_ptr<Buffer> buffer;
     ucs_status_t result = UCS_OK;
-    if (is_rndv) {
-      DCHECK(false) << "NYI RNDV";
-    } else if (is_data) {
-      // Keep data alive
-      result = UCS_INPROGRESS;
-      // TODO: bounds check the size_t
-      // TODO: need to free this buffer
-      // TODO: will doing this exhaust any UCX resources?
-      buffer = arrow::internal::make_unique<Buffer>(
-          reinterpret_cast<const uint8_t*>(data), static_cast<int64_t>(data_length));
-    } else {
-      // Data will be freed after callback returns - copy to buffer
-      auto status = AllocateBuffer(data_length).Value(&buffer);
-      if (!status.ok()) {
-        driver->Push(std::move(status));
-        return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
-      }
-      std::memcpy(buffer->mutable_data(), data, data_length);
+    auto status =
+        driver->MakeActiveMessageBuffer(data, data_length, param, &result).Value(&buffer);
+    if (!status.ok()) {
+      driver->Push(std::move(status));
+      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
     }
 
     auto frame = std::make_shared<Frame>(static_cast<FrameType>(frame_header[1]),
