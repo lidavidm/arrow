@@ -122,8 +122,12 @@ class UcxClientDataStream : public internal::ClientDataStream {
 
  private:
   Status MergeStatus(Status&& st) {
-    if (server_status_.ok()) {
+    if (server_status_.ok() && io_status_.ok()) {
       return std::move(st);
+    } else if (server_status_.ok()) {
+      return Status::FromDetailAndArgs(io_status_.code(), io_status_.detail(),
+                                       io_status_.message(),
+                                       ". Client context: ", st.ToString());
     }
     return Status::FromDetailAndArgs(server_status_.code(), server_status_.detail(),
                                      server_status_.message(),

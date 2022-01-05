@@ -329,7 +329,8 @@ Status DoSinglePerfRun(FlightClient* client, const FlightClientOptions client_op
     // Check that number of rows read / written is as expected
     int64_t records_for_run = stats->total_records - start_total_records;
     if (records_for_run != static_cast<int64_t>(plan->total_records())) {
-      return Status::Invalid("Did not consume expected number of records");
+      return Status::Invalid("Did not consume expected number of records, got: ",
+                             records_for_run, " but expected: ", plan->total_records());
     }
   }
   return Status::OK();
