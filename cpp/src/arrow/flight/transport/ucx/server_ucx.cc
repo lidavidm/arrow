@@ -399,10 +399,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   ucs_status_t DoHandleIncomingActiveMessage(const void* header, size_t header_length,
                                              void* data, size_t data_length,
                                              const ucp_am_recv_param_t* param) {
-    DCHECK(param->recv_attr & UCP_AM_RECV_ATTR_FIELD_REPLY_EP);
     const uintptr_t connection_id = reinterpret_cast<uintptr_t>(param->reply_ep);
-    const bool is_rndv = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV;
-
     UcpCallDriver* driver = nullptr;
     {
       std::unique_lock<std::mutex> guard(pending_connections_mutex_);
@@ -412,34 +409,10 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       driver = &it->second;
     }
 
-    DCHECK_GE(header_length, 8);
-
-    const uint8_t* frame_header = reinterpret_cast<const uint8_t*>(header);
-    if (frame_header[0] != kFrameVersion) {
-      driver->Push(Status::IOError("Expected frame version ", kFrameVersion, " but got ",
-                                   frame_header[0]));
-      // Can only return non-OK if the incoming message used rendezvous mode
-      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
-    } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
-      driver->Push(Status::IOError("Unknown frame type ", frame_header[1]));
-      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
-    }
-
-    // Hmm. How can we get zero-copy here with long lifetimes?
-    // TODO: we can refactor most of this into a common handler
-    std::unique_ptr<Buffer> buffer;
-    ucs_status_t result = UCS_OK;
-    auto status =
-        driver->MakeActiveMessageBuffer(data, data_length, param, &result).Value(&buffer);
-    if (!status.ok()) {
-      driver->Push(std::move(status));
-      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
-    }
-
-    auto frame = std::make_shared<Frame>(static_cast<FrameType>(frame_header[1]),
-                                         std::move(buffer));
-    driver->Push(std::move(frame));
-    return result;
+    driver->RecvActiveMessage(header, header_length, data, data_length, param)
+        .Then([driver](const std::shared_ptr<Frame>& frame) { driver->Push(frame); },
+              [driver](const Status& status) { driver->Push(status); });
+    return UCS_OK;
   }
 
   ucp_context_h ucp_context_;

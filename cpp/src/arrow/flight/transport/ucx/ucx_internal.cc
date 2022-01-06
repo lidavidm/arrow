@@ -216,6 +216,23 @@ arrow::Result<util::string_view> HeadersFrame::Get(const std::string& key) {
   return Status::KeyError(key);
 }
 
+struct IncompleteAmRecv {
+  Future<std::shared_ptr<Frame>> future;
+  std::shared_ptr<Frame> frame;
+};
+
+void AmRecvCallback(void* request, ucs_status_t status, size_t length, void* user_data) {
+  IncompleteAmRecv* recv_state = reinterpret_cast<IncompleteAmRecv*>(user_data);
+  ucp_request_free(request);
+  if (status != UCS_OK) {
+    recv_state->future.MarkFinished(
+        FromUcsStatus("ucp_am_recv_data_nbx (callback)", status));
+  } else {
+    recv_state->future.MarkFinished(std::move(recv_state->frame));
+  }
+  delete recv_state;
+}
+
 // pImpl the driver since async methods require a stable address
 class UcpCallDriver::Impl {
  public:
@@ -357,9 +374,89 @@ class UcpCallDriver::Impl {
     }
   }
 
- private:
-  friend class UcpCallDriver;
+  Future<std::shared_ptr<Frame>> RecvActiveMessage(const void* header,
+                                                   size_t header_length, void* data,
+                                                   const size_t data_length,
+                                                   const ucp_am_recv_param_t* param) {
+    DCHECK(param->recv_attr & UCP_AM_RECV_ATTR_FIELD_REPLY_EP);
 
+    if (header_length < 8) {
+      return Status::IOError("Header is too short, must be at least 8 bytes, got ",
+                             header_length);
+    }
+
+    const uint8_t* frame_header = reinterpret_cast<const uint8_t*>(header);
+    if (frame_header[0] != kFrameVersion) {
+      return Status::IOError("Expected frame version ", kFrameVersion, " but got ",
+                             frame_header[0]);
+    } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
+      return Status::IOError("Unknown frame type ", frame_header[1]);
+    }
+
+    if (data_length > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+      return Status::Invalid(
+          "Cannot allocate buffer greater than int64_t max, requested: ", data_length);
+    }
+
+    // TODO: accept an allocator so we can allocate in CUDA memory
+    ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateBuffer(data_length));
+    const FrameType frame_type = static_cast<FrameType>(frame_header[1]);
+    auto frame = std::make_shared<Frame>(frame_type, std::move(buffer));
+
+    if (frame->type == FrameType::kFlightPayload) {
+      if (header_length < 20) {
+        return Status::IOError("Header is too short, must be at least 20 bytes, got ",
+                               header_length);
+      }
+      frame->payload_segment_type =
+          static_cast<FlightPayloadSegmentType>(frame_header[8]);
+      frame->segment_index = BeBytesToInt32(frame_header + 12);
+      frame->total_segments = BeBytesToInt32(frame_header + 16);
+    }
+
+    // TODO: for DATA, recv_data_nbx seems to memcpy, but docs state
+    // recv is sometimes needed (e.g. "unpack data to device
+    // memory"). Can we predict this ahead of time and save a copy?
+    // look at ucp_dt_unpack_only, seems contiguous datatype with
+    // cpu-accessible buffer means we can skip the recv
+    if ((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV) ||
+        (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA)) {
+      // Asynchronous receive, or unpack to destination.
+      // It would be nice if we could reuse the future's allocation...
+      IncompleteAmRecv* recv_state = new IncompleteAmRecv;
+      recv_state->future = Future<std::shared_ptr<Frame>>::Make();
+      recv_state->frame = std::move(frame);
+      // Must save the future since the callback may run (and free state) before we even
+      // exit the function
+      auto future = recv_state->future;
+
+      ucp_request_param_t recv_param;
+      recv_param.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
+      recv_param.cb.recv_am = AmRecvCallback;
+      recv_param.user_data = reinterpret_cast<void*>(recv_state);
+
+      void* request =
+          ucp_am_recv_data_nbx(worker_, data, recv_state->frame->buffer->mutable_data(),
+                               data_length, &recv_param);
+      if (UCS_PTR_IS_ERR(request)) {
+        delete recv_state;
+        return FromUcsStatus("ucp_am_recv_data_nbx", UCS_PTR_STATUS(request));
+      } else if (!request) {
+        // Request completed instantly
+        auto fut = std::move(recv_state->future);
+        fut.MarkFinished(std::move(recv_state->frame));
+        delete recv_state;
+        return fut;
+      }
+      return future;
+    }
+
+    // Data will be freed after callback returns - copy to buffer
+    std::memcpy(frame->buffer->mutable_data(), data, data_length);
+    return frame;
+  }
+
+ private:
   Status CompleteRequestBlocking(const std::string& context, void* request) {
     if (UCS_PTR_IS_ERR(request)) {
       return FromUcsStatus(context, UCS_PTR_STATUS(request));
@@ -492,23 +589,10 @@ class UcpAmDataBuffer : public Buffer {
 };
 }  // namespace
 
-arrow::Result<std::unique_ptr<Buffer>> UcpCallDriver::MakeActiveMessageBuffer(
-    const void* data, const size_t data_length, const ucp_am_recv_param_t* param,
-    ucs_status_t* status) {
-  if (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV) {
-    return Status::NotImplemented("Rendezvous buffers");
-  } else if (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) {
-    // Keep data alive
-    *status = UCS_INPROGRESS;
-    // TODO: bounds check the size_t
-    return arrow::internal::make_unique<UcpAmDataBuffer>(
-        impl_->worker_, reinterpret_cast<const uint8_t*>(data),
-        static_cast<int64_t>(data_length));
-  }
-  // Data will be freed after callback returns - copy to buffer
-  ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateBuffer(data_length));
-  std::memcpy(buffer->mutable_data(), data, data_length);
-  return buffer;
+arrow::Future<std::shared_ptr<Frame>> UcpCallDriver::RecvActiveMessage(
+    const void* header, size_t header_length, void* data, const size_t data_length,
+    const ucp_am_recv_param_t* param) {
+  return impl_->RecvActiveMessage(header, header_length, data, data_length, param);
 }
 
 }  // namespace ucx

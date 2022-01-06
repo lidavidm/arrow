@@ -164,10 +164,10 @@ class UcpCallDriver {
   void Push(std::shared_ptr<Frame> frame);
   void Push(Status status);
 
-  /// Convert an incoming buffer from the UCP active message API to an Arrow buffer.
-  arrow::Result<std::unique_ptr<Buffer>> MakeActiveMessageBuffer(
-      const void* data, const size_t data_length, const ucp_am_recv_param_t* param,
-      ucs_status_t* status);
+  Future<std::shared_ptr<Frame>> RecvActiveMessage(const void* header,
+                                                   size_t header_length, void* data,
+                                                   const size_t data_length,
+                                                   const ucp_am_recv_param_t* param);
 
  private:
   class Impl;

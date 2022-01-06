@@ -323,45 +323,18 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   ucs_status_t DoHandleIncomingActiveMessage(const void* header, size_t header_length,
                                              void* data, size_t data_length,
                                              const ucp_am_recv_param_t* param) {
-    DCHECK(param->recv_attr & UCP_AM_RECV_ATTR_FIELD_REPLY_EP);
-    const bool is_rndv = param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV;
-
     // Got message with no active call, ignore
-    if (!driver_) return UCS_OK;
-
-    DCHECK_GE(header_length, 8);
-
-    const uint8_t* frame_header = reinterpret_cast<const uint8_t*>(header);
-    if (frame_header[0] != kFrameVersion) {
-      driver_->Push(Status::IOError("Expected frame version ", kFrameVersion, " but got ",
-                                    frame_header[0]));
-      // Can only return non-OK if the incoming message used rendezvous mode
-      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
-    } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
-      driver_->Push(Status::IOError("Unknown frame type ", frame_header[1]));
-      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
+    if (!driver_) {
+      ARROW_LOG(WARNING) << "Got message with no active call";
+      return UCS_OK;
     }
 
-    std::unique_ptr<Buffer> buffer;
-    ucs_status_t result = UCS_OK;
-    auto status = driver_->MakeActiveMessageBuffer(data, data_length, param, &result)
-                      .Value(&buffer);
-    if (!status.ok()) {
-      driver_->Push(std::move(status));
-      return is_rndv ? UCS_ERR_REJECTED : UCS_OK;
-    }
+    UcpCallDriver* driver = driver_;
 
-    auto frame = std::make_shared<Frame>(static_cast<FrameType>(frame_header[1]),
-                                         std::move(buffer));
-    if (frame->type == FrameType::kFlightPayload) {
-      DCHECK_GE(header_length, 20) << "length was: " << header_length;
-      frame->payload_segment_type =
-          static_cast<FlightPayloadSegmentType>(frame_header[8]);
-      frame->segment_index = BeBytesToInt32(frame_header + 12);
-      frame->total_segments = BeBytesToInt32(frame_header + 16);
-    }
-    driver_->Push(std::move(frame));
-    return result;
+    driver->RecvActiveMessage(header, header_length, data, data_length, param)
+        .Then([driver](const std::shared_ptr<Frame>& frame) { driver->Push(frame); },
+              [driver](const Status& status) { driver->Push(status); });
+    return UCS_OK;
   }
 
   ucp_context_h ucp_context_;
