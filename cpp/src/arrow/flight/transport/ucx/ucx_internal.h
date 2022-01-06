@@ -146,6 +146,7 @@ class UcpCallDriver {
 
   // Client side only.
   Status StartCall(const std::string& method);
+
   Status SendHeaders(const std::vector<std::pair<std::string, std::string>>& headers);
   Status SendStatus(const Status& status,
                     const std::vector<std::pair<std::string, std::string>>& headers = {});
@@ -161,6 +162,8 @@ class UcpCallDriver {
 
   Status Close();
 
+  // Synchronously make progress (to adapt async to sync APIs)
+  void MakeProgress();
   void Push(std::shared_ptr<Frame> frame);
   void Push(Status status);
 

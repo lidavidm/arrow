@@ -242,9 +242,7 @@ class UcpCallDriver::Impl {
   arrow::Result<std::shared_ptr<Frame>> ReadNextFrame() {
     // TODO: reimplement the client/server async, get rid of sync methods here
     auto fut = ReadFrameAsync();
-    while (!fut.is_finished()) {
-      ucp_worker_progress(worker_);
-    }
+    while (!fut.is_finished()) MakeProgress();
     RETURN_NOT_OK(fut.status());
     return fut.MoveResult();
   }
@@ -320,17 +318,22 @@ class UcpCallDriver::Impl {
     if (!ipc::Message::HasBody(payload.ipc_message.type)) return Status::OK();
 
     // Send individual IPC body buffers
+    // TODO: parallelize all sends (requires client not to assume any ordering)
     header[8] = static_cast<uint8_t>(FlightPayloadSegmentType::kIpcBodyBuffer);
+    std::vector<void*> requests;
+    requests.reserve(payload.ipc_message.body_buffers.size());
     for (const auto& buffer : payload.ipc_message.body_buffers) {
       if (!buffer || buffer->size() == 0) continue;
       Int32ToBytesBe(buffer->size(), header + 4);
       Int32ToBytesBe(counter++, header + 12);
       request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 20, buffer->data(),
                                 buffer->size(), &request_param);
-      RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
-      // No need to add padding
+      requests.push_back(request);
     }
 
+    for (void* request : requests) {
+      RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
+    }
     return Status::OK();
   }
 
@@ -353,6 +356,8 @@ class UcpCallDriver::Impl {
     }
     return Status::OK();
   }
+
+  void MakeProgress() { ucp_worker_progress(worker_); }
 
   void Push(std::shared_ptr<Frame> frame) {
     std::unique_lock<std::mutex> guard(frame_mutex_);
@@ -565,6 +570,8 @@ Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
 }
 
 Status UcpCallDriver::Close() { return impl_->Close(); }
+
+void UcpCallDriver::MakeProgress() { impl_->MakeProgress(); }
 
 void UcpCallDriver::Push(std::shared_ptr<Frame> frame) {
   return impl_->Push(std::move(frame));
