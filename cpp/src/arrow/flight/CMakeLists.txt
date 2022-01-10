@@ -225,6 +225,10 @@ if(ARROW_BUILD_TESTS OR ARROW_BUILD_BENCHMARKS)
   target_link_libraries(flight-test-server ${ARROW_FLIGHT_TEST_LINK_LIBS}
                         ${GFLAGS_LIBRARIES} GTest::gtest)
 
+                      if (ARROW_CUDA)
+                        target_link_libraries(arrow-flight-test PRIVATE arrow_cuda_shared)
+                      endif()
+
   if(ARROW_BUILD_TESTS)
     add_dependencies(arrow-flight-test flight-test-server)
   endif()

@@ -31,8 +31,10 @@
 #include <vector>
 
 #include "arrow/flight/api.h"
+#include "arrow/gpu/cuda_api.h"
 #include "arrow/ipc/test_common.h"
 #include "arrow/status.h"
+#include "arrow/table.h"
 #include "arrow/testing/generator.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/util.h"
@@ -2847,6 +2849,58 @@ TEST_F(TestCancel, DoExchange) {
   ASSERT_OK(client_->DoExchange(FlightDescriptor::Command(""), &writer, &stream));
   EXPECT_RAISES_WITH_MESSAGE_THAT(Cancelled, ::testing::HasSubstr("StopSource"),
                                   stream->ReadAll(&table, options.stop_token));
+}
+
+class CudaTestServer : public FlightServerBase {
+ public:
+  Status DoGet(const ServerCallContext&, const Ticket&,
+               std::unique_ptr<FlightDataStream>* data_stream) override {
+    BatchVector batches;
+    RETURN_NOT_OK(ExampleIntBatches(&batches));
+    auto batch_reader = std::make_shared<BatchIterator>(batches[0]->schema(), batches);
+    *data_stream = std::unique_ptr<FlightDataStream>(new RecordBatchStream(batch_reader));
+    return Status::OK();
+  }
+};
+
+class TestCuda : public ::testing::Test {
+ public:
+  void SetUp() {
+    ASSERT_OK(MakeServer<CudaTestServer>(
+        &server_, &client_, [](FlightServerOptions* options) { return Status::OK(); },
+        [](FlightClientOptions* options) { return Status::OK(); }));
+  }
+  void TearDown() { ASSERT_OK(server_->Shutdown()); }
+
+ protected:
+  std::unique_ptr<FlightClient> client_;
+  std::unique_ptr<FlightServerBase> server_;
+};
+
+TEST_F(TestCuda, DoGet) {
+  // TODO: split this into its own cc file and conditionally include
+  ASSERT_OK_AND_ASSIGN(auto manager, cuda::CudaDeviceManager::Instance());
+  ASSERT_OK_AND_ASSIGN(auto device, manager->GetDevice(0));
+
+  FlightCallOptions options;
+  options.memory_manager = device->default_memory_manager();
+
+  Ticket ticket{""};
+  std::unique_ptr<FlightStreamReader> stream;
+  ASSERT_OK(client_->DoGet(options, ticket, &stream));
+  std::shared_ptr<Table> table;
+  ASSERT_OK(stream->ReadAll(&table));
+
+  for (const auto& column : table->columns()) {
+    for (const auto& chunk : column->chunks()) {
+      for (const auto& buffer : chunk->data()->buffers) {
+        if (!buffer) continue;
+        ASSERT_TRUE(buffer->device()->Equals(*device))
+            << "Expected buffer on device " << device->ToString()
+            << " but was allocated on device " << buffer->device()->ToString();
+      }
+    }
+  }
 }
 
 }  // namespace flight

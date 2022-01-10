@@ -1045,11 +1045,28 @@ FlightMetadataReader::~FlightMetadataReader() = default;
 class GrpcClientDataStream : public internal::ClientDataStream {
  public:
   GrpcClientDataStream(std::shared_ptr<ClientRpc> rpc,
-                       std::shared_ptr<grpc::ClientReader<pb::FlightData>> stream)
-      : rpc_(std::move(rpc)), stream_(std::move(stream)), finished_(false) {}
+                       std::shared_ptr<grpc::ClientReader<pb::FlightData>> stream,
+                       std::shared_ptr<MemoryManager> memory_manager)
+      : rpc_(std::move(rpc)),
+        stream_(std::move(stream)),
+        memory_manager_(memory_manager ? std::move(memory_manager)
+                                       : CPUDevice::Instance()->default_memory_manager()),
+        finished_(false) {}
 
   bool Read(internal::FlightData* data) {
-    return internal::ReadPayload(stream_.get(), data);
+    bool success = internal::ReadPayload(stream_.get(), data);
+    if (ARROW_PREDICT_FALSE(!success)) return false;
+    if (ARROW_PREDICT_FALSE(!memory_manager_->is_cpu())) {
+      if (!data->body) return true;
+      auto status =
+          MemoryManager::CopyBuffer(data->body, memory_manager_).Value(&data->body);
+      if (!status.ok()) {
+        ARROW_LOG(WARNING) << status.ToString();
+        server_status_ = std::move(status);
+        return false;
+      }
+    }
+    return true;
   }
   Status Write(const FlightPayload& payload) { return Status::NotImplemented("NYI"); }
   Status WritesDone() { return Status::NotImplemented("NYI"); }
@@ -1089,6 +1106,7 @@ class GrpcClientDataStream : public internal::ClientDataStream {
 
   std::shared_ptr<ClientRpc> rpc_;
   std::shared_ptr<grpc::ClientReader<pb::FlightData>> stream_;
+  std::shared_ptr<MemoryManager> memory_manager_;
   bool finished_;
   Status server_status_;
 };
@@ -1433,8 +1451,8 @@ class GrpcClientImpl : public internal::ClientTransportImpl {
     RETURN_NOT_OK(rpc->SetToken(auth_handler_.get()));
     std::shared_ptr<grpc::ClientReader<pb::FlightData>> stream =
         stub_->DoGet(&rpc->context, pb_ticket);
-    *out = std::unique_ptr<internal::ClientDataStream>(
-        new GrpcClientDataStream(std::move(rpc), std::move(stream)));
+    *out = std::unique_ptr<internal::ClientDataStream>(new GrpcClientDataStream(
+        std::move(rpc), std::move(stream), options.memory_manager));
     return Status::OK();
   }
 
