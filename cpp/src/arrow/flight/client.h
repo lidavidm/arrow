@@ -73,6 +73,9 @@ class ARROW_FLIGHT_EXPORT FlightCallOptions {
 
   /// \brief A token to enable interactive user cancellation of long-running requests.
   StopToken stop_token;
+
+  /// \brief An explicit memory manager to control where data is allocated. Optional.
+  std::shared_ptr<MemoryManager> memory_manager;
 };
 
 /// \brief Indicate that the client attempted to write a message

@@ -237,7 +237,13 @@ void AmRecvCallback(void* request, ucs_status_t status, size_t length, void* use
 class UcpCallDriver::Impl {
  public:
   Impl() : worker_(nullptr), endpoint_(nullptr) {}
-  Impl(ucp_worker_h worker, ucp_ep_h endpoint) : worker_(worker), endpoint_(endpoint) {}
+  Impl(ucp_worker_h worker, ucp_ep_h endpoint,
+       std::shared_ptr<MemoryManager> memory_manager)
+      : worker_(worker),
+        endpoint_(endpoint),
+        memory_manager_(memory_manager
+                            ? std::move(memory_manager)
+                            : CPUDevice::Instance()->default_memory_manager()) {}
 
   arrow::Result<std::shared_ptr<Frame>> ReadNextFrame() {
     // TODO: reimplement the client/server async, get rid of sync methods here
@@ -304,6 +310,7 @@ class UcpCallDriver::Impl {
     uint8_t header[8] = {0};
     header[0] = kFrameVersion;
     header[1] = static_cast<uint8_t>(FrameType::kPayload);
+    Int32ToBytesBe(payload.ipc_message.metadata->size(), header + 4);
     std::vector<ucp_dt_iov_t> iovs(total_messages);
 
     iovs[0].buffer = const_cast<void*>(
@@ -400,10 +407,17 @@ class UcpCallDriver::Impl {
           "Cannot allocate buffer greater than int64_t max, requested: ", data_length);
     }
 
-    // TODO: accept an allocator so we can allocate in CUDA memory
-    ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateBuffer(data_length));
     const FrameType frame_type = static_cast<FrameType>(frame_header[1]);
-    auto frame = std::make_shared<Frame>(frame_type, std::move(buffer));
+    std::unique_ptr<Buffer> buffer;
+
+    if (frame_type == FrameType::kPayload) {
+      ARROW_ASSIGN_OR_RAISE(buffer, memory_manager_->AllocateBuffer(data_length));
+    } else {
+      // TODO: allow custom pool
+      ARROW_ASSIGN_OR_RAISE(buffer, AllocateBuffer(data_length));
+    }
+    auto frame = std::make_shared<Frame>(frame_type, BeBytesToInt32(frame_header + 4),
+                                         std::move(buffer));
 
     // TODO: for DATA, recv_data_nbx seems to memcpy, but docs state
     // recv is sometimes needed (e.g. "unpack data to device
@@ -425,10 +439,14 @@ class UcpCallDriver::Impl {
       recv_param.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
       recv_param.cb.recv_am = AmRecvCallback;
       recv_param.user_data = reinterpret_cast<void*>(recv_state);
+      // TODO: need to be able to differentiate between CUDA and ROCm
+      if (!recv_state->frame->buffer->is_cpu()) {
+        recv_param.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMORY_TYPE;
+        recv_param.memory_type = UCS_MEMORY_TYPE_CUDA;
+      }
 
-      void* request =
-          ucp_am_recv_data_nbx(worker_, data, recv_state->frame->buffer->mutable_data(),
-                               data_length, &recv_param);
+      void* dest = reinterpret_cast<void*>(recv_state->frame->buffer->mutable_address());
+      void* request = ucp_am_recv_data_nbx(worker_, data, dest, data_length, &recv_param);
       if (UCS_PTR_IS_ERR(request)) {
         delete recv_state;
         return FromUcsStatus("ucp_am_recv_data_nbx", UCS_PTR_STATUS(request));
@@ -446,6 +464,8 @@ class UcpCallDriver::Impl {
     std::memcpy(frame->buffer->mutable_data(), data, data_length);
     return frame;
   }
+
+  const std::shared_ptr<MemoryManager>& memory_manager() const { return memory_manager_; }
 
  private:
   Status CompleteRequestBlocking(const std::string& context, void* request) {
@@ -472,14 +492,16 @@ class UcpCallDriver::Impl {
 
   ucp_worker_h worker_;
   ucp_ep_h endpoint_;
+  std::shared_ptr<MemoryManager> memory_manager_;
 
   std::mutex frame_mutex_;
   std::deque<Future<std::shared_ptr<Frame>>> frames_;
 };
 
 UcpCallDriver::UcpCallDriver() : impl_(nullptr) {}
-UcpCallDriver::UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint)
-    : impl_(new Impl(worker, endpoint)) {}
+UcpCallDriver::UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint,
+                             std::shared_ptr<MemoryManager> memory_manager)
+    : impl_(new Impl(worker, endpoint, std::move(memory_manager))) {}
 UcpCallDriver::UcpCallDriver(UcpCallDriver&&) = default;
 UcpCallDriver& UcpCallDriver::operator=(UcpCallDriver&&) = default;
 UcpCallDriver::~UcpCallDriver() = default;
@@ -586,6 +608,10 @@ arrow::Future<std::shared_ptr<Frame>> UcpCallDriver::RecvActiveMessage(
     const void* header, size_t header_length, void* data, const size_t data_length,
     const ucp_am_recv_param_t* param) {
   return impl_->RecvActiveMessage(header, header_length, data, data_length, param);
+}
+
+const std::shared_ptr<MemoryManager>& UcpCallDriver::memory_manager() const {
+  return impl_->memory_manager();
 }
 
 }  // namespace ucx

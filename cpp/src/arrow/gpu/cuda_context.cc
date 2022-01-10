@@ -31,6 +31,7 @@
 #include "arrow/gpu/cuda_internal.h"
 #include "arrow/gpu/cuda_memory.h"
 #include "arrow/util/checked_cast.h"
+#include "arrow/util/make_unique.h"
 
 namespace arrow {
 
@@ -301,14 +302,14 @@ Result<std::shared_ptr<io::RandomAccessFile>> CudaMemoryManager::GetBufferReader
         "for device ",
         buf->device()->ToString());
   }
-  return std::make_shared<CudaBufferReader>(checked_pointer_cast<CudaBuffer>(buf));
+  return std::make_shared<CudaBufferReader>(buf);
 }
 
 Result<std::shared_ptr<io::OutputStream>> CudaMemoryManager::GetBufferWriter(
     std::shared_ptr<Buffer> buf) {
   if (*buf->device() != *device_) {
     return Status::Invalid(
-        "CudaMemoryManager::GetBufferReader called on foreign buffer "
+        "CudaMemoryManager::GetBufferWriter called on foreign buffer "
         "for device ",
         buf->device()->ToString());
   }
@@ -319,9 +320,8 @@ Result<std::shared_ptr<io::OutputStream>> CudaMemoryManager::GetBufferWriter(
   return writer;
 }
 
-Result<std::shared_ptr<Buffer>> CudaMemoryManager::AllocateBuffer(int64_t size) {
+Result<std::unique_ptr<Buffer>> CudaMemoryManager::AllocateBuffer(int64_t size) {
   ARROW_ASSIGN_OR_RAISE(auto context, cuda_device()->GetContext());
-  std::shared_ptr<CudaBuffer> dest;
   return context->Allocate(size);
 }
 
@@ -529,10 +529,11 @@ CudaContext::CudaContext() { impl_.reset(new Impl()); }
 
 CudaContext::~CudaContext() {}
 
-Result<std::shared_ptr<CudaBuffer>> CudaContext::Allocate(int64_t nbytes) {
+Result<std::unique_ptr<CudaBuffer>> CudaContext::Allocate(int64_t nbytes) {
   uint8_t* data = nullptr;
   RETURN_NOT_OK(impl_->Allocate(nbytes, &data));
-  return std::make_shared<CudaBuffer>(data, nbytes, this->shared_from_this(), true);
+  return arrow::internal::make_unique<CudaBuffer>(data, nbytes, this->shared_from_this(),
+                                                  true);
 }
 
 Result<std::shared_ptr<CudaBuffer>> CudaContext::View(uint8_t* data, int64_t nbytes) {

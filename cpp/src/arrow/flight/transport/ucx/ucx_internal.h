@@ -101,11 +101,12 @@ class HeadersFrame {
 
 struct Frame {
   FrameType type;
+  int32_t length;
   std::unique_ptr<Buffer> buffer;
 
   Frame() = default;
-  Frame(FrameType type_, std::unique_ptr<Buffer> buffer_)
-      : type(type_), buffer(std::move(buffer_)) {}
+  Frame(FrameType type_, int32_t length_, std::unique_ptr<Buffer> buffer_)
+      : type(type_), length(length_), buffer(std::move(buffer_)) {}
 };
 
 constexpr uint8_t kFrameVersion = 0x42;
@@ -114,7 +115,8 @@ constexpr uint32_t kUcpAmHandlerId = 0x1024;
 class UcpCallDriver {
  public:
   UcpCallDriver();
-  UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint);
+  UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint,
+                std::shared_ptr<MemoryManager> memory_manager = NULLPTR);
 
   UcpCallDriver(const UcpCallDriver&) = delete;
   UcpCallDriver(UcpCallDriver&&);
@@ -145,6 +147,8 @@ class UcpCallDriver {
   void MakeProgress();
   void Push(std::shared_ptr<Frame> frame);
   void Push(Status status);
+
+  const std::shared_ptr<MemoryManager>& memory_manager() const;
 
   Future<std::shared_ptr<Frame>> RecvActiveMessage(const void* header,
                                                    size_t header_length, void* data,

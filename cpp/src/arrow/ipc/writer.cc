@@ -1398,7 +1398,7 @@ Result<std::shared_ptr<Buffer>> SerializeRecordBatch(const RecordBatch& batch,
   int64_t size = 0;
   RETURN_NOT_OK(GetRecordBatchSize(batch, options, &size));
   ARROW_ASSIGN_OR_RAISE(auto buffer, mm->AllocateBuffer(size));
-  ARROW_ASSIGN_OR_RAISE(auto writer, Buffer::GetWriter(buffer));
+  ARROW_ASSIGN_OR_RAISE(auto writer, Buffer::GetWriter(std::move(buffer)));
 
   // XXX Should we have a helper function for getting a MemoryPool
   // for any MemoryManager (not only CPU)?

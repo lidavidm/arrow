@@ -20,6 +20,8 @@
 
 #include "arrow/flight/test_util.h"
 #include "arrow/flight/transport/ucx/ucx.h"
+#include "arrow/gpu/cuda_api.h"
+#include "arrow/table.h"
 #include "arrow/testing/gtest_util.h"
 
 // TODO: ensure UCX headers are not in public api
@@ -88,6 +90,32 @@ TEST_F(TestUcx, DoGet) {
   std::shared_ptr<Table> table;
   ASSERT_OK(stream->ReadAll(&table));
   // TODO: if we hit an NYI, we just hang on shutdown?
+}
+
+TEST_F(TestUcx, DoGetCuda) {
+  // TODO: split this into its own cc file and conditionally include
+  ASSERT_OK_AND_ASSIGN(auto manager, cuda::CudaDeviceManager::Instance());
+  ASSERT_OK_AND_ASSIGN(auto device, manager->GetDevice(0));
+
+  FlightCallOptions options;
+  options.memory_manager = device->default_memory_manager();
+
+  Ticket ticket{"a"};
+  std::unique_ptr<FlightStreamReader> stream;
+  ASSERT_OK(client_->DoGet(options, ticket, &stream));
+  std::shared_ptr<Table> table;
+  ASSERT_OK(stream->ReadAll(&table));
+
+  for (const auto& column : table->columns()) {
+    for (const auto& chunk : column->chunks()) {
+      for (const auto& buffer : chunk->data()->buffers) {
+        if (!buffer) continue;
+        ASSERT_TRUE(buffer->device()->Equals(*device))
+            << "Expected buffer on device " << device->ToString()
+            << " but was allocated on device " << buffer->device()->ToString();
+      }
+    }
+  }
 }
 
 TEST_F(TestUcx, Errors) {

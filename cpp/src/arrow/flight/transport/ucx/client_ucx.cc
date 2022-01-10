@@ -74,8 +74,21 @@ class UcxClientDataStream : public internal::ClientDataStream {
     RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kPayload));
 
     std::shared_ptr<Buffer> buffer = std::move(frame->buffer);
-    ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(buffer, nullptr));
-    data->metadata = message->metadata();
+    std::shared_ptr<Buffer> metadata;
+    if (buffer->is_cpu()) {
+      metadata = SliceBuffer(buffer, 0, frame->length);
+    } else {
+      // ipc::ReadMessage won't work because the Flight buffer has
+      // neither continuation token nor message length
+      ARROW_ASSIGN_OR_RAISE(auto reader,
+                            driver_->memory_manager()->GetBufferReader(buffer));
+      // TODO: use ReadOptions memory pool
+      ARROW_ASSIGN_OR_RAISE(metadata, AllocateBuffer(frame->length));
+      RETURN_NOT_OK(reader->Read(frame->length, metadata->mutable_data()));
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(metadata, nullptr));
+    data->metadata = std::move(metadata);
     data->body = SliceBuffer(buffer, data->metadata->size(), message->body_length());
     return true;
   }
@@ -267,8 +280,8 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
   Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
                std::unique_ptr<internal::ClientDataStream>* stream) override {
-    auto driver =
-        arrow::internal::make_unique<UcpCallDriver>(ucp_worker_, remote_endpoint_);
+    auto driver = arrow::internal::make_unique<UcpCallDriver>(
+        ucp_worker_, remote_endpoint_, options.memory_manager);
     RETURN_NOT_OK(driver->StartCall("arrow.flight.protocol.FlightService/DoGet"));
     driver_ = driver.get();
 
@@ -310,6 +323,8 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
     UcpCallDriver* driver = driver_;
 
+    // TODO: ensure Push doesn't synchronously run a callback on this
+    // thread since that'll block UCX from making progress
     driver->RecvActiveMessage(header, header_length, data, data_length, param)
         .Then([driver](const std::shared_ptr<Frame>& frame) { driver->Push(frame); },
               [driver](const Status& status) { driver->Push(status); });
