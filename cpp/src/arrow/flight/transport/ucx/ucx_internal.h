@@ -84,21 +84,8 @@ enum class FrameType : uint8_t {
   kHeaders = 0,
   // Binary blob.
   kPayload,
-  // A fragment of a FlightPayload. With the Active Message (AM) API,
-  // we send distinct buffers, so a payload has to get fragmented and
-  // sent as its constituent components (1x IPC header, 0-Nx buffers,
-  // ...) In that case the frame header contains an index and type
-  kFlightPayload,
   // Keep at end.
-  kMaxFrameType = kFlightPayload,
-};
-
-enum class FlightPayloadSegmentType : uint8_t {
-  kInvalid = 0,
-  kIpcHeader = 1,
-  kIpcBodyBuffer = 2,
-  // Keep at end.
-  kMaxSegment = kIpcBodyBuffer,
+  kMaxFrameType = kPayload,
 };
 
 class HeadersFrame {
@@ -114,19 +101,11 @@ class HeadersFrame {
 
 struct Frame {
   FrameType type;
-  // Only applicable if type == kFlightPayload
-  FlightPayloadSegmentType payload_segment_type;
-  int32_t segment_index;
-  int32_t total_segments;
   std::unique_ptr<Buffer> buffer;
 
   Frame() = default;
   Frame(FrameType type_, std::unique_ptr<Buffer> buffer_)
-      : type(type_),
-        payload_segment_type(FlightPayloadSegmentType::kInvalid),
-        segment_index(0),
-        total_segments(0),
-        buffer(std::move(buffer_)) {}
+      : type(type_), buffer(std::move(buffer_)) {}
 };
 
 constexpr uint8_t kFrameVersion = 0x42;

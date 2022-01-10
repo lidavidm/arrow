@@ -282,58 +282,55 @@ class UcpCallDriver::Impl {
   }
 
   Status SendFlightPayload(const FlightPayload& payload) {
-    int32_t counter = 0;
+    static const uint8_t kPaddingBytes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
     void* request = nullptr;
     ucp_request_param_t request_param;
-    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
+    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_DATATYPE;
     request_param.flags = UCP_AM_SEND_FLAG_REPLY;
+    request_param.datatype = UCP_DATATYPE_IOV;
 
     int32_t total_messages = 1;
     for (const auto& buffer : payload.ipc_message.body_buffers) {
       if (!buffer || buffer->size() == 0) continue;
       total_messages++;
+
+      const auto remainder = static_cast<int>(
+          bit_util::RoundUpToMultipleOf8(buffer->size()) - buffer->size());
+      if (remainder) total_messages++;
     }
 
-    // AM models sends of individual buffers with lengths, so unlike
-    // the stream API, we can't implicitly concatenate messages "on
-    // the wire" by writing them sequentially. Consequently, the IPC
-    // message needs to be sent as individual buffers (perhaps not
-    // ideal) Also, we can't abuse custom datatypes to do the transfer
-    // in one go since the API doesn't accept that parameter.
-
-    uint8_t header[20] = {0};
+    // Do an active message send with IOV to send all buffers in one go
+    uint8_t header[8] = {0};
     header[0] = kFrameVersion;
-    header[1] = static_cast<uint8_t>(FrameType::kFlightPayload);
-    Int32ToBytesBe(total_messages, header + 16);
+    header[1] = static_cast<uint8_t>(FrameType::kPayload);
+    std::vector<ucp_dt_iov_t> iovs(total_messages);
 
-    // Send IPC header
-    Int32ToBytesBe(payload.ipc_message.metadata->size(), header + 4);
-    header[8] = static_cast<uint8_t>(FlightPayloadSegmentType::kIpcHeader);
-    Int32ToBytesBe(counter++, header + 12);
-    request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 20,
-                              payload.ipc_message.metadata->data(),
-                              payload.ipc_message.metadata->size(), &request_param);
+    iovs[0].buffer = const_cast<void*>(
+        reinterpret_cast<const void*>(payload.ipc_message.metadata->data()));
+    iovs[0].length = payload.ipc_message.metadata->size();
+    if (ipc::Message::HasBody(payload.ipc_message.type)) {
+      ucp_dt_iov_t* iov = iovs.data() + 1;
+      for (const auto& buffer : payload.ipc_message.body_buffers) {
+        if (!buffer || buffer->size() == 0) continue;
+
+        iov->buffer = const_cast<void*>(reinterpret_cast<const void*>(buffer->data()));
+        iov->length = buffer->size();
+        ++iov;
+
+        const auto remainder = static_cast<int>(
+            bit_util::RoundUpToMultipleOf8(buffer->size()) - buffer->size());
+        if (remainder) {
+          iov->buffer = const_cast<void*>(reinterpret_cast<const void*>(kPaddingBytes));
+          iov->length = remainder;
+          ++iov;
+        }
+      }
+    }
+
+    request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 8, iovs.data(),
+                              iovs.size(), &request_param);
     RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
-
-    if (!ipc::Message::HasBody(payload.ipc_message.type)) return Status::OK();
-
-    // Send individual IPC body buffers
-    // TODO: parallelize all sends (requires client not to assume any ordering)
-    header[8] = static_cast<uint8_t>(FlightPayloadSegmentType::kIpcBodyBuffer);
-    std::vector<void*> requests;
-    requests.reserve(payload.ipc_message.body_buffers.size());
-    for (const auto& buffer : payload.ipc_message.body_buffers) {
-      if (!buffer || buffer->size() == 0) continue;
-      Int32ToBytesBe(buffer->size(), header + 4);
-      Int32ToBytesBe(counter++, header + 12);
-      request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 20, buffer->data(),
-                                buffer->size(), &request_param);
-      requests.push_back(request);
-    }
-
-    for (void* request : requests) {
-      RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
-    }
     return Status::OK();
   }
 
@@ -407,17 +404,6 @@ class UcpCallDriver::Impl {
     ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateBuffer(data_length));
     const FrameType frame_type = static_cast<FrameType>(frame_header[1]);
     auto frame = std::make_shared<Frame>(frame_type, std::move(buffer));
-
-    if (frame->type == FrameType::kFlightPayload) {
-      if (header_length < 20) {
-        return Status::IOError("Header is too short, must be at least 20 bytes, got ",
-                               header_length);
-      }
-      frame->payload_segment_type =
-          static_cast<FlightPayloadSegmentType>(frame_header[8]);
-      frame->segment_index = BeBytesToInt32(frame_header + 12);
-      frame->total_segments = BeBytesToInt32(frame_header + 16);
-    }
 
     // TODO: for DATA, recv_data_nbx seems to memcpy, but docs state
     // recv is sometimes needed (e.g. "unpack data to device

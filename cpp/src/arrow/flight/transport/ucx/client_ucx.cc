@@ -71,58 +71,12 @@ class UcxClientDataStream : public internal::ClientDataStream {
       }
       return false;
     }
-    RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kFlightPayload));
+    RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kPayload));
 
-    // First buffer contains the IPC header
-    data->metadata = std::move(frame->buffer);
-    ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(data->metadata, nullptr));
-    // TODO: need custom deserializer to preserve zero-copyness
-    ARROW_ASSIGN_OR_RAISE(data->body, AllocateBuffer(message->body_length()));
-
-    // Remaining buffers contain the IPC payload
-    const int32_t total_segments = frame->total_segments;
-    std::vector<Future<std::shared_ptr<Frame>>> frame_futs;
-    frame_futs.reserve(total_segments - 1);
-
-    // Queue up reads in parallel
-    {
-      std::vector<Future<>> frame_statuses;
-      frame_statuses.reserve(total_segments - 1);
-      int32_t counter = 1;
-      while (counter < total_segments) {
-        frame_futs.push_back(driver_->ReadFrameAsync());
-        frame_statuses.emplace_back(frame_futs.back());
-        counter++;
-      }
-      auto complete = AllFinished(frame_statuses);
-      while (!complete.is_finished()) {
-        driver_->MakeProgress();
-      }
-      RETURN_NOT_OK(complete.status());
-    }
-
-    std::vector<std::shared_ptr<Frame>> frames;
-    frames.reserve(frame_futs.size());
-    for (auto& fut : frame_futs) {
-      frames.push_back(fut.MoveResult().MoveValueUnsafe());
-    }
-    std::sort(frames.begin(), frames.end(),
-              [](const std::shared_ptr<Frame>& left, const std::shared_ptr<Frame>& right)
-                  -> bool { return left->segment_index < right->segment_index; });
-
-    uint8_t* body = data->body->mutable_data();
-    for (const auto& frame : frames) {
-      std::memcpy(body, frame->buffer->data(), frame->buffer->size());
-      body += frame->buffer->size();
-
-      // Align
-      const auto remainder = static_cast<int>(
-          bit_util::RoundUpToMultipleOf8(frame->buffer->size()) - frame->buffer->size());
-      if (remainder) {
-        std::memset(body, 0, remainder);
-        body += remainder;
-      }
-    }
+    std::shared_ptr<Buffer> buffer = std::move(frame->buffer);
+    ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(buffer, nullptr));
+    data->metadata = message->metadata();
+    data->body = SliceBuffer(buffer, data->metadata->size(), message->body_length());
     return true;
   }
 
