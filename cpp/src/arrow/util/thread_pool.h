@@ -302,11 +302,13 @@ class ARROW_EXPORT SerialExecutor : public Executor {
 class ARROW_EXPORT ThreadPool : public Executor {
  public:
   // Construct a thread pool with the given number of worker threads
-  static Result<std::shared_ptr<ThreadPool>> Make(int threads);
+  static Result<std::shared_ptr<ThreadPool>> Make(
+      int threads, std::string thread_name_prefix = "Pool-");
 
   // Like Make(), but takes care that the returned ThreadPool is compatible
   // with destruction late at process exit.
-  static Result<std::shared_ptr<ThreadPool>> MakeEternal(int threads);
+  static Result<std::shared_ptr<ThreadPool>> MakeEternal(
+      int threads, std::string thread_name_prefix = "Eternal-");
 
   // Destroy thread pool; the pool will first be shut down
   ~ThreadPool() override;
@@ -329,6 +331,12 @@ class ARROW_EXPORT ThreadPool : public Executor {
   // If more threads are running than this number, excess threads are reaped
   // as soon as possible.
   Status SetCapacity(int threads);
+
+  // Set a prefix used to name threads in this pool.
+  //
+  // May not have any effect on some platforms. Some platforms enforce
+  // a length limit, so this name may be truncated.
+  Status SetThreadNamePrefix(std::string prefix);
 
   // Heuristic for the default capacity of a thread pool for CPU-bound tasks.
   // This is exposed as a static method to help with testing.

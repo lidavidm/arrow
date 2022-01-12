@@ -29,6 +29,13 @@
 #include "arrow/util/io_util.h"
 #include "arrow/util/logging.h"
 
+#ifdef ARROW_WITH_PTHREAD_SETNAME
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <pthread.h>
+#endif
+
 namespace arrow {
 namespace internal {
 
@@ -127,6 +134,11 @@ struct ThreadPool::State {
   // Trashcan for finished threads
   std::vector<std::thread> finished_workers_;
   std::deque<Task> pending_tasks_;
+
+  // Prefix used for naming threads
+  std::string prefix_;
+  // Counter used to differentiate threads further
+  int spawned_;
 
   // Desired number of threads
   int desired_capacity_ = 0;
@@ -283,6 +295,16 @@ Status ThreadPool::SetCapacity(int threads) {
   return Status::OK();
 }
 
+Status ThreadPool::SetThreadNamePrefix(std::string prefix) {
+  ProtectAgainstFork();
+  std::unique_lock<std::mutex> lock(state_->mutex_);
+  if (state_->please_shutdown_) {
+    return Status::Invalid("operation forbidden during or after shutdown");
+  }
+  state_->prefix_ = std::move(prefix);
+  return Status::OK();
+}
+
 int ThreadPool::GetCapacity() {
   ProtectAgainstFork();
   std::unique_lock<std::mutex> lock(state_->mutex_);
@@ -339,8 +361,14 @@ void ThreadPool::LaunchWorkersUnlocked(int threads) {
   for (int i = 0; i < threads; i++) {
     state_->workers_.emplace_back();
     auto it = --(state_->workers_.end());
-    *it = std::thread([this, state, it] {
+
+    // pthread has 16-char (including null byte) limit
+    auto name = (state_->prefix_ + std::to_string(state_->spawned_++)).substr(0, 15);
+    *it = std::thread([this, state, it, name] {
       current_thread_pool_ = this;
+#ifdef ARROW_WITH_PTHREAD_SETNAME
+      ARROW_UNUSED(pthread_setname_np(pthread_self(), name.c_str()));
+#endif
       WorkerLoop(state, it);
     });
   }
@@ -368,14 +396,17 @@ Status ThreadPool::SpawnReal(TaskHints hints, FnOnce<void()> task, StopToken sto
   return Status::OK();
 }
 
-Result<std::shared_ptr<ThreadPool>> ThreadPool::Make(int threads) {
+Result<std::shared_ptr<ThreadPool>> ThreadPool::Make(int threads,
+                                                     std::string thread_name_prefix) {
   auto pool = std::shared_ptr<ThreadPool>(new ThreadPool());
   RETURN_NOT_OK(pool->SetCapacity(threads));
+  RETURN_NOT_OK(pool->SetThreadNamePrefix(std::move(thread_name_prefix)));
   return pool;
 }
 
-Result<std::shared_ptr<ThreadPool>> ThreadPool::MakeEternal(int threads) {
-  ARROW_ASSIGN_OR_RAISE(auto pool, Make(threads));
+Result<std::shared_ptr<ThreadPool>> ThreadPool::MakeEternal(
+    int threads, std::string thread_name_prefix) {
+  ARROW_ASSIGN_OR_RAISE(auto pool, Make(threads, std::move(thread_name_prefix)));
   // On Windows, the ThreadPool destructor may be called after non-main threads
   // have been killed by the OS, and hang in a condition variable.
   // On Unix, we want to avoid leak reports by Valgrind.
@@ -427,7 +458,7 @@ int ThreadPool::DefaultCapacity() {
 
 // Helper for the singleton pattern
 std::shared_ptr<ThreadPool> ThreadPool::MakeCpuThreadPool() {
-  auto maybe_pool = ThreadPool::MakeEternal(ThreadPool::DefaultCapacity());
+  auto maybe_pool = ThreadPool::MakeEternal(ThreadPool::DefaultCapacity(), "ArrowCpu-");
   if (!maybe_pool.ok()) {
     maybe_pool.status().Abort("Failed to create global CPU thread pool");
   }
