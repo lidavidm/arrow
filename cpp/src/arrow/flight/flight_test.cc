@@ -31,7 +31,6 @@
 #include <vector>
 
 #include "arrow/flight/api.h"
-#include "arrow/gpu/cuda_api.h"
 #include "arrow/ipc/test_common.h"
 #include "arrow/status.h"
 #include "arrow/table.h"
@@ -39,10 +38,14 @@
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/util.h"
 #include "arrow/util/base64.h"
+#include "arrow/util/config.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/make_unique.h"
 #include "arrow/util/string.h"
 
+#ifdef ARROW_CUDA
+#include "arrow/gpu/cuda_api.h"
+#endif
 #ifdef GRPCPP_GRPCPP_H
 #error "gRPC headers should not be in public API"
 #endif
@@ -2851,6 +2854,7 @@ TEST_F(TestCancel, DoExchange) {
                                   stream->ReadAll(&table, options.stop_token));
 }
 
+#ifdef ARROW_CUDA
 class CudaTestServer : public FlightServerBase {
  public:
   Status DoGet(const ServerCallContext&, const Ticket&,
@@ -2878,7 +2882,8 @@ class TestCuda : public ::testing::Test {
 };
 
 TEST_F(TestCuda, DoGet) {
-  // TODO: split this into its own cc file and conditionally include
+  // Check that we can allocate the results of DoGet with a custom
+  // memory manager.
   ASSERT_OK_AND_ASSIGN(auto manager, cuda::CudaDeviceManager::Instance());
   ASSERT_OK_AND_ASSIGN(auto device, manager->GetDevice(0));
 
@@ -2902,6 +2907,7 @@ TEST_F(TestCuda, DoGet) {
     }
   }
 }
+#endif
 
 }  // namespace flight
 }  // namespace arrow

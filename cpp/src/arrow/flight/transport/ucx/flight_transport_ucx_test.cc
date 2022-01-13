@@ -20,9 +20,17 @@
 
 #include "arrow/flight/test_util.h"
 #include "arrow/flight/transport/ucx/ucx.h"
-#include "arrow/gpu/cuda_api.h"
 #include "arrow/table.h"
 #include "arrow/testing/gtest_util.h"
+#include "arrow/util/config.h"
+
+#ifdef UCP_API_VERSION
+#error "UCX headers should not be in public API"
+#endif
+
+#ifdef ARROW_CUDA
+#include "arrow/gpu/cuda_api.h"
+#endif
 
 // TODO: ensure UCX headers are not in public api
 
@@ -92,8 +100,8 @@ TEST_F(TestUcx, DoGet) {
   // TODO: if we hit an NYI, we just hang on shutdown?
 }
 
+#ifdef ARROW_CUDA
 TEST_F(TestUcx, DoGetCuda) {
-  // TODO: split this into its own cc file and conditionally include
   ASSERT_OK_AND_ASSIGN(auto manager, cuda::CudaDeviceManager::Instance());
   ASSERT_OK_AND_ASSIGN(auto device, manager->GetDevice(0));
 
@@ -117,6 +125,7 @@ TEST_F(TestUcx, DoGetCuda) {
     }
   }
 }
+#endif
 
 TEST_F(TestUcx, Errors) {
   auto descriptor = FlightDescriptor::Path({"error", "bar"});

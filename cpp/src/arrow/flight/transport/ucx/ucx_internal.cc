@@ -396,10 +396,10 @@ class UcpCallDriver::Impl {
 
     const uint8_t* frame_header = reinterpret_cast<const uint8_t*>(header);
     if (frame_header[0] != kFrameVersion) {
-      return Status::IOError("Expected frame version ", kFrameVersion, " but got ",
-                             frame_header[0]);
+      return Status::IOError("Expected frame version ", static_cast<int>(kFrameVersion),
+                             " but got ", static_cast<int>(frame_header[0]));
     } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
-      return Status::IOError("Unknown frame type ", frame_header[1]);
+      return Status::IOError("Unknown frame type ", static_cast<int>(frame_header[1]));
     }
 
     if (data_length > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
@@ -585,24 +585,6 @@ void UcpCallDriver::Push(std::shared_ptr<Frame> frame) {
   return impl_->Push(std::move(frame));
 }
 void UcpCallDriver::Push(Status status) { return impl_->Push(std::move(status)); }
-
-namespace {
-/// A buffer backed by an incoming UCP active message buffer with
-/// UCP_AM_RECV_ATTR_FLAG_DATA set.
-class UcpAmDataBuffer : public Buffer {
- public:
-  explicit UcpAmDataBuffer(ucp_worker_h worker, const uint8_t* data, const int64_t size)
-      : Buffer(data, size), worker_(worker) {}
-
-  ~UcpAmDataBuffer() {
-    ucp_am_data_release(worker_,
-                        const_cast<void*>(reinterpret_cast<const void*>(data())));
-  }
-
- private:
-  ucp_worker_h worker_;
-};
-}  // namespace
 
 arrow::Future<std::shared_ptr<Frame>> UcpCallDriver::RecvActiveMessage(
     const void* header, size_t header_length, void* data, const size_t data_length,

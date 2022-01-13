@@ -38,10 +38,14 @@
 #include "arrow/flight/perf.pb.h"
 #include "arrow/flight/test_util.h"
 
+#ifdef ARROW_CUDA
+#include "arrow/gpu/cuda_api.h"
+#endif
 #ifdef ARROW_WITH_UCX
 #include "arrow/flight/transport/ucx/ucx.h"
 #endif
 
+DEFINE_bool(cuda, false, "Allocate results in CUDA memory");
 DEFINE_string(transport, "grpc", "Transport to use");
 DEFINE_string(server_host, "",
               "An existing performance server to benchmark against (leave blank to spawn "
@@ -425,6 +429,16 @@ int main(int argc, char** argv) {
     std::cout << std::endl;
 
     call_options.write_options.codec = std::move(codec);
+  }
+  if (FLAGS_cuda) {
+#ifdef ARROW_CUDA
+    auto manager = *arrow::cuda::CudaDeviceManager::Instance();
+    auto device = *manager->GetDevice(0);
+    call_options.memory_manager = device->default_memory_manager();
+#else
+    std::cerr << "-cuda requires that Arrow is built with ARROW_CUDA" << std::endl;
+    return 1;
+#endif
   }
   if (!FLAGS_data_file.empty() && !FLAGS_test_put) {
     std::cerr << "A data file can only be specified with \"-test_put\"" << std::endl;
