@@ -32,8 +32,6 @@
 #include "arrow/gpu/cuda_api.h"
 #endif
 
-// TODO: ensure UCX headers are not in public api
-
 namespace arrow {
 namespace flight {
 

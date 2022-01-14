@@ -179,11 +179,6 @@ Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
   }
 }
 
-// TODO: we may invert the implementation here. mimic the IPC reader:
-// feed byte buffers into a state machine, get back either (1) not
-// enough data or (2) directions on what to do next
-// This would make it easier to use UCX-allocated buffers
-
 constexpr char kHeaderMethod[] = ":method:";
 
 arrow::Result<HeadersFrame> HeadersFrame::Parse(std::unique_ptr<Buffer> buffer) {
