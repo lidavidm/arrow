@@ -96,10 +96,16 @@ TEST_F(TestUcx, DoGet) {
   ASSERT_OK(client_->DoGet(ticket, &stream));
   std::shared_ptr<Table> table;
   ASSERT_OK(stream->ReadAll(&table));
+
+  BatchVector batches;
+  ASSERT_OK(ExampleIntBatches(&batches));
+  ASSERT_OK_AND_ASSIGN(auto expected, Table::FromRecordBatches(batches));
+  AssertTablesEqual(*table, *expected);
   // TODO: if we hit an NYI, we just hang on shutdown?
 }
 
 #ifdef ARROW_CUDA
+// TODO: split this out into a separate test like the main flight test
 TEST_F(TestUcx, DoGetCuda) {
   ASSERT_OK_AND_ASSIGN(auto manager, cuda::CudaDeviceManager::Instance());
   ASSERT_OK_AND_ASSIGN(auto device, manager->GetDevice(0));

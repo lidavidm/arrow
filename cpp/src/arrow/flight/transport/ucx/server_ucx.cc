@@ -77,10 +77,14 @@ class UcxTransportDataStream : public internal::TransportDataStream {
     return driver_->SendFlightPayload(payload);
   }
 
-  Status WritesDone() { return Status::OK(); }
+  Status WritesDone() {
+    // TODO: need to flush all existing data, prevent further writes
+    return Status::OK();
+  }
 
  private:
   UcpCallDriver* driver_;
+  std::queue<void*> requests_;
 };
 }  // namespace
 

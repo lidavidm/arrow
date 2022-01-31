@@ -285,7 +285,6 @@ class UcpCallDriver::Impl {
   Status SendFlightPayload(const FlightPayload& payload) {
     static const uint8_t kPaddingBytes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
-    void* request = nullptr;
     ucp_request_param_t request_param;
     request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_DATATYPE;
     request_param.flags = UCP_AM_SEND_FLAG_REPLY;
@@ -330,10 +329,65 @@ class UcpCallDriver::Impl {
       }
     }
 
-    request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 8, iovs.data(),
-                              iovs.size(), &request_param);
+    void* request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 8, iovs.data(),
+                                    iovs.size(), &request_param);
     RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
     return Status::OK();
+  }
+
+  arrow::Result<void*> SendFlightPayloadNonBlocking(const FlightPayload& payload) {
+    static const uint8_t kPaddingBytes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+    ucp_request_param_t request_param;
+    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_DATATYPE;
+    request_param.flags = UCP_AM_SEND_FLAG_REPLY;
+    request_param.datatype = UCP_DATATYPE_IOV;
+
+    int32_t total_messages = 1;
+    for (const auto& buffer : payload.ipc_message.body_buffers) {
+      if (!buffer || buffer->size() == 0) continue;
+      total_messages++;
+
+      const auto remainder = static_cast<int>(
+          bit_util::RoundUpToMultipleOf8(buffer->size()) - buffer->size());
+      if (remainder) total_messages++;
+    }
+
+    // Do an active message send with IOV to send all buffers in one go
+    uint8_t header[8] = {0};
+    header[0] = kFrameVersion;
+    header[1] = static_cast<uint8_t>(FrameType::kPayload);
+    Int32ToBytesBe(payload.ipc_message.metadata->size(), header + 4);
+    std::vector<ucp_dt_iov_t> iovs(total_messages);
+
+    iovs[0].buffer = const_cast<void*>(
+        reinterpret_cast<const void*>(payload.ipc_message.metadata->data()));
+    iovs[0].length = payload.ipc_message.metadata->size();
+    if (ipc::Message::HasBody(payload.ipc_message.type)) {
+      ucp_dt_iov_t* iov = iovs.data() + 1;
+      for (const auto& buffer : payload.ipc_message.body_buffers) {
+        if (!buffer || buffer->size() == 0) continue;
+
+        iov->buffer = const_cast<void*>(reinterpret_cast<const void*>(buffer->data()));
+        iov->length = buffer->size();
+        ++iov;
+
+        const auto remainder = static_cast<int>(
+            bit_util::RoundUpToMultipleOf8(buffer->size()) - buffer->size());
+        if (remainder) {
+          iov->buffer = const_cast<void*>(reinterpret_cast<const void*>(kPaddingBytes));
+          iov->length = remainder;
+          ++iov;
+        }
+      }
+    }
+
+    void* request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 8, iovs.data(),
+                                    iovs.size(), &request_param);
+    if (UCS_PTR_IS_ERR(request)) {
+      return FromUcsStatus("ucp_am_send_nbx", UCS_PTR_STATUS(request));
+    }
+    return request;
   }
 
   Status Close() {
@@ -570,6 +624,11 @@ Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
 
 Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
   return impl_->SendFlightPayload(payload);
+}
+
+arrow::Result<void*> UcpCallDriver::SendFlightPayloadNonBlocking(
+    const FlightPayload& payload) {
+  return impl_->SendFlightPayloadNonBlocking(payload);
 }
 
 Status UcpCallDriver::Close() { return impl_->Close(); }
