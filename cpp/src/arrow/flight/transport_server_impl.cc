@@ -50,9 +50,11 @@ Status FlightServiceImpl::DoGet(const ServerCallContext& context, const Ticket& 
     // End of stream
     if (payload.ipc_message.metadata == nullptr) break;
     auto status = stream->Write(payload);
+    // TODO: document why IOError is ignored here (how is it reported?)
     if (status.IsIOError()) return Status::OK();
     RETURN_NOT_OK(status);
   }
+  RETURN_NOT_OK(stream->WritesDone());
   return Status::OK();
 }
 

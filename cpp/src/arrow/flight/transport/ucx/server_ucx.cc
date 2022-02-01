@@ -122,7 +122,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       // We need to either specify WAKEUP, or use the epoll API and
       // manually drive the event loop for UCX
       // Source: iodemo example in upstream UCX tree
-      ucp_params.features = UCP_FEATURE_AM | UCP_FEATURE_STREAM | UCP_FEATURE_WAKEUP;
+      ucp_params.features = UCP_FEATURE_AM | UCP_FEATURE_WAKEUP;
       ucp_params.mt_workers_shared = UCS_THREAD_MODE_MULTI;
 
       status = ucp_init(&ucp_params, ucp_config, &ucp_context_);

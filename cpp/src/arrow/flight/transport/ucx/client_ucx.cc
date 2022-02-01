@@ -163,7 +163,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
       std::memset(&ucp_params, 0, sizeof(ucp_params));
       ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
-      ucp_params.features = UCP_FEATURE_AM | UCP_FEATURE_STREAM | UCP_FEATURE_WAKEUP;
+      ucp_params.features = UCP_FEATURE_AM | UCP_FEATURE_WAKEUP;
 
       status = ucp_init(&ucp_params, ucp_config, &ucp_context_);
       ucp_config_release(ucp_config);
