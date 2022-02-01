@@ -133,7 +133,7 @@ class UcpCallDriver {
                     const std::vector<std::pair<std::string, std::string>>& headers = {});
   Status SendPayload(const uint8_t* data, const int64_t size);
   Status SendFlightPayload(const FlightPayload& payload);
-  arrow::Result<void*> SendFlightPayloadNonBlocking(const FlightPayload& payload);
+  Future<> SendFlightPayloadNonBlocking(const FlightPayload& payload);
 
   arrow::Result<std::shared_ptr<Frame>> ReadNextFrame();
 

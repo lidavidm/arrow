@@ -74,17 +74,37 @@ class UcxTransportDataStream : public internal::TransportDataStream {
   bool Read(internal::FlightData* data) override { return false; }
 
   Status Write(const FlightPayload& payload) override {
-    return driver_->SendFlightPayload(payload);
+    if (requests_.size() >= kBackpressureThreshold) {
+      auto fut = requests_.front();
+      while (!fut.is_finished()) {
+        driver_->MakeProgress();
+      }
+      requests_.pop();
+      RETURN_NOT_OK(fut.status());
+    }
+    Future<> request = driver_->SendFlightPayloadNonBlocking(payload);
+    if (!request.is_finished()) {
+      requests_.push(request);
+    } else {
+      RETURN_NOT_OK(request.status());
+    }
+    return Status::OK();
   }
 
   Status WritesDone() {
     // TODO: need to flush all existing data, prevent further writes
+    while (!requests_.empty()) {
+      RETURN_NOT_OK(requests_.front().status());
+      requests_.pop();
+    }
     return Status::OK();
   }
 
  private:
+  constexpr static size_t kBackpressureThreshold = 16;
+
   UcpCallDriver* driver_;
-  std::queue<void*> requests_;
+  std::queue<Future<>> requests_;
 };
 }  // namespace
 

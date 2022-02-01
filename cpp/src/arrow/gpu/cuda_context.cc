@@ -339,6 +339,19 @@ Result<std::shared_ptr<Buffer>> CudaMemoryManager::CopyBufferTo(
   return nullptr;
 }
 
+Result<std::unique_ptr<Buffer>> CudaMemoryManager::CopyBufferTo(
+    const Buffer& buf, const std::shared_ptr<MemoryManager>& to) {
+  if (to->is_cpu()) {
+    // Device-to-CPU copy
+    ARROW_ASSIGN_OR_RAISE(auto from_context, cuda_device()->GetContext());
+    ARROW_ASSIGN_OR_RAISE(auto dest, to->AllocateBuffer(buf.size()));
+    RETURN_NOT_OK(from_context->CopyDeviceToHost(dest->mutable_data(), buf.address(),
+                                                 buf.size()));
+    return dest;
+  }
+  return nullptr;
+}
+
 Result<std::shared_ptr<Buffer>> CudaMemoryManager::CopyBufferFrom(
     const std::shared_ptr<Buffer>& buf, const std::shared_ptr<MemoryManager>& from) {
   if (from->is_cpu()) {
@@ -366,6 +379,39 @@ Result<std::shared_ptr<Buffer>> CudaMemoryManager::CopyBufferFrom(
       // Other context
       RETURN_NOT_OK(from_context->CopyDeviceToAnotherDevice(to_context, dest->address(),
                                                             buf->address(), buf->size()));
+    }
+    return dest;
+  }
+  return nullptr;
+}
+
+Result<std::unique_ptr<Buffer>> CudaMemoryManager::CopyBufferFrom(
+    const Buffer& buf, const std::shared_ptr<MemoryManager>& from) {
+  if (from->is_cpu()) {
+    // CPU-to-device copy
+    ARROW_ASSIGN_OR_RAISE(auto to_context, cuda_device()->GetContext());
+    ARROW_ASSIGN_OR_RAISE(auto dest,
+                          to_context->Allocate(buf.size()));
+    RETURN_NOT_OK(
+        to_context->CopyHostToDevice(dest->address(), buf.data(), buf.size()));
+    return dest;
+  }
+  if (IsCudaMemoryManager(*from)) {
+    // Device-to-device copy
+    ARROW_ASSIGN_OR_RAISE(auto to_context, cuda_device()->GetContext());
+    ARROW_ASSIGN_OR_RAISE(
+        auto from_context,
+        checked_cast<const CudaMemoryManager&>(*from).cuda_device()->GetContext());
+    ARROW_ASSIGN_OR_RAISE(auto dest,
+                          to_context->Allocate(buf.size()));
+    if (to_context->handle() == from_context->handle()) {
+      // Same context
+      RETURN_NOT_OK(
+          to_context->CopyDeviceToDevice(dest->address(), buf.address(), buf.size()));
+    } else {
+      // Other context
+      RETURN_NOT_OK(from_context->CopyDeviceToAnotherDevice(to_context, dest->address(),
+                                                            buf.address(), buf.size()));
     }
     return dest;
   }

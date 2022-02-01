@@ -53,6 +53,7 @@ Status FlightServiceImpl::DoGet(const ServerCallContext& context, const Ticket& 
     if (status.IsIOError()) return Status::OK();
     RETURN_NOT_OK(status);
   }
+  RETURN_NOT_OK(stream->WritesDone());
   return Status::OK();
 }
 

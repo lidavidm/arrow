@@ -243,7 +243,7 @@ class UcpCallDriver::Impl {
   arrow::Result<std::shared_ptr<Frame>> ReadNextFrame() {
     // TODO: reimplement the client/server async, get rid of sync methods here
     auto fut = ReadFrameAsync();
-    while (!fut.is_finished()) MakeProgress();
+    // while (!fut.is_finished()) MakeProgress();
     RETURN_NOT_OK(fut.status());
     return fut.MoveResult();
   }
@@ -335,12 +335,14 @@ class UcpCallDriver::Impl {
     return Status::OK();
   }
 
-  arrow::Result<void*> SendFlightPayloadNonBlocking(const FlightPayload& payload) {
+  Future<> SendFlightPayloadNonBlocking(const FlightPayload& payload) {
     static const uint8_t kPaddingBytes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
     ucp_request_param_t request_param;
-    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_DATATYPE;
+    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_CALLBACK |
+                                 UCP_OP_ATTR_FIELD_DATATYPE | UCP_OP_ATTR_FIELD_USER_DATA;
     request_param.flags = UCP_AM_SEND_FLAG_REPLY;
+    request_param.cb.send = SendFlightPayloadCallback;
     request_param.datatype = UCP_DATATYPE_IOV;
 
     int32_t total_messages = 1;
@@ -353,18 +355,20 @@ class UcpCallDriver::Impl {
       if (remainder) total_messages++;
     }
 
-    // Do an active message send with IOV to send all buffers in one go
-    uint8_t header[8] = {0};
-    header[0] = kFrameVersion;
-    header[1] = static_cast<uint8_t>(FrameType::kPayload);
-    Int32ToBytesBe(payload.ipc_message.metadata->size(), header + 4);
-    std::vector<ucp_dt_iov_t> iovs(total_messages);
+    auto pending_send = new FlightPayloadAm;
+    pending_send->payload = payload;
 
-    iovs[0].buffer = const_cast<void*>(
+    // Do an active message send with IOV to send all buffers in one go
+    pending_send->header[0] = kFrameVersion;
+    pending_send->header[1] = static_cast<uint8_t>(FrameType::kPayload);
+    Int32ToBytesBe(payload.ipc_message.metadata->size(), pending_send->header + 4);
+    pending_send->iovs.resize(total_messages);
+
+    pending_send->iovs[0].buffer = const_cast<void*>(
         reinterpret_cast<const void*>(payload.ipc_message.metadata->data()));
-    iovs[0].length = payload.ipc_message.metadata->size();
+    pending_send->iovs[0].length = payload.ipc_message.metadata->size();
     if (ipc::Message::HasBody(payload.ipc_message.type)) {
-      ucp_dt_iov_t* iov = iovs.data() + 1;
+      ucp_dt_iov_t* iov = pending_send->iovs.data() + 1;
       for (const auto& buffer : payload.ipc_message.body_buffers) {
         if (!buffer || buffer->size() == 0) continue;
 
@@ -382,12 +386,19 @@ class UcpCallDriver::Impl {
       }
     }
 
-    void* request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 8, iovs.data(),
-                                    iovs.size(), &request_param);
-    if (UCS_PTR_IS_ERR(request)) {
+    pending_send->finished = Future<>::Make();
+    request_param.user_data = pending_send;
+
+    void* request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, pending_send->header, 8,
+                                    pending_send->iovs.data(), pending_send->iovs.size(),
+                                    &request_param);
+    if (!request) {
+      delete reinterpret_cast<FlightPayloadAm*>(request_param.user_data);
+      return Status::OK();
+    } else if (UCS_PTR_IS_ERR(request)) {
       return FromUcsStatus("ucp_am_send_nbx", UCS_PTR_STATUS(request));
     }
-    return request;
+    return pending_send->finished;
   }
 
   Status Close() {
@@ -457,16 +468,17 @@ class UcpCallDriver::Impl {
     }
 
     const FrameType frame_type = static_cast<FrameType>(frame_header[1]);
-    std::unique_ptr<Buffer> buffer;
+    const int32_t length = BeBytesToInt32(frame_header + 4);
 
+    std::unique_ptr<Buffer> buffer;
+    // TODO: this should be same as data_length?
     if (frame_type == FrameType::kPayload) {
       ARROW_ASSIGN_OR_RAISE(buffer, memory_manager_->AllocateBuffer(data_length));
     } else {
       // TODO: allow custom pool
       ARROW_ASSIGN_OR_RAISE(buffer, AllocateBuffer(data_length));
     }
-    auto frame = std::make_shared<Frame>(frame_type, BeBytesToInt32(frame_header + 4),
-                                         std::move(buffer));
+    auto frame = std::make_shared<Frame>(frame_type, length, std::move(buffer));
 
     // TODO: for DATA, recv_data_nbx seems to memcpy, but docs state
     // recv is sometimes needed (e.g. "unpack data to device
@@ -510,13 +522,32 @@ class UcpCallDriver::Impl {
     }
 
     // Data will be freed after callback returns - copy to buffer
-    std::memcpy(frame->buffer->mutable_data(), data, data_length);
+    if (frame->buffer->is_cpu()) {
+      std::memcpy(frame->buffer->mutable_data(), data, data_length);
+    } else {
+      ARROW_ASSIGN_OR_RAISE(frame->buffer, MemoryManager::CopyBuffer(Buffer(reinterpret_cast<uint8_t*>(data), data_length), memory_manager_));
+    }
     return frame;
   }
 
   const std::shared_ptr<MemoryManager>& memory_manager() const { return memory_manager_; }
 
  private:
+  struct FlightPayloadAm {
+    uint8_t header[8];
+    std::vector<ucp_dt_iov_t> iovs;
+    FlightPayload payload;
+    Future<> finished;
+  };
+
+  static void SendFlightPayloadCallback(void* request, ucs_status_t status,
+                                        void* user_data) {
+    ucp_request_free(request);
+    FlightPayloadAm* pending_send = reinterpret_cast<FlightPayloadAm*>(user_data);
+    pending_send->finished.MarkFinished(FromUcsStatus("ucp_am_send_nbx", status));
+    delete pending_send;
+  }
+
   Status CompleteRequestBlocking(const std::string& context, void* request) {
     if (UCS_PTR_IS_ERR(request)) {
       return FromUcsStatus(context, UCS_PTR_STATUS(request));
@@ -529,7 +560,7 @@ class UcpCallDriver::Impl {
           ucp_request_release(request);
           return FromUcsStatus("ucp_request_check_status", status);
         }
-        ucp_worker_progress(worker_);
+        // ucp_worker_progress(worker_);
       }
       ucp_request_release(request);
     } else {
@@ -626,8 +657,7 @@ Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
   return impl_->SendFlightPayload(payload);
 }
 
-arrow::Result<void*> UcpCallDriver::SendFlightPayloadNonBlocking(
-    const FlightPayload& payload) {
+Future<> UcpCallDriver::SendFlightPayloadNonBlocking(const FlightPayload& payload) {
   return impl_->SendFlightPayloadNonBlocking(payload);
 }
 

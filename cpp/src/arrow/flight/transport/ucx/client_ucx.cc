@@ -17,7 +17,9 @@
 
 #include "arrow/flight/transport/ucx/ucx_internal.h"
 
+#include <atomic>
 #include <mutex>
+#include <thread>
 
 #include <arpa/inet.h>
 #include <ucp/api/ucp.h>
@@ -164,6 +166,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       std::memset(&ucp_params, 0, sizeof(ucp_params));
       ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES;
       ucp_params.features = UCP_FEATURE_AM | UCP_FEATURE_STREAM | UCP_FEATURE_WAKEUP;
+      ucp_params.mt_workers_shared = UCS_THREAD_MODE_MULTI;
 
       status = ucp_init(&ucp_params, ucp_config, &ucp_context_);
       ucp_config_release(ucp_config);
@@ -186,6 +189,10 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       handler_params.cb = HandleIncomingActiveMessage;
       handler_params.arg = this;
       ucp_worker_set_am_recv_handler(ucp_worker_, &handler_params);
+
+      running_.test_and_set();
+      std::thread worker_thread(&UcxClientImpl::DriveWorker, this);
+      worker_.swap(worker_thread);
     }
 
     {
@@ -231,6 +238,9 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       // Closure happened immediately
       DCHECK_EQ(request, nullptr);
     }
+
+    running_.clear();
+    worker_.join();
 
     ucp_worker_destroy(ucp_worker_);
     ucp_cleanup(ucp_context_);
@@ -331,11 +341,19 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
     return UCS_OK;
   }
 
+  void DriveWorker() {
+    while (running_.test_and_set()) {
+      ucp_worker_progress(ucp_worker_);
+    }
+  }
+
   ucp_context_h ucp_context_;
   ucp_worker_h ucp_worker_;
   ucp_ep_h remote_endpoint_;
   // TODO: needs to be atomic
   UcpCallDriver* driver_;
+  std::atomic_flag running_;
+  std::thread worker_;
 };
 
 std::unique_ptr<arrow::flight::internal::ClientTransportImpl> MakeUcxClientImpl() {
