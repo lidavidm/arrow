@@ -126,9 +126,6 @@ class ARROW_EXPORT MemoryManager : public std::enable_shared_from_this<MemoryMan
   static Result<std::shared_ptr<Buffer>> CopyBuffer(
       const std::shared_ptr<Buffer>& source, const std::shared_ptr<MemoryManager>& to);
 
-  static Result<std::unique_ptr<Buffer>> CopyBuffer(
-      const Buffer& source, const std::shared_ptr<MemoryManager>& to);
-
   /// \brief Make a no-copy Buffer view in a destination MemoryManager
   ///
   /// See also the Buffer::View shorthand.
@@ -147,12 +144,8 @@ class ARROW_EXPORT MemoryManager : public std::enable_shared_from_this<MemoryMan
   // be equal to `buf->memory_manager()`.
   virtual Result<std::shared_ptr<Buffer>> CopyBufferFrom(
       const std::shared_ptr<Buffer>& buf, const std::shared_ptr<MemoryManager>& from);
-  virtual Result<std::unique_ptr<Buffer>> CopyBufferFrom(
-      const Buffer& buf, const std::shared_ptr<MemoryManager>& from);
   virtual Result<std::shared_ptr<Buffer>> CopyBufferTo(
       const std::shared_ptr<Buffer>& buf, const std::shared_ptr<MemoryManager>& to);
-  virtual Result<std::unique_ptr<Buffer>> CopyBufferTo(
-      const Buffer& buf, const std::shared_ptr<MemoryManager>& to);
   virtual Result<std::shared_ptr<Buffer>> ViewBufferFrom(
       const std::shared_ptr<Buffer>& buf, const std::shared_ptr<MemoryManager>& from);
   virtual Result<std::shared_ptr<Buffer>> ViewBufferTo(
@@ -206,14 +199,8 @@ class ARROW_EXPORT CPUMemoryManager : public MemoryManager {
   Result<std::shared_ptr<Buffer>> CopyBufferFrom(
       const std::shared_ptr<Buffer>& buf,
       const std::shared_ptr<MemoryManager>& from) override;
-  Result<std::unique_ptr<Buffer>> CopyBufferFrom(
-      const Buffer& buf,
-      const std::shared_ptr<MemoryManager>& from) override;
   Result<std::shared_ptr<Buffer>> CopyBufferTo(
       const std::shared_ptr<Buffer>& buf,
-      const std::shared_ptr<MemoryManager>& to) override;
-  Result<std::unique_ptr<Buffer>> CopyBufferTo(
-      const Buffer& buf,
       const std::shared_ptr<MemoryManager>& to) override;
   Result<std::shared_ptr<Buffer>> ViewBufferFrom(
       const std::shared_ptr<Buffer>& buf,
