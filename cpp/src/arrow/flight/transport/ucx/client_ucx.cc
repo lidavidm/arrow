@@ -194,7 +194,9 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       UriToSockaddr(uri, &listen_addr);
 
       ucp_ep_params_t params;
-      params.field_mask = UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR;
+      params.field_mask = UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
+                          UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR;
+      params.err_mode = UCP_ERR_HANDLING_MODE_PEER;
       params.flags = UCP_EP_PARAMS_FLAGS_CLIENT_SERVER;
       params.sockaddr.addr = reinterpret_cast<const sockaddr*>(&listen_addr);
       params.sockaddr.addrlen = sizeof(listen_addr);
@@ -229,7 +231,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       ucp_request_release(request);
     } else {
       // Closure happened immediately
-      DCHECK_EQ(request, nullptr);
+      DCHECK(!request);
     }
 
     ucp_worker_destroy(ucp_worker_);

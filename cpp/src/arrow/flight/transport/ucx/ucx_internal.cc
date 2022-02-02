@@ -136,8 +136,9 @@ Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status) {
                              ": ", "UCS_ERR_EXCEEDS_LIMIT ",
                              ucs_status_string(ucs_status));
     case UCS_ERR_UNSUPPORTED:
-      return Status::Invalid(context, ": UCX error ", static_cast<int32_t>(ucs_status),
-                             ": ", "UCS_ERR_UNSUPPORTED ", ucs_status_string(ucs_status));
+      return Status::NotImplemented(
+          context, ": UCX error ", static_cast<int32_t>(ucs_status), ": ",
+          "UCS_ERR_UNSUPPORTED ", ucs_status_string(ucs_status));
     case UCS_ERR_REJECTED:
       return Status::IOError(context, ": UCX error ", static_cast<int32_t>(ucs_status),
                              ": ", "UCS_ERR_REJECTED ", ucs_status_string(ucs_status));
@@ -249,6 +250,8 @@ class UcpCallDriver::Impl {
   }
 
   Future<std::shared_ptr<Frame>> ReadFrameAsync() {
+    RETURN_NOT_OK(CheckClosed());
+
     std::unique_lock<std::mutex> guard(frame_mutex_);
     if (!frames_.empty() && frames_.front().is_finished()) {
       auto fut = frames_.front();
@@ -260,6 +263,8 @@ class UcpCallDriver::Impl {
   }
 
   Status SendFrame(FrameType frame_type, const uint8_t* data, const int64_t size) {
+    RETURN_NOT_OK(CheckClosed());
+
     void* request = nullptr;
     ucp_request_param_t request_param;
     request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
@@ -283,6 +288,8 @@ class UcpCallDriver::Impl {
 
   Future<> SendFlightPayload(const FlightPayload& payload) {
     static const uint8_t kPaddingBytes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+    RETURN_NOT_OK(CheckClosed());
 
     int32_t total_messages = 1;
     for (const auto& buffer : payload.ipc_message.body_buffers) {
@@ -356,15 +363,21 @@ class UcpCallDriver::Impl {
   }
 
   Status Close() {
+    if (!endpoint_) return Status::OK();
+
+    while (!frames_.empty()) {
+      frames_.front().MarkFinished(Status::Cancelled("UcpCallDriver is being closed"));
+      frames_.pop_front();
+    }
+
     void* request = ucp_ep_close_nb(endpoint_, UCP_EP_CLOSE_MODE_FLUSH);
     if (UCS_PTR_IS_ERR(request)) {
       return FromUcsStatus("ucp_ep_close_nb", UCS_PTR_STATUS(request));
     } else if (UCS_PTR_IS_PTR(request)) {
       ucs_status_t status;
-      do {
-        ucp_worker_progress(worker_);
-        status = ucp_request_check_status(request);
-      } while (status == UCS_INPROGRESS);
+      while ((status = ucp_request_check_status(request)) == UCS_INPROGRESS) {
+        MakeProgress();
+      }
       ucp_request_free(request);
       if (status != UCS_OK) {
         return FromUcsStatus("ucp_request_check_status", status);
@@ -372,6 +385,8 @@ class UcpCallDriver::Impl {
     } else {
       DCHECK(!request);
     }
+
+    endpoint_ = nullptr;
     return Status::OK();
   }
 
@@ -518,6 +533,13 @@ class UcpCallDriver::Impl {
     } else {
       // Send was completed instantly
       DCHECK(!request);
+    }
+    return Status::OK();
+  }
+
+  Status CheckClosed() {
+    if (!endpoint_) {
+      return Status::Invalid("UcpCallDriver is closed");
     }
     return Status::OK();
   }

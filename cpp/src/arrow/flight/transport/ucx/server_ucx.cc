@@ -114,6 +114,34 @@ class UcxTransportDataStream : public internal::TransportDataStream {
   bool writes_done_;
   std::queue<Future<>> requests_;
 };
+
+class ClientWorker : public std::enable_shared_from_this<ClientWorker> {
+ public:
+  ucs_status_t HandleIncomingActiveMessage(const void* header, size_t header_length,
+                                           void* data, size_t data_length,
+                                           const ucp_am_recv_param_t* param) {
+    DCHECK(driver);
+    auto self = shared_from_this();
+    driver->RecvActiveMessage(header, header_length, data, data_length, param)
+        .Then([self](const std::shared_ptr<Frame>& frame) { self->driver->Push(frame); },
+              [self](const Status& status) { self->driver->Push(status); });
+    return UCS_OK;
+  }
+
+  static void HandlePeerError(void* arg, ucp_ep_h ep, ucs_status_t status) {
+    auto* self = reinterpret_cast<ClientWorker*>(arg);
+    if (status == UCS_ERR_CONNECTION_RESET) {
+      ARROW_UNUSED(self->driver->Close());
+      // TODO: return this worker to the pool
+    } else if (status != UCS_OK) {
+      ARROW_LOG(WARNING) << FromUcsStatus("HandlePeerError", status);
+      ARROW_LOG(WARNING) << self->driver->Close().ToString();
+    }
+  }
+
+  ucp_worker_h worker = nullptr;
+  std::unique_ptr<UcpCallDriver> driver;
+};
 }  // namespace
 
 class ARROW_FLIGHT_EXPORT UcxServerImpl
@@ -147,7 +175,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       std::memset(&ucp_params, 0, sizeof(ucp_params));
       ucp_params.field_mask =
           UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_MT_WORKERS_SHARED;
-      // Must have WAKEUP to use ucp_worker_wait
       ucp_params.features = UCP_FEATURE_AM | UCP_FEATURE_WAKEUP;
       ucp_params.mt_workers_shared = UCS_THREAD_MODE_MULTI;
 
@@ -163,20 +190,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       // Create one worker to listen for incoming connections.
       status = ucp_worker_create(ucp_context_, &worker_params, &worker_conn_);
       RETURN_NOT_OK(FromUcsStatus("ucp_worker_create", status));
-
-      // Create another worker to actually service requests.
-      status = ucp_worker_create(ucp_context_, &worker_params, &worker_service_);
-      RETURN_NOT_OK(FromUcsStatus("ucp_worker_create", status));
-
-      // Set up Active Message (AM) handler
-      ucp_am_handler_param_t handler_params;
-      handler_params.field_mask = UCP_AM_HANDLER_PARAM_FIELD_ID |
-                                  UCP_AM_HANDLER_PARAM_FIELD_CB |
-                                  UCP_AM_HANDLER_PARAM_FIELD_ARG;
-      handler_params.id = kUcpAmHandlerId;
-      handler_params.cb = HandleIncomingActiveMessage;
-      handler_params.arg = this;
-      ucp_worker_set_am_recv_handler(worker_service_, &handler_params);
     }
 
     // Start listening for connections.
@@ -215,10 +228,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       listening_.test_and_set();
       std::thread listener_thread(&UcxServerImpl::DriveConnections, this);
       listener_thread_.swap(listener_thread);
-
-      running_.test_and_set();
-      std::thread worker_thread(&UcxServerImpl::DriveWorker, this);
-      worker_thread_.swap(worker_thread);
     }
 
     return Status::OK();
@@ -229,8 +238,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
     // Wait for current RPCs to finish
     listening_.clear();
-    running_.clear();
-    RETURN_NOT_OK(FromUcsStatus("ucp_worker_signal", ucp_worker_signal(worker_service_)));
     status &= Wait();
 
     {
@@ -244,10 +251,13 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       }
       ucp_listener_destroy(listener_);
       ucp_worker_destroy(worker_conn_);
-    }
 
-    // Force cancellation of anything remaining
-    ucp_worker_destroy(worker_service_);
+      // Tear down all workers
+      while (!workers_.empty()) {
+        ucp_worker_destroy(workers_.front()->worker);
+        workers_.pop();
+      }
+    }
 
     status &= rpc_pool_->Shutdown();
     rpc_pool_.reset();
@@ -260,7 +270,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   Status Wait() override {
     try {
       listener_thread_.join();
-      worker_thread_.join();
     } catch (const std::system_error& e) {
       if (e.code() == std::errc::invalid_argument) {
         return Status::Invalid("Cannot Wait() on server that is not running: ", e.what());
@@ -273,8 +282,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   Location location() const override { return location_; }
 
  private:
-  friend void HandleIncomingConnection(ucp_conn_request_h, void*);
-
   Status HandleGetFlightInfo(UcpCallDriver* driver) {
     UcxServerCallContext context;
 
@@ -326,29 +333,44 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     return Status::OK();
   }
 
-  void WaitForRequestAsync(const uintptr_t connection_id, UcpCallDriver* driver) {
+  void WaitForRequestAsync(std::shared_ptr<ClientWorker> worker) {
     CallbackOptions options;
     options.should_schedule = ShouldSchedule::Always;
     options.executor = rpc_pool_.get();
 
-    driver->ReadFrameAsync().AddCallback(
+    auto fut = worker->driver->ReadFrameAsync();
+    fut.AddCallback(
         [=](const arrow::Result<std::shared_ptr<Frame>>& maybe_frame) {
+          ARROW_LOG(WARNING) << "Got frame";
           if (!maybe_frame.ok()) {
             if (maybe_frame.status().code() != StatusCode::Cancelled) {
               this->ReportError(maybe_frame.status());
             }
-            this->DisconnectClient(connection_id);
+            // this->DisconnectClient(connection_id);
             return;
           }
-          auto status = this->HandleOneCall(&*driver, maybe_frame->get());
+          auto status = this->HandleOneCall(worker->driver.get(), maybe_frame->get());
           if (!status.ok()) {
             this->ReportError(std::move(status));
-            this->DisconnectClient(connection_id);
+            // this->DisconnectClient(connection_id);
             return;
           }
-          this->WaitForRequestAsync(connection_id, driver);
+          this->WaitForRequestAsync(std::move(worker));
         },
         options);
+  }
+
+  Status WaitForRequest(std::shared_ptr<ClientWorker> worker) {
+    while (true) {
+      auto maybe_frame = worker->driver->ReadNextFrame();
+      if (!maybe_frame.ok() && maybe_frame.status().IsCancelled()) {
+        return Status::OK();
+      }
+      RETURN_NOT_OK(maybe_frame.status());
+      RETURN_NOT_OK(HandleOneCall(worker->driver.get(), maybe_frame->get()));
+    }
+    RETURN_NOT_OK(worker->driver->Close());
+    return Status::OK();
   }
 
   void DriveConnections() {
@@ -361,47 +383,52 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
         ucp_conn_request_h request = pending_connections_.front();
         pending_connections_.pop();
 
+        auto maybe_worker = GetWorker(guard);
+        if (!maybe_worker.ok()) {
+          ReportError(maybe_worker.status());
+          auto status = ucp_listener_reject(listener_, pending_connections_.front());
+          if (status != UCS_OK) {
+            ReportError(FromUcsStatus("ucp_listener_reject", status));
+            continue;
+          }
+        }
+        std::shared_ptr<ClientWorker> worker = std::move(maybe_worker).MoveValueUnsafe();
+
         // Create an endpoint to the client, using the data worker
         ucp_ep_params_t params;
-        params.field_mask = UCP_EP_PARAM_FIELD_CONN_REQUEST;
+        std::memset(&params, 0, sizeof(params));
+        params.field_mask = UCP_EP_PARAM_FIELD_CONN_REQUEST |
+                            UCP_EP_PARAM_FIELD_ERR_HANDLER |
+                            UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE;
         params.conn_request = request;
+        params.err_handler.cb = ClientWorker::HandlePeerError;
+        params.err_handler.arg = worker.get();
+        // err_mode must be set to same value on both sides
+        params.err_mode = UCP_ERR_HANDLING_MODE_PEER;
         ucs_status_t status;
         ucp_ep_h client_endpoint;
 
-        status = ucp_ep_create(worker_service_, &params, &client_endpoint);
+        status = ucp_ep_create(worker->worker, &params, &client_endpoint);
         if (status != UCS_OK) {
           ReportError(FromUcsStatus("ucp_ep_create", status));
+          ReturnWorker(guard, std::move(worker));
           continue;
         }
 
-        const uintptr_t connection_id = reinterpret_cast<uintptr_t>(client_endpoint);
-        auto inserted = active_connections_.emplace(
-            connection_id, UcpCallDriver(worker_service_, client_endpoint));
-        DCHECK(inserted.second);
-        WaitForRequestAsync(connection_id, &inserted.first->second);
-      }
-      while (!pending_close_.empty()) {
-        auto connection_id = pending_close_.front();
-        pending_close_.pop();
-        auto it = active_connections_.find(connection_id);
-        if (it == active_connections_.end()) continue;
-        auto status = it->second.Close();
-        if (!status.ok()) {
-          ReportError(std::move(status));
-        }
-        active_connections_.erase(connection_id);
-      }
-    }
-  }
+        worker->driver.reset(new UcpCallDriver(worker->worker, client_endpoint));
 
-  void DriveWorker() {
-    while (running_.test_and_set()) {
-      while (ucp_worker_progress(worker_service_) != 0) {
-      }
-      auto status = ucp_worker_wait(worker_service_);
-      if (status != UCS_OK) {
-        ReportError(FromUcsStatus("ucp_worker_wait", status));
-        break;
+        // TODO: add worker to an epoll set and cycle it until the future completes
+        // then transfer call to a thread pool and handle it synchronously
+        // then transfer back to epoll set and wait for new request
+        // on disconnect, return worker to queue
+
+        auto st = WaitForRequest(worker);
+        if (!st.ok()) {
+          ReportError(st);
+          // disconnect
+        }
+        worker->driver.reset(nullptr);
+        ReturnWorker(guard, std::move(worker));
       }
     }
   }
@@ -409,16 +436,55 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   void EnqueueClient(ucp_conn_request_h connection_request) {
     std::unique_lock<std::mutex> guard(pending_connections_mutex_);
     pending_connections_.push(connection_request);
-  }
-
-  void DisconnectClient(uintptr_t connection_id) {
-    std::unique_lock<std::mutex> guard(pending_connections_mutex_);
-    pending_close_.push(connection_id);
+    guard.unlock();
   }
 
   /// Handle errors during server worker loop execution
   void ReportError(Status st) {
     ARROW_LOG(WARNING) << "Error in Flight UCX server loop: " << st.ToString();
+  }
+
+  arrow::Result<std::shared_ptr<ClientWorker>> CreateWorker() {
+    auto worker = std::make_shared<ClientWorker>();
+
+    ucp_worker_params_t worker_params;
+    std::memset(&worker_params, 0, sizeof(worker_params));
+    worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
+    worker_params.thread_mode = UCS_THREAD_MODE_SERIALIZED;
+
+    auto status = ucp_worker_create(ucp_context_, &worker_params, &worker->worker);
+    RETURN_NOT_OK(FromUcsStatus("ucp_worker_create", status));
+
+    // Set up Active Message (AM) handler
+    ucp_am_handler_param_t handler_params;
+    std::memset(&handler_params, 0, sizeof(handler_params));
+    handler_params.field_mask = UCP_AM_HANDLER_PARAM_FIELD_ID |
+                                UCP_AM_HANDLER_PARAM_FIELD_CB |
+                                UCP_AM_HANDLER_PARAM_FIELD_ARG;
+    handler_params.id = kUcpAmHandlerId;
+    handler_params.cb = HandleIncomingActiveMessage;
+    handler_params.arg = worker.get();
+
+    status = ucp_worker_set_am_recv_handler(worker->worker, &handler_params);
+    RETURN_NOT_OK(FromUcsStatus("ucp_worker_set_am_recv_handler", status));
+    return worker;
+  }
+
+  arrow::Result<std::shared_ptr<ClientWorker>> GetWorker(
+      const std::unique_lock<std::mutex>&) {
+    if (workers_.empty()) {
+      ARROW_ASSIGN_OR_RAISE(auto worker, CreateWorker());
+      return worker;
+    }
+    auto worker = std::move(workers_.front());
+    workers_.pop();
+    return worker;
+  }
+
+  void ReturnWorker(const std::unique_lock<std::mutex>&,
+                    std::shared_ptr<ClientWorker> worker) {
+    // TODO: ensure worker's call driver is nullptr
+    workers_.push(std::move(worker));
   }
 
   /// Callback handler. A new client has connected to the server.
@@ -434,49 +500,26 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
                                                   size_t header_length, void* data,
                                                   size_t data_length,
                                                   const ucp_am_recv_param_t* param) {
-    auto* impl = reinterpret_cast<UcxServerImpl*>(self);
-    return impl->DoHandleIncomingActiveMessage(header, header_length, data, data_length,
+    ClientWorker* worker = reinterpret_cast<ClientWorker*>(self);
+    return worker->HandleIncomingActiveMessage(header, header_length, data, data_length,
                                                param);
-  }
-
-  ucs_status_t DoHandleIncomingActiveMessage(const void* header, size_t header_length,
-                                             void* data, size_t data_length,
-                                             const ucp_am_recv_param_t* param) {
-    const uintptr_t connection_id = reinterpret_cast<uintptr_t>(param->reply_ep);
-    UcpCallDriver* driver = nullptr;
-    {
-      std::unique_lock<std::mutex> guard(pending_connections_mutex_);
-      auto it = this->active_connections_.find(connection_id);
-      // No such connection
-      if (it == this->active_connections_.end()) return UCS_OK;
-      driver = &it->second;
-    }
-
-    driver->RecvActiveMessage(header, header_length, data, data_length, param)
-        .Then([driver](const std::shared_ptr<Frame>& frame) { driver->Push(frame); },
-              [driver](const Status& status) { driver->Push(status); });
-    return UCS_OK;
   }
 
   ucp_context_h ucp_context_;
   // Listen for and handle incoming connections
   ucp_worker_h worker_conn_;
   ucp_listener_h listener_;
-  // Service RPC requests
-  ucp_worker_h worker_service_;
   Location location_;
+
+  std::queue<std::shared_ptr<ClientWorker>> workers_;
 
   internal::FlightServiceImpl* service_;
   std::shared_ptr<arrow::internal::ThreadPool> rpc_pool_;
   std::atomic_flag listening_;
-  std::atomic_flag running_;
   std::thread listener_thread_;
-  std::thread worker_thread_;
 
   std::mutex pending_connections_mutex_;
   std::queue<ucp_conn_request_h> pending_connections_;
-  std::unordered_map<uintptr_t, UcpCallDriver> active_connections_;
-  std::queue<uintptr_t> pending_close_;
 };
 
 std::unique_ptr<arrow::flight::internal::ServerTransportImpl> MakeUcxServerImpl() {

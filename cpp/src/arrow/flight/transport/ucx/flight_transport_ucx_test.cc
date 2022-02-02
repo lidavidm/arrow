@@ -73,7 +73,10 @@ class TestUcx : public ::testing::Test {
         [](FlightClientOptions* options) { return Status::OK(); }));
   }
 
-  void TearDown() { ASSERT_OK(server_->Shutdown()); }
+  void TearDown() {
+    client_.reset(nullptr);
+    ASSERT_OK(server_->Shutdown());
+  }
 
  protected:
   std::unique_ptr<FlightClient> client_;
@@ -89,8 +92,8 @@ TEST_F(TestUcx, GetFlightInfo) {
 }
 
 TEST_F(TestUcx, DoGet) {
-  // TODO: zero-length ticket serializes to zero-length protobuf, trips assertion failure
-  // in UCX?
+  // TODO: zero-length ticket serializes to zero-length protobuf,
+  // trips assertion failure in UCX?
   Ticket ticket{"a"};
   std::unique_ptr<FlightStreamReader> stream;
   ASSERT_OK(client_->DoGet(ticket, &stream));
