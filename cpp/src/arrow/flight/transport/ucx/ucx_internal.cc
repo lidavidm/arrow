@@ -274,7 +274,6 @@ class UcpCallDriver::Impl {
     header[1] = static_cast<uint8_t>(frame_type);
     Int32ToBytesBe(size, header + 4);
 
-    // TODO: is the active message API ordered?
     request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 8, data, size,
                               &request_param);
     RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
@@ -282,13 +281,8 @@ class UcpCallDriver::Impl {
     return Status::OK();
   }
 
-  Status SendFlightPayload(const FlightPayload& payload) {
+  Future<> SendFlightPayload(const FlightPayload& payload) {
     static const uint8_t kPaddingBytes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-
-    ucp_request_param_t request_param;
-    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_DATATYPE;
-    request_param.flags = UCP_AM_SEND_FLAG_REPLY;
-    request_param.datatype = UCP_DATATYPE_IOV;
 
     int32_t total_messages = 1;
     for (const auto& buffer : payload.ipc_message.body_buffers) {
@@ -301,17 +295,22 @@ class UcpCallDriver::Impl {
     }
 
     // Do an active message send with IOV to send all buffers in one go
-    uint8_t header[8] = {0};
-    header[0] = kFrameVersion;
-    header[1] = static_cast<uint8_t>(FrameType::kPayload);
-    Int32ToBytesBe(payload.ipc_message.metadata->size(), header + 4);
-    std::vector<ucp_dt_iov_t> iovs(total_messages);
+    // TODO: no need for unique_ptr so long as no early returns below
+    std::unique_ptr<PendingAmSend> pending_send =
+        arrow::internal::make_unique<PendingAmSend>();
+    pending_send->payload = payload;
+    pending_send->header[0] = kFrameVersion;
+    pending_send->header[1] = static_cast<uint8_t>(FrameType::kPayload);
+    Int32ToBytesBe(payload.ipc_message.metadata->size(), pending_send->header + 4);
+    pending_send->iovs.resize(total_messages);
+    pending_send->completed = Future<>::Make();
 
-    iovs[0].buffer = const_cast<void*>(
+    pending_send->iovs[0].buffer = const_cast<void*>(
         reinterpret_cast<const void*>(payload.ipc_message.metadata->data()));
-    iovs[0].length = payload.ipc_message.metadata->size();
+    pending_send->iovs[0].length = payload.ipc_message.metadata->size();
+
     if (ipc::Message::HasBody(payload.ipc_message.type)) {
-      ucp_dt_iov_t* iov = iovs.data() + 1;
+      ucp_dt_iov_t* iov = pending_send->iovs.data() + 1;
       for (const auto& buffer : payload.ipc_message.body_buffers) {
         if (!buffer || buffer->size() == 0) continue;
 
@@ -329,65 +328,31 @@ class UcpCallDriver::Impl {
       }
     }
 
-    void* request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 8, iovs.data(),
-                                    iovs.size(), &request_param);
-    RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
-    return Status::OK();
-  }
-
-  arrow::Result<void*> SendFlightPayloadNonBlocking(const FlightPayload& payload) {
-    static const uint8_t kPaddingBytes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-
     ucp_request_param_t request_param;
-    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_DATATYPE;
-    request_param.flags = UCP_AM_SEND_FLAG_REPLY;
+    std::memset(&request_param, 0, sizeof(request_param));
+    request_param.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_DATATYPE |
+                                 UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_USER_DATA;
+    request_param.cb.send = AmSendCallback;
     request_param.datatype = UCP_DATATYPE_IOV;
+    request_param.flags = UCP_AM_SEND_FLAG_REPLY;
+    request_param.user_data = pending_send.release();
 
-    int32_t total_messages = 1;
-    for (const auto& buffer : payload.ipc_message.body_buffers) {
-      if (!buffer || buffer->size() == 0) continue;
-      total_messages++;
+    {
+      auto* pending_send = reinterpret_cast<PendingAmSend*>(request_param.user_data);
 
-      const auto remainder = static_cast<int>(
-          bit_util::RoundUpToMultipleOf8(buffer->size()) - buffer->size());
-      if (remainder) total_messages++;
-    }
-
-    // Do an active message send with IOV to send all buffers in one go
-    uint8_t header[8] = {0};
-    header[0] = kFrameVersion;
-    header[1] = static_cast<uint8_t>(FrameType::kPayload);
-    Int32ToBytesBe(payload.ipc_message.metadata->size(), header + 4);
-    std::vector<ucp_dt_iov_t> iovs(total_messages);
-
-    iovs[0].buffer = const_cast<void*>(
-        reinterpret_cast<const void*>(payload.ipc_message.metadata->data()));
-    iovs[0].length = payload.ipc_message.metadata->size();
-    if (ipc::Message::HasBody(payload.ipc_message.type)) {
-      ucp_dt_iov_t* iov = iovs.data() + 1;
-      for (const auto& buffer : payload.ipc_message.body_buffers) {
-        if (!buffer || buffer->size() == 0) continue;
-
-        iov->buffer = const_cast<void*>(reinterpret_cast<const void*>(buffer->data()));
-        iov->length = buffer->size();
-        ++iov;
-
-        const auto remainder = static_cast<int>(
-            bit_util::RoundUpToMultipleOf8(buffer->size()) - buffer->size());
-        if (remainder) {
-          iov->buffer = const_cast<void*>(reinterpret_cast<const void*>(kPaddingBytes));
-          iov->length = remainder;
-          ++iov;
-        }
+      void* request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, pending_send->header, 8,
+                                      pending_send->iovs.data(),
+                                      pending_send->iovs.size(), &request_param);
+      if (!request) {
+        // Request completed immediately
+        delete pending_send;
+        return Status::OK();
+      } else if (UCS_PTR_IS_ERR(request)) {
+        delete pending_send;
+        return FromUcsStatus("ucp_am_send_nbx", UCS_PTR_STATUS(request));
       }
+      return pending_send->completed;
     }
-
-    void* request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 8, iovs.data(),
-                                    iovs.size(), &request_param);
-    if (UCS_PTR_IS_ERR(request)) {
-      return FromUcsStatus("ucp_am_send_nbx", UCS_PTR_STATUS(request));
-    }
-    return request;
   }
 
   Status Close() {
@@ -517,6 +482,24 @@ class UcpCallDriver::Impl {
   const std::shared_ptr<MemoryManager>& memory_manager() const { return memory_manager_; }
 
  private:
+  struct PendingAmSend {
+    FlightPayload payload;
+    uint8_t header[8];
+    std::vector<ucp_dt_iov_t> iovs;
+    Future<> completed;
+  };
+
+  static void AmSendCallback(void* request, ucs_status_t status, void* user_data) {
+    auto* pending_send = reinterpret_cast<PendingAmSend*>(user_data);
+    if (status == UCS_OK) {
+      pending_send->completed.MarkFinished();
+    } else {
+      pending_send->completed.MarkFinished(FromUcsStatus("ucp_am_send_nbx", status));
+    }
+    delete pending_send;
+    ucp_request_free(request);
+  }
+
   Status CompleteRequestBlocking(const std::string& context, void* request) {
     if (UCS_PTR_IS_ERR(request)) {
       return FromUcsStatus(context, UCS_PTR_STATUS(request));
@@ -529,9 +512,9 @@ class UcpCallDriver::Impl {
           ucp_request_release(request);
           return FromUcsStatus("ucp_request_check_status", status);
         }
-        ucp_worker_progress(worker_);
+        MakeProgress();
       }
-      ucp_request_release(request);
+      ucp_request_free(request);
     } else {
       // Send was completed instantly
       DCHECK(!request);
@@ -622,13 +605,8 @@ Status UcpCallDriver::SendPayload(const uint8_t* data, const int64_t size) {
   return Status::OK();
 }
 
-Status UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
+Future<> UcpCallDriver::SendFlightPayload(const FlightPayload& payload) {
   return impl_->SendFlightPayload(payload);
-}
-
-arrow::Result<void*> UcpCallDriver::SendFlightPayloadNonBlocking(
-    const FlightPayload& payload) {
-  return impl_->SendFlightPayloadNonBlocking(payload);
 }
 
 Status UcpCallDriver::Close() { return impl_->Close(); }

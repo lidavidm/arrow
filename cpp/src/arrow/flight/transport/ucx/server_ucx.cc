@@ -69,22 +69,50 @@ class UcxServerCallContext : public flight::ServerCallContext {
 
 class UcxTransportDataStream : public internal::TransportDataStream {
  public:
-  explicit UcxTransportDataStream(UcpCallDriver* driver) : driver_(driver) {}
+  constexpr static size_t kBackpressureThreshold = 32;
+
+  explicit UcxTransportDataStream(UcpCallDriver* driver)
+      : driver_(driver), writes_done_(false) {}
 
   bool Read(internal::FlightData* data) override { return false; }
 
   Status Write(const FlightPayload& payload) override {
-    return driver_->SendFlightPayload(payload);
+    if (writes_done_) {
+      return Status::Invalid("Writing to this stream is finished");
+    }
+    if (requests_.size() >= kBackpressureThreshold) {
+      auto& next = requests_.front();
+      while (!next.is_finished()) {
+        // Progress implicitly made by main server loop
+      }
+      RETURN_NOT_OK(next.status());
+      requests_.pop();
+    }
+    Future<> pending_send = driver_->SendFlightPayload(payload);
+    if (!pending_send.is_finished()) {
+      requests_.push(std::move(pending_send));
+    }
+    // Else, request completed instantly
+    return Status::OK();
   }
 
   Status WritesDone() {
-    // TODO: need to flush all existing data, prevent further writes
+    while (!requests_.empty()) {
+      auto& next = requests_.front();
+      while (!next.is_finished()) {
+        // Progress implicitly made by main server loop
+      }
+      RETURN_NOT_OK(next.status());
+      requests_.pop();
+    }
+    writes_done_ = true;
     return Status::OK();
   }
 
  private:
   UcpCallDriver* driver_;
-  std::queue<void*> requests_;
+  bool writes_done_;
+  std::queue<Future<>> requests_;
 };
 }  // namespace
 
@@ -119,9 +147,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       std::memset(&ucp_params, 0, sizeof(ucp_params));
       ucp_params.field_mask =
           UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_MT_WORKERS_SHARED;
-      // We need to either specify WAKEUP, or use the epoll API and
-      // manually drive the event loop for UCX
-      // Source: iodemo example in upstream UCX tree
+      // Must have WAKEUP to use ucp_worker_wait
       ucp_params.features = UCP_FEATURE_AM | UCP_FEATURE_WAKEUP;
       ucp_params.mt_workers_shared = UCS_THREAD_MODE_MULTI;
 
@@ -133,10 +159,6 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       std::memset(&worker_params, 0, sizeof(worker_params));
       worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
       worker_params.thread_mode = UCS_THREAD_MODE_MULTI;
-
-      // TODO: consolidate these workers since it doesn't appear
-      // necessary and we don't really want to double our hardware
-      // resource consumption
 
       // Create one worker to listen for incoming connections.
       status = ucp_worker_create(ucp_context_, &worker_params, &worker_conn_);
@@ -190,9 +212,13 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     }
 
     {
-      running_.test_and_set();
-      std::thread listener_thread(&UcxServerImpl::DriveWorker, this);
+      listening_.test_and_set();
+      std::thread listener_thread(&UcxServerImpl::DriveConnections, this);
       listener_thread_.swap(listener_thread);
+
+      running_.test_and_set();
+      std::thread worker_thread(&UcxServerImpl::DriveWorker, this);
+      worker_thread_.swap(worker_thread);
     }
 
     return Status::OK();
@@ -202,7 +228,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     Status status;
 
     // Wait for current RPCs to finish
+    listening_.clear();
     running_.clear();
+    RETURN_NOT_OK(FromUcsStatus("ucp_worker_signal", ucp_worker_signal(worker_service_)));
     status &= Wait();
 
     {
@@ -232,6 +260,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   Status Wait() override {
     try {
       listener_thread_.join();
+      worker_thread_.join();
     } catch (const std::system_error& e) {
       if (e.code() == std::errc::invalid_argument) {
         return Status::Invalid("Cannot Wait() on server that is not running: ", e.what());
@@ -322,11 +351,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
         options);
   }
 
-  void DriveWorker() {
-    while (running_.test_and_set()) {
+  void DriveConnections() {
+    while (listening_.test_and_set()) {
       ucp_worker_progress(worker_conn_);
-      // TODO: separate thread to progress worker
-      ucp_worker_progress(worker_service_);
 
       // Check for connect requests in queue
       std::unique_lock<std::mutex> guard(pending_connections_mutex_);
@@ -363,6 +390,18 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
           ReportError(std::move(status));
         }
         active_connections_.erase(connection_id);
+      }
+    }
+  }
+
+  void DriveWorker() {
+    while (running_.test_and_set()) {
+      while (ucp_worker_progress(worker_service_) != 0) {
+      }
+      auto status = ucp_worker_wait(worker_service_);
+      if (status != UCS_OK) {
+        ReportError(FromUcsStatus("ucp_worker_wait", status));
+        break;
       }
     }
   }
@@ -428,9 +467,11 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
   Location location_;
 
   internal::FlightServiceImpl* service_;
-  std::atomic_flag running_;
   std::shared_ptr<arrow::internal::ThreadPool> rpc_pool_;
+  std::atomic_flag listening_;
+  std::atomic_flag running_;
   std::thread listener_thread_;
+  std::thread worker_thread_;
 
   std::mutex pending_connections_mutex_;
   std::queue<ucp_conn_request_h> pending_connections_;
