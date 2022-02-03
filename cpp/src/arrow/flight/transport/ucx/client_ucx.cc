@@ -90,6 +90,9 @@ class UcxClientDataStream : public internal::ClientDataStream {
     ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(metadata, nullptr));
     data->metadata = std::move(metadata);
     data->body = SliceBuffer(buffer, data->metadata->size(), message->body_length());
+    if (!driver_->memory_manager()->is_cpu()) {
+      ARROW_ASSIGN_OR_RAISE(data->body, Buffer::ViewOrCopy(data->body, driver_->memory_manager()));
+    }
     return true;
   }
 

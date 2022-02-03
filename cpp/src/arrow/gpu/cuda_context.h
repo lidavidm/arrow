@@ -185,6 +185,12 @@ class ARROW_EXPORT CudaMemoryManager : public MemoryManager {
   Result<std::shared_ptr<Buffer>> CopyBufferTo(
       const std::shared_ptr<Buffer>& buf,
       const std::shared_ptr<MemoryManager>& to) override;
+  Result<std::unique_ptr<Buffer>> CopyBufferFrom(
+      const Buffer& buf,
+      const std::shared_ptr<MemoryManager>& from) override;
+  Result<std::unique_ptr<Buffer>> CopyBufferTo(
+      const Buffer& buf,
+      const std::shared_ptr<MemoryManager>& to) override;
   Result<std::shared_ptr<Buffer>> ViewBufferFrom(
       const std::shared_ptr<Buffer>& buf,
       const std::shared_ptr<MemoryManager>& from) override;

@@ -327,13 +327,18 @@ Result<std::unique_ptr<Buffer>> CudaMemoryManager::AllocateBuffer(int64_t size) 
 
 Result<std::shared_ptr<Buffer>> CudaMemoryManager::CopyBufferTo(
     const std::shared_ptr<Buffer>& buf, const std::shared_ptr<MemoryManager>& to) {
+  return CopyBufferTo(*buf, to);
+}
+
+Result<std::unique_ptr<Buffer>> CudaMemoryManager::CopyBufferTo(
+    const Buffer& buf, const std::shared_ptr<MemoryManager>& to) {
   if (to->is_cpu()) {
     // Device-to-CPU copy
-    std::shared_ptr<Buffer> dest;
+    std::unique_ptr<Buffer> dest;
     ARROW_ASSIGN_OR_RAISE(auto from_context, cuda_device()->GetContext());
-    ARROW_ASSIGN_OR_RAISE(dest, to->AllocateBuffer(buf->size()));
-    RETURN_NOT_OK(from_context->CopyDeviceToHost(dest->mutable_data(), buf->address(),
-                                                 buf->size()));
+    ARROW_ASSIGN_OR_RAISE(dest, to->AllocateBuffer(buf.size()));
+    RETURN_NOT_OK(from_context->CopyDeviceToHost(dest->mutable_data(), buf.address(),
+                                                 buf.size()));
     return dest;
   }
   return nullptr;
@@ -341,13 +346,19 @@ Result<std::shared_ptr<Buffer>> CudaMemoryManager::CopyBufferTo(
 
 Result<std::shared_ptr<Buffer>> CudaMemoryManager::CopyBufferFrom(
     const std::shared_ptr<Buffer>& buf, const std::shared_ptr<MemoryManager>& from) {
+  // TODO: remove these or just make them base class
+  return CopyBufferFrom(*buf, from);
+}
+
+Result<std::unique_ptr<Buffer>> CudaMemoryManager::CopyBufferFrom(
+    const Buffer& buf, const std::shared_ptr<MemoryManager>& from) {
   if (from->is_cpu()) {
     // CPU-to-device copy
     ARROW_ASSIGN_OR_RAISE(auto to_context, cuda_device()->GetContext());
-    ARROW_ASSIGN_OR_RAISE(std::shared_ptr<Buffer> dest,
-                          to_context->Allocate(buf->size()));
+    ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> dest,
+                          to_context->Allocate(buf.size()));
     RETURN_NOT_OK(
-        to_context->CopyHostToDevice(dest->address(), buf->data(), buf->size()));
+        to_context->CopyHostToDevice(dest->address(), buf.data(), buf.size()));
     return dest;
   }
   if (IsCudaMemoryManager(*from)) {
@@ -356,16 +367,16 @@ Result<std::shared_ptr<Buffer>> CudaMemoryManager::CopyBufferFrom(
     ARROW_ASSIGN_OR_RAISE(
         auto from_context,
         checked_cast<const CudaMemoryManager&>(*from).cuda_device()->GetContext());
-    ARROW_ASSIGN_OR_RAISE(std::shared_ptr<Buffer> dest,
-                          to_context->Allocate(buf->size()));
+    ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> dest,
+                          to_context->Allocate(buf.size()));
     if (to_context->handle() == from_context->handle()) {
       // Same context
       RETURN_NOT_OK(
-          to_context->CopyDeviceToDevice(dest->address(), buf->address(), buf->size()));
+          to_context->CopyDeviceToDevice(dest->address(), buf.address(), buf.size()));
     } else {
       // Other context
       RETURN_NOT_OK(from_context->CopyDeviceToAnotherDevice(to_context, dest->address(),
-                                                            buf->address(), buf->size()));
+                                                            buf.address(), buf.size()));
     }
     return dest;
   }

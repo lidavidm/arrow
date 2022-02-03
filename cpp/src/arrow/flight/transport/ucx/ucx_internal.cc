@@ -465,32 +465,26 @@ class UcpCallDriver::Impl {
       return Status::Cancelled("Client initiated disconnect");
     }
 
-    // TODO: for DATA, recv_data_nbx seems to memcpy, but docs state
-    // recv is sometimes needed (e.g. "unpack data to device
-    // memory"). Can we predict this ahead of time and save a copy?
-    // look at ucp_dt_unpack_only, seems contiguous datatype with
-    // cpu-accessible buffer means we can skip the recv
-
     if ((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) && (frame_type != FrameType::kPayload || memory_manager_->is_cpu())) {
-      // auto buffer = arrow::internal::make_unique<Buffer>(const_cast<const uint8_t*>(reinterpret_cast<uint8_t*>(data)), data_length);
       auto buffer = arrow::internal::make_unique<UcxAmBuffer>(worker_, data, data_length);
       auto frame = std::make_shared<Frame>(frame_type, frame_size, std::move(buffer));
       *status = UCS_INPROGRESS;
       return frame;
     }
 
-    std::unique_ptr<Buffer> buffer;
-    if (frame_type == FrameType::kPayload) {
-      ARROW_ASSIGN_OR_RAISE(buffer, memory_manager_->AllocateBuffer(data_length));
-    } else {
-      // TODO: allow custom pool
-      ARROW_ASSIGN_OR_RAISE(buffer, AllocateBuffer(data_length));
-    }
-    auto frame = std::make_shared<Frame>(frame_type, frame_size, std::move(buffer));
-
     if ((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) || (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV)) {
       // Asynchronous receive, or unpack to destination.
       // It would be nice if we could reuse the future's allocation...
+
+      std::unique_ptr<Buffer> buffer;
+      ARROW_ASSIGN_OR_RAISE(buffer, AllocateBuffer(data_length));
+      // if (frame_type == FrameType::kPayload) {
+      //   ARROW_ASSIGN_OR_RAISE(buffer, memory_manager_->AllocateBuffer(data_length));
+      // } else {
+      //   // TODO: allow custom pool
+      //   ARROW_ASSIGN_OR_RAISE(buffer, AllocateBuffer(data_length));
+      // }
+      auto frame = std::make_shared<Frame>(frame_type, frame_size, std::move(buffer));
 
       IncompleteAmRecv* recv_state = new IncompleteAmRecv;
       recv_state->future = Future<std::shared_ptr<Frame>>::Make();
@@ -503,11 +497,11 @@ class UcpCallDriver::Impl {
       recv_param.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
       recv_param.cb.recv_am = AmRecvCallback;
       recv_param.user_data = reinterpret_cast<void*>(recv_state);
-      // TODO: need to be able to differentiate between CUDA and ROCm
-      if (!recv_state->frame->buffer->is_cpu()) {
-        recv_param.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMORY_TYPE;
-        recv_param.memory_type = UCS_MEMORY_TYPE_CUDA;
-      }
+      // // TODO: need to be able to differentiate between CUDA and ROCm
+      // if (!recv_state->frame->buffer->is_cpu()) {
+      //   recv_param.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMORY_TYPE;
+      //   recv_param.memory_type = UCS_MEMORY_TYPE_CUDA;
+      // }
 
       void* dest = reinterpret_cast<void*>(recv_state->frame->buffer->mutable_address());
       void* request = ucp_am_recv_data_nbx(worker_, data, dest, data_length, &recv_param);
@@ -524,8 +518,17 @@ class UcpCallDriver::Impl {
       return future;
     } else {
       // Data will be freed after callback returns - copy to buffer
-      std::memcpy(frame->buffer->mutable_data(), data, data_length);
-      return frame;
+      std::unique_ptr<Buffer> buffer;
+      // if (frame_type != FrameType::kPayload || memory_manager_->is_cpu()) {
+        // TODO: allow custom pool
+        ARROW_ASSIGN_OR_RAISE(buffer, AllocateBuffer(data_length));
+        std::memcpy(buffer->mutable_data(), data, data_length);
+      // } else {
+      //   ARROW_ASSIGN_OR_RAISE(buffer, MemoryManager::CopyBuffer(
+      //       Buffer(reinterpret_cast<uint8_t*>(data), static_cast<int64_t>(data_length)),
+      //       memory_manager_));
+      // }
+      return std::make_shared<Frame>(frame_type, frame_size, std::move(buffer));
     }
   }
 
