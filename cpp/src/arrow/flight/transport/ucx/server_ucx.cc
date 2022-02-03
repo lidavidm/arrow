@@ -83,7 +83,7 @@ class UcxTransportDataStream : public internal::TransportDataStream {
     if (requests_.size() >= kBackpressureThreshold) {
       auto& next = requests_.front();
       while (!next.is_finished()) {
-        // Progress implicitly made by main server loop
+        driver_->MakeProgress();
       }
       RETURN_NOT_OK(next.status());
       requests_.pop();
@@ -100,7 +100,7 @@ class UcxTransportDataStream : public internal::TransportDataStream {
     while (!requests_.empty()) {
       auto& next = requests_.front();
       while (!next.is_finished()) {
-        // Progress implicitly made by main server loop
+        driver_->MakeProgress();
       }
       RETURN_NOT_OK(next.status());
       requests_.pop();
@@ -120,15 +120,19 @@ class ClientWorker : public std::enable_shared_from_this<ClientWorker> {
   ucs_status_t HandleIncomingActiveMessage(const void* header, size_t header_length,
                                            void* data, size_t data_length,
                                            const ucp_am_recv_param_t* param) {
+    // ARROW_LOG(WARNING) << "Handling incoming message of size " << data_length;
     DCHECK(driver);
     auto self = shared_from_this();
-    driver->RecvActiveMessage(header, header_length, data, data_length, param)
+
+    ucs_status_t status = UCS_OK;
+    driver->RecvActiveMessage(header, header_length, data, data_length, param, &status)
         .Then([self](const std::shared_ptr<Frame>& frame) { self->driver->Push(frame); },
               [self](const Status& status) { self->driver->Push(status); });
-    return UCS_OK;
+    return status;
   }
 
   static void HandlePeerError(void* arg, ucp_ep_h ep, ucs_status_t status) {
+    // ARROW_LOG(WARNING) << "Handling peer error " << status;
     auto* self = reinterpret_cast<ClientWorker*>(arg);
     if (status == UCS_ERR_CONNECTION_RESET) {
       ARROW_UNUSED(self->driver->Close());
@@ -323,6 +327,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     RETURN_NOT_OK(driver->ExpectFrameType(*frame, FrameType::kHeaders));
     ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame->buffer)));
     ARROW_ASSIGN_OR_RAISE(auto method, headers.Get(":method:"));
+    // ARROW_LOG(WARNING) << "Handling " << method;
     if (method == "arrow.flight.protocol.FlightService/GetFlightInfo") {
       return HandleGetFlightInfo(driver);
     } else if (method == "arrow.flight.protocol.FlightService/DoGet") {
@@ -341,7 +346,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     auto fut = worker->driver->ReadFrameAsync();
     fut.AddCallback(
         [=](const arrow::Result<std::shared_ptr<Frame>>& maybe_frame) {
-          ARROW_LOG(WARNING) << "Got frame";
+          // ARROW_LOG(WARNING) << "Got frame";
           if (!maybe_frame.ok()) {
             if (maybe_frame.status().code() != StatusCode::Cancelled) {
               this->ReportError(maybe_frame.status());
@@ -362,9 +367,11 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
 
   Status WaitForRequest(std::shared_ptr<ClientWorker> worker) {
     while (true) {
+      ARROW_LOG(WARNING) << "Waiting for next request";
       auto maybe_frame = worker->driver->ReadNextFrame();
       if (!maybe_frame.ok() && maybe_frame.status().IsCancelled()) {
-        return Status::OK();
+        ARROW_LOG(WARNING) << "Cancelled, breaking";
+        break;
       }
       RETURN_NOT_OK(maybe_frame.status());
       RETURN_NOT_OK(HandleOneCall(worker->driver.get(), maybe_frame->get()));
@@ -397,9 +404,10 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
         // Create an endpoint to the client, using the data worker
         ucp_ep_params_t params;
         std::memset(&params, 0, sizeof(params));
-        params.field_mask = UCP_EP_PARAM_FIELD_CONN_REQUEST |
-                            UCP_EP_PARAM_FIELD_ERR_HANDLER |
-                            UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE;
+        // params.field_mask = UCP_EP_PARAM_FIELD_CONN_REQUEST |
+        //                     UCP_EP_PARAM_FIELD_ERR_HANDLER |
+        //                     UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE;
+        params.field_mask = UCP_EP_PARAM_FIELD_CONN_REQUEST;
         params.conn_request = request;
         params.err_handler.cb = ClientWorker::HandlePeerError;
         params.err_handler.arg = worker.get();

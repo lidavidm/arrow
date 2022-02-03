@@ -172,7 +172,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       ucp_worker_params_t worker_params;
       std::memset(&worker_params, 0, sizeof(worker_params));
       worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
-      worker_params.thread_mode = UCS_THREAD_MODE_MULTI;
+      worker_params.thread_mode = UCS_THREAD_MODE_SERIALIZED;
 
       status = ucp_worker_create(ucp_context_, &worker_params, &ucp_worker_);
       RETURN_NOT_OK(FromUcsStatus("ucp_worker_create", status));
@@ -194,9 +194,13 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       UriToSockaddr(uri, &listen_addr);
 
       ucp_ep_params_t params;
-      params.field_mask = UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
-                          UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR;
+      // TODO: error handling callback disables shared memory transport
+      // params.field_mask = UCP_EP_PARAM_FIELD_ERR_HANDLER | UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
+      //                     UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR;
+      params.field_mask = UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR;
       params.err_mode = UCP_ERR_HANDLING_MODE_PEER;
+      params.err_handler.cb = HandlePeerError;
+      params.err_handler.arg = this;
       params.flags = UCP_EP_PARAMS_FLAGS_CLIENT_SERVER;
       params.sockaddr.addr = reinterpret_cast<const sockaddr*>(&listen_addr);
       params.sockaddr.addrlen = sizeof(listen_addr);
@@ -210,6 +214,12 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
   Status Close() override {
     auto status = Status::OK();
+
+    ARROW_LOG(WARNING) << "Disconnect";
+    static uint8_t zeroes[1] = {0};
+    UcpCallDriver driver(ucp_worker_, remote_endpoint_);
+    RETURN_NOT_OK(driver.SendFrame(FrameType::kDisconnect, zeroes, 1));
+    ARROW_LOG(WARNING) << "Disconnect";
 
     void* request = ucp_ep_close_nb(remote_endpoint_, UCP_EP_CLOSE_MODE_FLUSH);
     if (UCS_PTR_IS_ERR(request)) {
@@ -240,6 +250,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
     remote_endpoint_ = nullptr;
     ucp_worker_ = nullptr;
     ucp_context_ = nullptr;
+    ARROW_LOG(WARNING) << "Closed";
     return status;
   }
 
@@ -305,6 +316,14 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   }
 
  private:
+  static void HandlePeerError(void* arg, ucp_ep_h ep, ucs_status_t status) {
+    // auto* self = reinterpret_cast<UcxClientImpl*>(arg);
+    if (status != UCS_OK) {
+      // TODO: UCS_ERR_CONNECTION_RESET should just re-create the client
+      ARROW_LOG(WARNING) << FromUcsStatus("HandlePeerError", status);
+    }
+  }
+
   static ucs_status_t HandleIncomingActiveMessage(void* self, const void* header,
                                                   size_t header_length, void* data,
                                                   size_t data_length,
@@ -327,10 +346,11 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
     // TODO: ensure Push doesn't synchronously run a callback on this
     // thread since that'll block UCX from making progress
-    driver->RecvActiveMessage(header, header_length, data, data_length, param)
+    ucs_status_t status = UCS_OK;
+    driver->RecvActiveMessage(header, header_length, data, data_length, param, &status)
         .Then([driver](const std::shared_ptr<Frame>& frame) { driver->Push(frame); },
               [driver](const Status& status) { driver->Push(status); });
-    return UCS_OK;
+    return status;
   }
 
   ucp_context_h ucp_context_;

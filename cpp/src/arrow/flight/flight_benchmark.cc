@@ -296,16 +296,17 @@ Status DoSinglePerfRun(FlightClient* client, const FlightClientOptions client_op
   int64_t start_total_records = stats->total_records;
 
   auto test_loop = test_put ? &RunDoPutTest : &RunDoGetTest;
-  auto ConsumeStream = [&stats, &test_loop, &client_options,
+  auto ConsumeStream = [client, &stats, &test_loop, &client_options,
                         &call_options](const FlightEndpoint& endpoint) {
-    std::unique_ptr<FlightClient> client;
-    RETURN_NOT_OK(
-        FlightClient::Connect(endpoint.locations.front(), client_options, &client));
+    // std::unique_ptr<FlightClient> client;
+    // RETURN_NOT_OK(
+    //     FlightClient::Connect(endpoint.locations.front(), client_options, &client));
 
     perf::Token token;
     token.ParseFromString(endpoint.ticket.ticket);
 
-    const auto& result = test_loop(client.get(), call_options, token, endpoint, stats);
+    // const auto& result = test_loop(client.get(), call_options, token, endpoint, stats);
+    const auto& result = test_loop(client, call_options, token, endpoint, stats);
     if (result.ok()) {
       const PerformanceResult& perf = result.ValueOrDie();
       stats->Update(perf.num_batches, perf.num_records, perf.num_bytes);
@@ -321,8 +322,9 @@ Status DoSinglePerfRun(FlightClient* client, const FlightClientOptions client_op
   ARROW_ASSIGN_OR_RAISE(auto pool, ThreadPool::Make(FLAGS_num_threads));
   std::vector<Future<>> tasks;
   for (const auto& endpoint : plan->endpoints()) {
-    ARROW_ASSIGN_OR_RAISE(auto task, pool->Submit(ConsumeStream, endpoint));
-    tasks.push_back(std::move(task));
+    // ARROW_ASSIGN_OR_RAISE(auto task, pool->Submit(ConsumeStream, endpoint));
+    // tasks.push_back(std::move(task));
+    tasks.emplace_back(ConsumeStream(endpoint));
   }
 
   // Wait for tasks to finish

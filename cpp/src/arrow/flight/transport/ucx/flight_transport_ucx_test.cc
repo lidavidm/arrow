@@ -107,6 +107,10 @@ TEST_F(TestUcx, DoGet) {
   // TODO: if we hit an NYI, we just hang on shutdown?
 }
 
+TEST_F(TestUcx, ConcurrentClients) {
+  // TODO: concurrent clients
+}
+
 #ifdef ARROW_CUDA
 // TODO: split this out into a separate test like the main flight test
 TEST_F(TestUcx, DoGetCuda) {

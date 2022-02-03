@@ -84,8 +84,9 @@ enum class FrameType : uint8_t {
   kHeaders = 0,
   // Binary blob.
   kPayload,
+  kDisconnect,
   // Keep at end.
-  kMaxFrameType = kPayload,
+  kMaxFrameType = kDisconnect,
 };
 
 class HeadersFrame {
@@ -133,6 +134,7 @@ class UcpCallDriver {
                     const std::vector<std::pair<std::string, std::string>>& headers = {});
   Status SendPayload(const uint8_t* data, const int64_t size);
   Future<> SendFlightPayload(const FlightPayload& payload);
+  Status SendFrame(FrameType frame_type, const uint8_t* data, const int64_t size);
 
   arrow::Result<std::shared_ptr<Frame>> ReadNextFrame();
 
@@ -153,7 +155,8 @@ class UcpCallDriver {
   Future<std::shared_ptr<Frame>> RecvActiveMessage(const void* header,
                                                    size_t header_length, void* data,
                                                    const size_t data_length,
-                                                   const ucp_am_recv_param_t* param);
+                                                   const ucp_am_recv_param_t* param,
+                                                   ucs_status_t* status);
 
  private:
   class Impl;
