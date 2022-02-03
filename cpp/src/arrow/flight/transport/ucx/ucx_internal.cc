@@ -212,23 +212,6 @@ arrow::Result<util::string_view> HeadersFrame::Get(const std::string& key) {
   return Status::KeyError(key);
 }
 
-struct IncompleteAmRecv {
-  Future<std::shared_ptr<Frame>> future;
-  std::shared_ptr<Frame> frame;
-};
-
-void AmRecvCallback(void* request, ucs_status_t status, size_t length, void* user_data) {
-  IncompleteAmRecv* recv_state = reinterpret_cast<IncompleteAmRecv*>(user_data);
-  ucp_request_free(request);
-  if (status != UCS_OK) {
-    recv_state->future.MarkFinished(
-        FromUcsStatus("ucp_am_recv_data_nbx (callback)", status));
-  } else {
-    recv_state->future.MarkFinished(std::move(recv_state->frame));
-  }
-  delete recv_state;
-}
-
 namespace {
 class UcxAmBuffer : public Buffer {
  public:
@@ -241,6 +224,31 @@ class UcxAmBuffer : public Buffer {
  private:
   ucp_worker_h worker_;
 };
+
+arrow::Result<std::shared_ptr<Frame>> ParseFrameHeader(const void* header, size_t header_length) {
+  if (header_length < kFrameHeaderBytes) {
+    return Status::IOError("Header is too short, must be at least ", kFrameHeaderBytes, " bytes, got ",
+                           header_length);
+  }
+
+  const uint8_t* frame_header = reinterpret_cast<const uint8_t*>(header);
+  if (frame_header[0] != kFrameVersion) {
+    return Status::IOError("Expected frame version ", static_cast<int>(kFrameVersion),
+                           " but got ", static_cast<int>(frame_header[0]));
+  } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
+    return Status::IOError("Unknown frame type ", static_cast<int>(frame_header[1]));
+  }
+
+  const FrameType frame_type = static_cast<FrameType>(frame_header[1]);
+  const uint32_t frame_counter = BytesToUInt32Be(frame_header + 4);
+  const int32_t frame_size = BeBytesToInt32(frame_header + 8);
+
+  if (frame_type == FrameType::kDisconnect) {
+    return Status::Cancelled("Client initiated disconnect");
+  }
+
+  return std::make_shared<Frame>(frame_type, frame_size, frame_counter, nullptr);
+}
 };
 
 // pImpl the driver since async methods require a stable address
@@ -253,7 +261,8 @@ class UcpCallDriver::Impl {
         endpoint_(endpoint),
         memory_manager_(memory_manager
                             ? std::move(memory_manager)
-                            : CPUDevice::Instance()->default_memory_manager()) {}
+                        : CPUDevice::Instance()->default_memory_manager()),
+        counter_(0){}
 
   arrow::Result<std::shared_ptr<Frame>> ReadNextFrame() {
     // TODO: reimplement the client/server async, get rid of sync methods here
@@ -290,12 +299,13 @@ class UcpCallDriver::Impl {
     DCHECK_GT(size, 0);
 
     // Send frame header
-    uint8_t header[8] = {0};
+    uint8_t header[kFrameHeaderBytes] = {0};
     header[0] = kFrameVersion;
     header[1] = static_cast<uint8_t>(frame_type);
-    Int32ToBytesBe(size, header + 4);
+    UInt32ToBytesBe(counter_++, header + 4);
+    Int32ToBytesBe(size, header + 8);
 
-    request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, 8, data, size,
+    request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, header, kFrameHeaderBytes, data, size,
                               &request_param);
     RETURN_NOT_OK(CompleteRequestBlocking("ucp_am_send_nbx", request));
 
@@ -307,14 +317,23 @@ class UcpCallDriver::Impl {
 
     RETURN_NOT_OK(CheckClosed());
 
-    int32_t total_messages = 1;
+    ARROW_LOG(WARNING) << "Send header " << counter_;
+    RETURN_NOT_OK(SendFrame(FrameType::kPayloadHeader, payload.ipc_message.metadata->data(), payload.ipc_message.metadata->size()));
+
+    if (!ipc::Message::HasBody(payload.ipc_message.type)) {
+      ARROW_LOG(WARNING) << "Skip body";
+      return Status::OK();
+    }
+    ARROW_LOG(WARNING) << "Send body " << counter_;
+
+    int32_t total_buffers = 0;
     for (const auto& buffer : payload.ipc_message.body_buffers) {
       if (!buffer || buffer->size() == 0) continue;
-      total_messages++;
+      total_buffers++;
 
       const auto remainder = static_cast<int>(
           bit_util::RoundUpToMultipleOf8(buffer->size()) - buffer->size());
-      if (remainder) total_messages++;
+      if (remainder) total_buffers++;
     }
 
     // Do an active message send with IOV to send all buffers in one go
@@ -324,16 +343,12 @@ class UcpCallDriver::Impl {
     pending_send->payload = payload;
     pending_send->header[0] = kFrameVersion;
     pending_send->header[1] = static_cast<uint8_t>(FrameType::kPayload);
+    pending_send->header[2] = counter_++;
     Int32ToBytesBe(payload.ipc_message.metadata->size(), pending_send->header + 4);
-    pending_send->iovs.resize(total_messages);
+    pending_send->iovs.resize(total_buffers);
     pending_send->completed = Future<>::Make();
 
-    pending_send->iovs[0].buffer = const_cast<void*>(
-        reinterpret_cast<const void*>(payload.ipc_message.metadata->data()));
-    pending_send->iovs[0].length = payload.ipc_message.metadata->size();
-
-    if (ipc::Message::HasBody(payload.ipc_message.type)) {
-      ucp_dt_iov_t* iov = pending_send->iovs.data() + 1;
+      ucp_dt_iov_t* iov = pending_send->iovs.data();
       for (const auto& buffer : payload.ipc_message.body_buffers) {
         if (!buffer || buffer->size() == 0) continue;
 
@@ -349,7 +364,6 @@ class UcpCallDriver::Impl {
           ++iov;
         }
       }
-    }
 
     ucp_request_param_t request_param;
     std::memset(&request_param, 0, sizeof(request_param));
@@ -363,7 +377,7 @@ class UcpCallDriver::Impl {
     {
       auto* pending_send = reinterpret_cast<PendingAmSend*>(request_param.user_data);
 
-      void* request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, pending_send->header, 8,
+      void* request = ucp_am_send_nbx(endpoint_, kUcpAmHandlerId, pending_send->header, kFrameHeaderBytes,
                                       pending_send->iovs.data(),
                                       pending_send->iovs.size(), &request_param);
       if (!request) {
@@ -412,6 +426,8 @@ class UcpCallDriver::Impl {
   void MakeProgress() { ucp_worker_progress(worker_); }
 
   void Push(std::shared_ptr<Frame> frame) {
+    // TODO: ensure Push doesn't synchronously run a callback on this
+    // thread since that'll block UCX from making progress
     std::unique_lock<std::mutex> guard(frame_mutex_);
     if (!frames_.empty() && !frames_.front().is_finished()) {
       frames_.front().MarkFinished(std::move(frame));
@@ -431,105 +447,18 @@ class UcpCallDriver::Impl {
     }
   }
 
-  Future<std::shared_ptr<Frame>> RecvActiveMessage(const void* header,
-                                                   size_t header_length, void* data,
-                                                   const size_t data_length,
-                                                   const ucp_am_recv_param_t* param, ucs_status_t* status) {
-    DCHECK(param->recv_attr & UCP_AM_RECV_ATTR_FIELD_REPLY_EP);
-
-    if (header_length < 8) {
-      return Status::IOError("Header is too short, must be at least 8 bytes, got ",
-                             header_length);
+  ucs_status_t RecvActiveMessage(const void* header,
+                                 size_t header_length, void* data,
+                                 const size_t data_length,
+                                 const ucp_am_recv_param_t* param) {
+    auto maybe_status = RecvActiveMessageImpl(header, header_length, data, data_length, param);
+    if (!maybe_status.ok()) {
+      Push(maybe_status.status());
+      // Can't really report errors here
+      // TODO: forcefully disconnect?
+      return UCS_OK;
     }
-
-    const uint8_t* frame_header = reinterpret_cast<const uint8_t*>(header);
-    if (frame_header[0] != kFrameVersion) {
-      return Status::IOError("Expected frame version ", static_cast<int>(kFrameVersion),
-                             " but got ", static_cast<int>(frame_header[0]));
-    } else if (frame_header[1] > static_cast<uint8_t>(FrameType::kMaxFrameType)) {
-      return Status::IOError("Unknown frame type ", static_cast<int>(frame_header[1]));
-    }
-
-    if (data_length > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
-      return Status::Invalid(
-          "Cannot allocate buffer greater than int64_t max, requested: ", data_length);
-    }
-
-    // ARROW_LOG(WARNING) << "Got frame type " << static_cast<int32_t>(frame_header[1]);
-
-    const FrameType frame_type = static_cast<FrameType>(frame_header[1]);
-    const int32_t frame_size = BeBytesToInt32(frame_header + 4);
-
-    if (frame_type == FrameType::kDisconnect) {
-      ARROW_LOG(WARNING) << "Disconnect";
-      return Status::Cancelled("Client initiated disconnect");
-    }
-
-    if ((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) && (frame_type != FrameType::kPayload || memory_manager_->is_cpu())) {
-      auto buffer = arrow::internal::make_unique<UcxAmBuffer>(worker_, data, data_length);
-      auto frame = std::make_shared<Frame>(frame_type, frame_size, std::move(buffer));
-      *status = UCS_INPROGRESS;
-      return frame;
-    }
-
-    if ((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) || (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV)) {
-      // Asynchronous receive, or unpack to destination.
-      // It would be nice if we could reuse the future's allocation...
-
-      std::unique_ptr<Buffer> buffer;
-      ARROW_ASSIGN_OR_RAISE(buffer, AllocateBuffer(data_length));
-      // if (frame_type == FrameType::kPayload) {
-      //   ARROW_ASSIGN_OR_RAISE(buffer, memory_manager_->AllocateBuffer(data_length));
-      // } else {
-      //   // TODO: allow custom pool
-      //   ARROW_ASSIGN_OR_RAISE(buffer, AllocateBuffer(data_length));
-      // }
-      auto frame = std::make_shared<Frame>(frame_type, frame_size, std::move(buffer));
-
-      IncompleteAmRecv* recv_state = new IncompleteAmRecv;
-      recv_state->future = Future<std::shared_ptr<Frame>>::Make();
-      recv_state->frame = std::move(frame);
-      // Must save the future since the callback may run (and free state) before we even
-      // exit the function
-      auto future = recv_state->future;
-
-      ucp_request_param_t recv_param;
-      recv_param.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-      recv_param.cb.recv_am = AmRecvCallback;
-      recv_param.user_data = reinterpret_cast<void*>(recv_state);
-      // // TODO: need to be able to differentiate between CUDA and ROCm
-      // if (!recv_state->frame->buffer->is_cpu()) {
-      //   recv_param.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMORY_TYPE;
-      //   recv_param.memory_type = UCS_MEMORY_TYPE_CUDA;
-      // }
-
-      void* dest = reinterpret_cast<void*>(recv_state->frame->buffer->mutable_address());
-      void* request = ucp_am_recv_data_nbx(worker_, data, dest, data_length, &recv_param);
-      if (UCS_PTR_IS_ERR(request)) {
-        delete recv_state;
-        return FromUcsStatus("ucp_am_recv_data_nbx", UCS_PTR_STATUS(request));
-      } else if (!request) {
-        // Request completed instantly
-        auto fut = std::move(recv_state->future);
-        fut.MarkFinished(std::move(recv_state->frame));
-        delete recv_state;
-        return fut;
-      }
-      return future;
-    } else {
-      // Data will be freed after callback returns - copy to buffer
-      std::unique_ptr<Buffer> buffer;
-      // if (frame_type != FrameType::kPayload || memory_manager_->is_cpu()) {
-        // TODO: allow custom pool
-        ARROW_ASSIGN_OR_RAISE(buffer, AllocateBuffer(data_length));
-        std::memcpy(buffer->mutable_data(), data, data_length);
-      // } else {
-      //   ARROW_ASSIGN_OR_RAISE(buffer, MemoryManager::CopyBuffer(
-      //       Buffer(reinterpret_cast<uint8_t*>(data), static_cast<int64_t>(data_length)),
-      //       memory_manager_));
-      // }
-      return std::make_shared<Frame>(frame_type, frame_size, std::move(buffer));
-    }
+    return maybe_status.MoveValueUnsafe();
   }
 
   const std::shared_ptr<MemoryManager>& memory_manager() const { return memory_manager_; }
@@ -537,9 +466,14 @@ class UcpCallDriver::Impl {
  private:
   struct PendingAmSend {
     FlightPayload payload;
-    uint8_t header[8];
+    uint8_t header[kFrameHeaderBytes];
     std::vector<ucp_dt_iov_t> iovs;
     Future<> completed;
+  };
+
+  struct PendingAmRecv {
+    UcpCallDriver::Impl* driver;
+    std::shared_ptr<Frame> frame;
   };
 
   static void AmSendCallback(void* request, ucs_status_t status, void* user_data) {
@@ -551,6 +485,87 @@ class UcpCallDriver::Impl {
     }
     delete pending_send;
     ucp_request_free(request);
+  }
+
+  static void AmRecvCallback(void* request, ucs_status_t status, size_t length, void* user_data) {
+    auto* pending_recv = reinterpret_cast<PendingAmRecv*>(user_data);
+    ucp_request_free(request);
+    if (status != UCS_OK) {
+      pending_recv->driver->Push(FromUcsStatus("ucp_am_recv_data_nbx (callback)", status));
+    } else {
+      pending_recv->driver->Push(std::move(pending_recv->frame));
+    }
+    delete pending_recv;
+  }
+
+  arrow::Result<ucs_status_t> RecvActiveMessageImpl(const void* header,
+                                 size_t header_length, void* data,
+                                 const size_t data_length,
+                                                    const ucp_am_recv_param_t* param) {
+    DCHECK(param->recv_attr & UCP_AM_RECV_ATTR_FIELD_REPLY_EP);
+
+    if (data_length > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+      return Status::Invalid(
+          "Cannot allocate buffer greater than int64_t max, requested: ", data_length);
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto frame, ParseFrameHeader(header, header_length));
+
+    if ((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) && (frame->type != FrameType::kPayload || memory_manager_->is_cpu())) {
+      // Zero-copy path. UCX-allocated buffer must be freed later.
+      frame->buffer = arrow::internal::make_unique<UcxAmBuffer>(worker_, data, data_length);
+      Push(std::move(frame));
+      return UCS_INPROGRESS;
+    }
+
+    if ((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) || (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV)) {
+      // Asynchronous receive (RNDV), or unpack to destination (DATA).
+      if (frame->type == FrameType::kPayload) {
+        ARROW_ASSIGN_OR_RAISE(frame->buffer, memory_manager_->AllocateBuffer(data_length));
+      } else {
+        // TODO: allow custom pool
+        ARROW_ASSIGN_OR_RAISE(frame->buffer, AllocateBuffer(data_length));
+      }
+
+      PendingAmRecv* pending_recv = new PendingAmRecv;
+      pending_recv->driver = this;
+      pending_recv->frame = std::move(frame);
+
+      ucp_request_param_t recv_param;
+      recv_param.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
+      recv_param.cb.recv_am = AmRecvCallback;
+      recv_param.user_data = pending_recv;
+      // TODO: need to be able to differentiate between CUDA and ROCm
+      if (!pending_recv->frame->buffer->is_cpu()) {
+        recv_param.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMORY_TYPE;
+        recv_param.memory_type = UCS_MEMORY_TYPE_CUDA;
+      }
+
+      void* dest = reinterpret_cast<void*>(pending_recv->frame->buffer->mutable_address());
+      void* request = ucp_am_recv_data_nbx(worker_, data, dest, data_length, &recv_param);
+      if (UCS_PTR_IS_ERR(request)) {
+        delete pending_recv;
+        return FromUcsStatus("ucp_am_recv_data_nbx", UCS_PTR_STATUS(request));
+      } else if (!request) {
+        // Request completed instantly
+        Push(std::move(pending_recv->frame));
+        delete pending_recv;
+      }
+      return UCS_OK;
+    } else {
+      // Data will be freed after callback returns - copy to buffer
+      if (frame->type != FrameType::kPayload || memory_manager_->is_cpu()) {
+        // TODO: allow custom pool
+        ARROW_ASSIGN_OR_RAISE(frame->buffer, AllocateBuffer(data_length));
+        std::memcpy(frame->buffer->mutable_data(), data, data_length);
+      } else {
+        ARROW_ASSIGN_OR_RAISE(frame->buffer, MemoryManager::CopyBuffer(
+            Buffer(reinterpret_cast<uint8_t*>(data), static_cast<int64_t>(data_length)),
+            memory_manager_));
+      }
+      Push(std::move(frame));
+      return UCS_OK;
+    }
   }
 
   Status CompleteRequestBlocking(const std::string& context, void* request) {
@@ -585,6 +600,9 @@ class UcpCallDriver::Impl {
   ucp_worker_h worker_;
   ucp_ep_h endpoint_;
   std::shared_ptr<MemoryManager> memory_manager_;
+
+  // Counter used to reorder messages
+  uint32_t counter_ = 0;
 
   std::mutex frame_mutex_;
   std::deque<Future<std::shared_ptr<Frame>>> frames_;
@@ -683,10 +701,10 @@ void UcpCallDriver::Push(std::shared_ptr<Frame> frame) {
 }
 void UcpCallDriver::Push(Status status) { return impl_->Push(std::move(status)); }
 
-arrow::Future<std::shared_ptr<Frame>> UcpCallDriver::RecvActiveMessage(
+ucs_status_t UcpCallDriver::RecvActiveMessage(
     const void* header, size_t header_length, void* data, const size_t data_length,
-    const ucp_am_recv_param_t* param, ucs_status_t* status) {
-  return impl_->RecvActiveMessage(header, header_length, data, data_length, param, status);
+    const ucp_am_recv_param_t* param) {
+  return impl_->RecvActiveMessage(header, header_length, data, data_length, param);
 }
 
 const std::shared_ptr<MemoryManager>& UcpCallDriver::memory_manager() const {

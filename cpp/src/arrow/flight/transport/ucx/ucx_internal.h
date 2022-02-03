@@ -57,6 +57,13 @@ static inline void Int32ToBytesBe(const int32_t in, uint8_t* out) {
   out[3] = static_cast<uint8_t>(val & 0xFF);
 }
 
+static inline void UInt32ToBytesBe(const uint32_t in, uint8_t* out) {
+  out[0] = static_cast<uint8_t>((in >> 24) & 0xFF);
+  out[1] = static_cast<uint8_t>((in >> 16) & 0xFF);
+  out[2] = static_cast<uint8_t>((in >> 8) & 0xFF);
+  out[3] = static_cast<uint8_t>(in & 0xFF);
+}
+
 // TODO: inconsistent naming (BytesBe)
 static inline int64_t BeBytesToInt64(const uint8_t* in) {
   uint64_t val =
@@ -76,14 +83,24 @@ static inline int32_t BeBytesToInt32(const uint8_t* in) {
   return static_cast<int32_t>(val);
 }
 
+static inline uint32_t BytesToUInt32Be(const uint8_t* in) {
+  return static_cast<uint32_t>(in[3]) | (static_cast<uint32_t>(in[2]) << 8) |
+                 (static_cast<uint32_t>(in[1]) << 16) |
+                 (static_cast<uint32_t>(in[0]) << 24);
+}
+
 ARROW_FLIGHT_EXPORT
 Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status);
 
 enum class FrameType : uint8_t {
   // Key-value headers.
   kHeaders = 0,
-  // Binary blob.
+  // Binary blob. Contains IPC metadata, app metadata
+  kPayloadHeader,
+  // Binary blob. Contains IPC body
+  // TODO: rename to kPayloadBody
   kPayload,
+  // Ask server to disconnect (to avoid client/server waiting on each other)
   kDisconnect,
   // Keep at end.
   kMaxFrameType = kDisconnect,
@@ -103,13 +120,15 @@ class HeadersFrame {
 struct Frame {
   FrameType type;
   int32_t length;
+  uint32_t counter;
   std::unique_ptr<Buffer> buffer;
 
   Frame() = default;
-  Frame(FrameType type_, int32_t length_, std::unique_ptr<Buffer> buffer_)
-      : type(type_), length(length_), buffer(std::move(buffer_)) {}
+  Frame(FrameType type_, int32_t length_, uint32_t counter_, std::unique_ptr<Buffer> buffer_)
+      : type(type_), length(length_), counter(counter_), buffer(std::move(buffer_)) {}
 };
 
+constexpr static size_t kFrameHeaderBytes = 12;
 constexpr uint8_t kFrameVersion = 0x42;
 constexpr uint32_t kUcpAmHandlerId = 0x1024;
 
@@ -152,11 +171,10 @@ class UcpCallDriver {
 
   const std::shared_ptr<MemoryManager>& memory_manager() const;
 
-  Future<std::shared_ptr<Frame>> RecvActiveMessage(const void* header,
-                                                   size_t header_length, void* data,
-                                                   const size_t data_length,
-                                                   const ucp_am_recv_param_t* param,
-                                                   ucs_status_t* status);
+  ucs_status_t RecvActiveMessage(const void* header,
+                                 size_t header_length, void* data,
+                                 const size_t data_length,
+                                 const ucp_am_recv_param_t* param);
 
  private:
   class Impl;

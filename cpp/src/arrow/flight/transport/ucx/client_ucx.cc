@@ -71,27 +71,20 @@ class UcxClientDataStream : public internal::ClientDataStream {
       }
       return false;
     }
-    RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kPayload));
 
-    std::shared_ptr<Buffer> buffer = std::move(frame->buffer);
-    std::shared_ptr<Buffer> metadata;
-    if (buffer->is_cpu()) {
-      metadata = SliceBuffer(buffer, 0, frame->length);
+    RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kPayloadHeader));
+    data->metadata = std::move(frame->buffer);
+    ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(data->metadata, nullptr));
+    ARROW_LOG(WARNING) << "Got header " << static_cast<int>(frame->counter);
+
+    if (ipc::Message::HasBody(message->type())) {
+      ARROW_LOG(WARNING) << "Expect body";
+      ARROW_ASSIGN_OR_RAISE(frame, driver_->ReadNextFrame());
+      ARROW_LOG(WARNING) << "Got body " << static_cast<int>(frame->counter);
+      RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kPayload));
+      data->body = std::move(frame->buffer);
     } else {
-      // ipc::ReadMessage won't work because the Flight buffer has
-      // neither continuation token nor message length
-      ARROW_ASSIGN_OR_RAISE(auto reader,
-                            driver_->memory_manager()->GetBufferReader(buffer));
-      // TODO: use ReadOptions memory pool
-      ARROW_ASSIGN_OR_RAISE(metadata, AllocateBuffer(frame->length));
-      RETURN_NOT_OK(reader->Read(frame->length, metadata->mutable_data()));
-    }
-
-    ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(metadata, nullptr));
-    data->metadata = std::move(metadata);
-    data->body = SliceBuffer(buffer, data->metadata->size(), message->body_length());
-    if (!driver_->memory_manager()->is_cpu()) {
-      ARROW_ASSIGN_OR_RAISE(data->body, Buffer::ViewOrCopy(data->body, driver_->memory_manager()));
+      ARROW_LOG(WARNING) << "No body";
     }
     return true;
   }
@@ -344,16 +337,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       ARROW_LOG(WARNING) << "Got message with no active call";
       return UCS_OK;
     }
-
-    UcpCallDriver* driver = driver_;
-
-    // TODO: ensure Push doesn't synchronously run a callback on this
-    // thread since that'll block UCX from making progress
-    ucs_status_t status = UCS_OK;
-    driver->RecvActiveMessage(header, header_length, data, data_length, param, &status)
-        .Then([driver](const std::shared_ptr<Frame>& frame) { driver->Push(frame); },
-              [driver](const Status& status) { driver->Push(status); });
-    return status;
+    return driver_->RecvActiveMessage(header, header_length, data, data_length, param);
   }
 
   ucp_context_h ucp_context_;

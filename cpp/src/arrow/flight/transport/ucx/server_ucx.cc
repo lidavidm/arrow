@@ -124,11 +124,7 @@ class ClientWorker : public std::enable_shared_from_this<ClientWorker> {
     DCHECK(driver);
     auto self = shared_from_this();
 
-    ucs_status_t status = UCS_OK;
-    driver->RecvActiveMessage(header, header_length, data, data_length, param, &status)
-        .Then([self](const std::shared_ptr<Frame>& frame) { self->driver->Push(frame); },
-              [self](const Status& status) { self->driver->Push(status); });
-    return status;
+    return driver->RecvActiveMessage(header, header_length, data, data_length, param);
   }
 
   static void HandlePeerError(void* arg, ucp_ep_h ep, ucs_status_t status) {
