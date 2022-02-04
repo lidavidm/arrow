@@ -60,8 +60,8 @@ class UcxClientDataStream : public internal::ClientDataStream {
     if (frame->type == FrameType::kHeaders) {
       // Trailers, stream is over
       ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame->buffer)));
-      ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
-      ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));
+      ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get(kHeaderStatusCode));
+      ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get(kHeaderStatusMessage));
       auto code = std::strtol(code_str.data(), nullptr, /*base=*/10);
       auto status_code = static_cast<StatusCode>(code);
       if (status_code == StatusCode::OK) {
@@ -185,15 +185,8 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       UriToSockaddr(uri, &listen_addr);
 
       ucp_ep_params_t params;
-      // TODO: error handling callback disables shared memory transport
-      // params.field_mask = UCP_EP_PARAM_FIELD_ERR_HANDLER |
-      // UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
-      //                     UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR;
-      params.field_mask = UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR |
-                          UCP_EP_PARAM_FIELD_NAME;
-      params.err_mode = UCP_ERR_HANDLING_MODE_PEER;
-      params.err_handler.cb = HandlePeerError;
-      params.err_handler.arg = this;
+      params.field_mask = UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_NAME |
+                          UCP_EP_PARAM_FIELD_SOCK_ADDR;
       params.flags = UCP_EP_PARAMS_FLAGS_CLIENT_SERVER;
       params.name = "UcxClientImpl";
       params.sockaddr.addr = reinterpret_cast<const sockaddr*>(&listen_addr);
@@ -211,9 +204,8 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   Status Close() override {
     auto status = Status::OK();
 
-    static uint8_t zeroes[1] = {0};
     UcpCallDriver driver(ucp_worker_, remote_endpoint_);
-    RETURN_NOT_OK(driver.SendFrame(FrameType::kDisconnect, zeroes, 1));
+    RETURN_NOT_OK(driver.SendFrame(FrameType::kDisconnect, nullptr, 0));
 
     void* request = ucp_ep_close_nb(remote_endpoint_, UCP_EP_CLOSE_MODE_FLUSH);
     if (UCS_PTR_IS_ERR(request)) {
@@ -252,9 +244,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
                        std::unique_ptr<FlightInfo>* info) override {
     // TODO: respect options
     // TODO: can we find a way to share code with the gRPC backend?
-    // TODO: constant
-    RETURN_NOT_OK(
-        driver_->StartCall("arrow.flight.protocol.FlightService/GetFlightInfo"));
+    RETURN_NOT_OK(driver_->StartCall(kMethodGetFlightInfo));
 
     std::string payload;
     descriptor.SerializeToString(&payload);
@@ -273,8 +263,8 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
     ARROW_ASSIGN_OR_RAISE(auto headers,
                           HeadersFrame::Parse(std::move(incoming_message->buffer)));
     // TODO: annotate error messages
-    ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get("flight-status-code"));
-    ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get("flight-status-message"));
+    ARROW_ASSIGN_OR_RAISE(auto code_str, headers.Get(kHeaderStatusCode));
+    ARROW_ASSIGN_OR_RAISE(auto message_str, headers.Get(kHeaderStatusMessage));
     auto code = std::strtol(code_str.data(), nullptr, /*base=*/10);
     // TODO: validate
     auto status_code = static_cast<StatusCode>(code);
@@ -285,7 +275,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
                std::unique_ptr<internal::ClientDataStream>* stream) override {
     driver_->set_memory_manager(options.memory_manager);
-    RETURN_NOT_OK(driver_->StartCall("arrow.flight.protocol.FlightService/DoGet"));
+    RETURN_NOT_OK(driver_->StartCall(kMethodDoGet));
 
     {
       std::string payload;
@@ -306,32 +296,13 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   }
 
  private:
-  static void HandlePeerError(void* arg, ucp_ep_h ep, ucs_status_t status) {
-    // auto* self = reinterpret_cast<UcxClientImpl*>(arg);
-    if (status != UCS_OK) {
-      // TODO: UCS_ERR_CONNECTION_RESET should just re-create the client
-      ARROW_LOG(WARNING) << FromUcsStatus("HandlePeerError", status);
-    }
-  }
-
   static ucs_status_t HandleIncomingActiveMessage(void* self, const void* header,
                                                   size_t header_length, void* data,
                                                   size_t data_length,
                                                   const ucp_am_recv_param_t* param) {
     auto* impl = reinterpret_cast<UcxClientImpl*>(self);
-    return impl->DoHandleIncomingActiveMessage(header, header_length, data, data_length,
-                                               param);
-  }
-
-  ucs_status_t DoHandleIncomingActiveMessage(const void* header, size_t header_length,
-                                             void* data, size_t data_length,
-                                             const ucp_am_recv_param_t* param) {
-    // Got message with no active call, ignore
-    if (!driver_) {
-      ARROW_LOG(WARNING) << "Got message with no active call";
-      return UCS_OK;
-    }
-    return driver_->RecvActiveMessage(header, header_length, data, data_length, param);
+    return impl->driver_->RecvActiveMessage(header, header_length, data, data_length,
+                                            param);
   }
 
   ucp_context_h ucp_context_;

@@ -115,30 +115,7 @@ class UcxTransportDataStream : public internal::TransportDataStream {
   std::queue<Future<>> requests_;
 };
 
-class ClientWorker : public std::enable_shared_from_this<ClientWorker> {
- public:
-  ucs_status_t HandleIncomingActiveMessage(const void* header, size_t header_length,
-                                           void* data, size_t data_length,
-                                           const ucp_am_recv_param_t* param) {
-    // ARROW_LOG(WARNING) << "Handling incoming message of size " << data_length;
-    DCHECK(driver);
-    auto self = shared_from_this();
-
-    return driver->RecvActiveMessage(header, header_length, data, data_length, param);
-  }
-
-  static void HandlePeerError(void* arg, ucp_ep_h ep, ucs_status_t status) {
-    // ARROW_LOG(WARNING) << "Handling peer error " << status;
-    auto* self = reinterpret_cast<ClientWorker*>(arg);
-    if (status == UCS_ERR_CONNECTION_RESET) {
-      ARROW_UNUSED(self->driver->Close());
-      // TODO: return this worker to the pool
-    } else if (status != UCS_OK) {
-      ARROW_LOG(WARNING) << FromUcsStatus("HandlePeerError", status);
-      ARROW_LOG(WARNING) << self->driver->Close().ToString();
-    }
-  }
-
+struct ClientWorker {
   ucp_worker_h worker = nullptr;
   std::unique_ptr<UcpCallDriver> driver;
 };
@@ -252,7 +229,8 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
       ucp_listener_destroy(listener_);
       ucp_worker_destroy(worker_conn_);
 
-      // Tear down all workers
+      // Tear down all workers. TODO: this needs to include in-progress
+      // workers (we should break out of Wait() given a timeout)
       while (!workers_.empty()) {
         ucp_worker_destroy(workers_.front()->worker);
         workers_.pop();
@@ -324,10 +302,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     RETURN_NOT_OK(driver->ExpectFrameType(*frame, FrameType::kHeaders));
     ARROW_ASSIGN_OR_RAISE(auto headers, HeadersFrame::Parse(std::move(frame->buffer)));
     ARROW_ASSIGN_OR_RAISE(auto method, headers.Get(":method:"));
-    // ARROW_LOG(WARNING) << "Handling " << method;
-    if (method == "arrow.flight.protocol.FlightService/GetFlightInfo") {
+    if (method == kMethodGetFlightInfo) {
       return HandleGetFlightInfo(driver);
-    } else if (method == "arrow.flight.protocol.FlightService/DoGet") {
+    } else if (method == kMethodDoGet) {
       return HandleDoGet(driver);
     }
     RETURN_NOT_OK(driver->SendStatus(Status::NotImplemented(method)));
@@ -335,39 +312,10 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     return Status::OK();
   }
 
-  void WaitForRequestAsync(std::shared_ptr<ClientWorker> worker) {
-    CallbackOptions options;
-    options.should_schedule = ShouldSchedule::Always;
-    options.executor = rpc_pool_.get();
-
-    auto fut = worker->driver->ReadFrameAsync();
-    fut.AddCallback(
-        [=](const arrow::Result<std::shared_ptr<Frame>>& maybe_frame) {
-          // ARROW_LOG(WARNING) << "Got frame";
-          if (!maybe_frame.ok()) {
-            if (maybe_frame.status().code() != StatusCode::Cancelled) {
-              this->ReportError(maybe_frame.status());
-            }
-            // this->DisconnectClient(connection_id);
-            return;
-          }
-          auto status = this->HandleOneCall(worker->driver.get(), maybe_frame->get());
-          if (!status.ok()) {
-            this->ReportError(std::move(status));
-            // this->DisconnectClient(connection_id);
-            return;
-          }
-          this->WaitForRequestAsync(std::move(worker));
-        },
-        options);
-  }
-
   Status WaitForRequest(std::shared_ptr<ClientWorker> worker) {
     while (true) {
-      ARROW_LOG(WARNING) << "Waiting for next request";
       auto maybe_frame = worker->driver->ReadNextFrame();
       if (!maybe_frame.ok() && maybe_frame.status().IsCancelled()) {
-        ARROW_LOG(WARNING) << "Cancelled, breaking";
         break;
       }
       RETURN_NOT_OK(maybe_frame.status());
@@ -401,15 +349,8 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
         // Create an endpoint to the client, using the data worker
         ucp_ep_params_t params;
         std::memset(&params, 0, sizeof(params));
-        // params.field_mask = UCP_EP_PARAM_FIELD_CONN_REQUEST |
-        //                     UCP_EP_PARAM_FIELD_ERR_HANDLER |
-        //                     UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE;
         params.field_mask = UCP_EP_PARAM_FIELD_CONN_REQUEST;
         params.conn_request = request;
-        params.err_handler.cb = ClientWorker::HandlePeerError;
-        params.err_handler.arg = worker.get();
-        // err_mode must be set to same value on both sides
-        params.err_mode = UCP_ERR_HANDLING_MODE_PEER;
         ucs_status_t status;
         ucp_ep_h client_endpoint;
 
@@ -506,8 +447,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
                                                   size_t data_length,
                                                   const ucp_am_recv_param_t* param) {
     ClientWorker* worker = reinterpret_cast<ClientWorker*>(self);
-    return worker->HandleIncomingActiveMessage(header, header_length, data, data_length,
-                                               param);
+    DCHECK(worker->driver);
+    return worker->driver->RecvActiveMessage(header, header_length, data, data_length,
+                                             param);
   }
 
   ucp_context_h ucp_context_;

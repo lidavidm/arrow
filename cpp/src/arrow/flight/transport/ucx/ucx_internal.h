@@ -36,51 +36,18 @@ namespace flight {
 namespace transport {
 namespace ucx {
 
-// TODO: use unsigned integers?
-static inline void Int64ToBytesBe(const int64_t in, uint8_t* out) {
-  const uint64_t val = static_cast<uint64_t>(in);
-  out[0] = static_cast<uint8_t>((val >> 56) & 0xFF);
-  out[1] = static_cast<uint8_t>((val >> 48) & 0xFF);
-  out[2] = static_cast<uint8_t>((val >> 40) & 0xFF);
-  out[3] = static_cast<uint8_t>((val >> 32) & 0xFF);
-  out[4] = static_cast<uint8_t>((val >> 24) & 0xFF);
-  out[5] = static_cast<uint8_t>((val >> 16) & 0xFF);
-  out[6] = static_cast<uint8_t>((val >> 8) & 0xFF);
-  out[7] = static_cast<uint8_t>(val & 0xFF);
-}
+static constexpr char kMethodDoGet[] = "arrow.flight.protocol.FlightService/DoGet";
+static constexpr char kMethodGetFlightInfo[] =
+    "arrow.flight.protocol.FlightService/GetFlightInfo";
 
-static inline void Int32ToBytesBe(const int32_t in, uint8_t* out) {
-  const uint32_t val = static_cast<uint32_t>(in);
-  out[0] = static_cast<uint8_t>((val >> 24) & 0xFF);
-  out[1] = static_cast<uint8_t>((val >> 16) & 0xFF);
-  out[2] = static_cast<uint8_t>((val >> 8) & 0xFF);
-  out[3] = static_cast<uint8_t>(val & 0xFF);
-}
+static constexpr char kHeaderStatusCode[] = "flight-status-code";
+static constexpr char kHeaderStatusMessage[] = "flight-status-message";
 
 static inline void UInt32ToBytesBe(const uint32_t in, uint8_t* out) {
   out[0] = static_cast<uint8_t>((in >> 24) & 0xFF);
   out[1] = static_cast<uint8_t>((in >> 16) & 0xFF);
   out[2] = static_cast<uint8_t>((in >> 8) & 0xFF);
   out[3] = static_cast<uint8_t>(in & 0xFF);
-}
-
-// TODO: inconsistent naming (BytesBe)
-static inline int64_t BeBytesToInt64(const uint8_t* in) {
-  uint64_t val =
-      static_cast<uint64_t>(in[7]) | (static_cast<uint64_t>(in[6]) << 8) |
-      (static_cast<uint64_t>(in[5]) << 16) | (static_cast<uint64_t>(in[4]) << 24) |
-      (static_cast<uint64_t>(in[3]) << 32) | (static_cast<uint64_t>(in[2]) << 40) |
-      (static_cast<uint64_t>(in[1]) << 48) | (static_cast<uint64_t>(in[0]) << 56);
-  // TODO: this isn't technically right until C++20? P1236R1
-  return static_cast<int64_t>(val);
-}
-
-static inline int32_t BeBytesToInt32(const uint8_t* in) {
-  uint32_t val = static_cast<uint32_t>(in[3]) | (static_cast<uint32_t>(in[2]) << 8) |
-                 (static_cast<uint32_t>(in[1]) << 16) |
-                 (static_cast<uint32_t>(in[0]) << 24);
-  // TODO: this isn't technically right until C++20? P1236R1
-  return static_cast<int32_t>(val);
 }
 
 static inline uint32_t BytesToUInt32Be(const uint8_t* in) {
@@ -106,10 +73,13 @@ enum class FrameType : uint8_t {
   kMaxFrameType = kDisconnect,
 };
 
+/// \brief A collection of key-value headers.
 class HeadersFrame {
  public:
+  /// \brief Get a header value (or an error if it was not found)
   arrow::Result<util::string_view> Get(const std::string& key);
 
+  /// \brief Parse the headers from the buffer.
   static arrow::Result<HeadersFrame> Parse(std::unique_ptr<Buffer> buffer);
 
  private:
@@ -117,25 +87,47 @@ class HeadersFrame {
   std::vector<std::pair<util::string_view, util::string_view>> headers_;
 };
 
+/// \brief The size of a frame header.
+constexpr static size_t kFrameHeaderBytes = 12;
+/// \brief The version tag in a frame.
+constexpr uint8_t kFrameVersion = 0x42;
+/// \brief The active message handler callback ID.
+constexpr uint32_t kUcpAmHandlerId = 0x1024;
+
+/// \brief A single message sent over UCX.
+///
+/// A frame is expected to be sent over UCP Active Messages and
+/// consists of a header (of kFrameHeaderBytes bytes) and a body.
+///
+/// The header is as follows:
+/// +-------+---------------------------------+
+/// | Bytes | Function                        |
+/// +=======+=================================+
+/// | 0     | Version tag (see kFrameVersion) |
+/// | 1     | Frame type (see FrameType)      |
+/// | 2-3   | Unused, reserved                |
+/// | 4-7   | Frame counter                   |
+/// | 8-11  | Body size                       |
+/// +-------+---------------------------------+
 struct Frame {
+  /// \brief The message type.
   FrameType type;
-  int32_t length;
+  /// \brief The message length.
+  uint32_t length;
+  /// \brief An incrementing message counter (may wrap over).
   uint32_t counter;
+  /// \brief The message contents.
   std::unique_ptr<Buffer> buffer;
 
   Frame() = default;
-  Frame(FrameType type_, int32_t length_, uint32_t counter_,
+  Frame(FrameType type_, uint32_t length_, uint32_t counter_,
         std::unique_ptr<Buffer> buffer_)
       : type(type_), length(length_), counter(counter_), buffer(std::move(buffer_)) {}
 };
 
-constexpr static size_t kFrameHeaderBytes = 12;
-constexpr uint8_t kFrameVersion = 0x42;
-constexpr uint32_t kUcpAmHandlerId = 0x1024;
-
+/// \brief Manage the state of a UCX connection.
 class UcpCallDriver {
  public:
-  UcpCallDriver();
   UcpCallDriver(ucp_worker_h worker, ucp_ep_h endpoint,
                 std::shared_ptr<MemoryManager> memory_manager = NULLPTR);
 
@@ -157,17 +149,13 @@ class UcpCallDriver {
 
   arrow::Result<std::shared_ptr<Frame>> ReadNextFrame();
 
-  /// Read the next frame asynchronously.
-  Future<std::shared_ptr<Frame>> ReadFrameAsync();
-
   Status ExpectFrameType(const Frame& frame, FrameType type);
 
+  /// Disconnect the other side of the connection. Note, this can cause deadlock.
   Status Close();
 
-  // Synchronously make progress (to adapt async to sync APIs)
+  /// Synchronously make progress (to adapt async to sync APIs)
   void MakeProgress();
-  void Push(std::shared_ptr<Frame> frame);
-  void Push(Status status);
 
   const std::shared_ptr<MemoryManager>& memory_manager() const;
   void set_memory_manager(std::shared_ptr<MemoryManager> memory_manager);
