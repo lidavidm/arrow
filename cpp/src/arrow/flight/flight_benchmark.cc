@@ -40,6 +40,7 @@
 #include "arrow/flight/test_util.h"
 
 #ifdef ARROW_CUDA
+#include <cuda.h>
 #include "arrow/gpu/cuda_api.h"
 #endif
 #ifdef ARROW_WITH_UCX
@@ -161,6 +162,15 @@ arrow::Result<PerformanceResult> RunDoGetTest(FlightClient* client,
     if (!batch.data) {
       break;
     }
+
+    // for (const auto& arr : batch.data->columns()) {
+    //   for (const auto& buf : arr->data()->buffers) {
+    //     if (buf && buf->is_cpu()) {
+    //       return Status::Invalid("CUDA test: buffer was on device ",
+    //       buf->device()->ToString());
+    //     }
+    //   }
+    // }
 
     if (verify) {
       auto values = batch.data->column_data(0)->GetValues<int64_t>(1);
@@ -524,6 +534,16 @@ int main(int argc, char** argv) {
     ABORT_NOT_OK(arrow::cuda::CudaDeviceManager::Instance().Value(&manager));
     ABORT_NOT_OK(manager->GetDevice(0).Value(&device));
     call_options.memory_manager = device->default_memory_manager();
+
+    // Needed to prevent UCX warning
+    // cuda_md.c:162  UCX  ERROR cuMemGetAddressRange(0x7f2ab5dc0000) error: invalid
+    // device context
+    std::shared_ptr<arrow::cuda::CudaContext> context;
+    ABORT_NOT_OK(device->GetContext().Value(&context));
+    auto cuda_status = cuCtxPushCurrent(reinterpret_cast<CUcontext>(context->handle()));
+    if (cuda_status != CUDA_SUCCESS) {
+      ARROW_LOG(WARNING) << "CUDA error " << cuda_status;
+    }
 #else
     std::cerr << "-cuda requires that Arrow is built with ARROW_CUDA" << std::endl;
     return 1;

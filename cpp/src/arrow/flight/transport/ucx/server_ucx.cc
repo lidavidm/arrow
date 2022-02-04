@@ -286,7 +286,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     UcxServerCallContext context;
 
     ARROW_ASSIGN_OR_RAISE(auto frame, driver->ReadNextFrame());
-    RETURN_NOT_OK(driver->ExpectFrameType(*frame, FrameType::kPayload));
+    RETURN_NOT_OK(driver->ExpectFrameType(*frame, FrameType::kBuffer));
     FlightDescriptor descriptor;
     SERVER_RETURN_NOT_OK(
         driver, FlightDescriptor::Deserialize(frame->buffer->ToString(), &descriptor));
@@ -298,8 +298,9 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     // Send response to client
     std::string response;
     SERVER_RETURN_NOT_OK(driver, info->SerializeToString(&response));
-    RETURN_NOT_OK(driver->SendPayload(reinterpret_cast<const uint8_t*>(response.data()),
-                                      static_cast<int64_t>(response.size())));
+    RETURN_NOT_OK(driver->SendFrame(FrameType::kBuffer,
+                                    reinterpret_cast<const uint8_t*>(response.data()),
+                                    static_cast<int64_t>(response.size())));
     RETURN_NOT_OK(driver->SendStatus(Status::OK()));
     return Status::OK();
   }
@@ -308,7 +309,7 @@ class ARROW_FLIGHT_EXPORT UcxServerImpl
     UcxServerCallContext context;
 
     ARROW_ASSIGN_OR_RAISE(auto frame, driver->ReadNextFrame());
-    RETURN_NOT_OK(driver->ExpectFrameType(*frame, FrameType::kPayload));
+    RETURN_NOT_OK(driver->ExpectFrameType(*frame, FrameType::kBuffer));
     Ticket ticket;
     // TODO: don't allocate a new string
     SERVER_RETURN_NOT_OK(driver, Ticket::Deserialize(frame->buffer->ToString(), &ticket));

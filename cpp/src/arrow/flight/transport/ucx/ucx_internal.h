@@ -85,8 +85,7 @@ static inline int32_t BeBytesToInt32(const uint8_t* in) {
 
 static inline uint32_t BytesToUInt32Be(const uint8_t* in) {
   return static_cast<uint32_t>(in[3]) | (static_cast<uint32_t>(in[2]) << 8) |
-                 (static_cast<uint32_t>(in[1]) << 16) |
-                 (static_cast<uint32_t>(in[0]) << 24);
+         (static_cast<uint32_t>(in[1]) << 16) | (static_cast<uint32_t>(in[0]) << 24);
 }
 
 ARROW_FLIGHT_EXPORT
@@ -95,11 +94,12 @@ Status FromUcsStatus(const std::string& context, ucs_status_t ucs_status);
 enum class FrameType : uint8_t {
   // Key-value headers.
   kHeaders = 0,
+  // Binary blob, does not contain Arrow data.
+  kBuffer,
   // Binary blob. Contains IPC metadata, app metadata
   kPayloadHeader,
-  // Binary blob. Contains IPC body
-  // TODO: rename to kPayloadBody
-  kPayload,
+  // Binary blob. Contains IPC body.
+  kPayloadBody,
   // Ask server to disconnect (to avoid client/server waiting on each other)
   kDisconnect,
   // Keep at end.
@@ -124,7 +124,8 @@ struct Frame {
   std::unique_ptr<Buffer> buffer;
 
   Frame() = default;
-  Frame(FrameType type_, int32_t length_, uint32_t counter_, std::unique_ptr<Buffer> buffer_)
+  Frame(FrameType type_, int32_t length_, uint32_t counter_,
+        std::unique_ptr<Buffer> buffer_)
       : type(type_), length(length_), counter(counter_), buffer(std::move(buffer_)) {}
 };
 
@@ -151,7 +152,6 @@ class UcpCallDriver {
   Status SendHeaders(const std::vector<std::pair<std::string, std::string>>& headers);
   Status SendStatus(const Status& status,
                     const std::vector<std::pair<std::string, std::string>>& headers = {});
-  Status SendPayload(const uint8_t* data, const int64_t size);
   Future<> SendFlightPayload(const FlightPayload& payload);
   Status SendFrame(FrameType frame_type, const uint8_t* data, const int64_t size);
 
@@ -170,9 +170,9 @@ class UcpCallDriver {
   void Push(Status status);
 
   const std::shared_ptr<MemoryManager>& memory_manager() const;
+  void set_memory_manager(std::shared_ptr<MemoryManager> memory_manager);
 
-  ucs_status_t RecvActiveMessage(const void* header,
-                                 size_t header_length, void* data,
+  ucs_status_t RecvActiveMessage(const void* header, size_t header_length, void* data,
                                  const size_t data_length,
                                  const ucp_am_recv_param_t* param);
 

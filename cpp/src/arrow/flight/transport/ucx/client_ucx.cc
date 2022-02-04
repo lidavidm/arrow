@@ -38,8 +38,8 @@ namespace ucx {
 
 class UcxClientDataStream : public internal::ClientDataStream {
  public:
-  explicit UcxClientDataStream(std::unique_ptr<UcpCallDriver>&& driver)
-      : driver_(std::move(driver)), finished_(false) {}
+  explicit UcxClientDataStream(UcpCallDriver* driver)
+      : driver_(driver), finished_(false) {}
 
   bool Read(internal::FlightData* data) {
     if (finished_) return false;
@@ -75,16 +75,11 @@ class UcxClientDataStream : public internal::ClientDataStream {
     RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kPayloadHeader));
     data->metadata = std::move(frame->buffer);
     ARROW_ASSIGN_OR_RAISE(auto message, ipc::Message::Open(data->metadata, nullptr));
-    ARROW_LOG(WARNING) << "Got header " << static_cast<int>(frame->counter);
 
     if (ipc::Message::HasBody(message->type())) {
-      ARROW_LOG(WARNING) << "Expect body";
       ARROW_ASSIGN_OR_RAISE(frame, driver_->ReadNextFrame());
-      ARROW_LOG(WARNING) << "Got body " << static_cast<int>(frame->counter);
-      RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kPayload));
+      RETURN_NOT_OK(driver_->ExpectFrameType(*frame, FrameType::kPayloadBody));
       data->body = std::move(frame->buffer);
-    } else {
-      ARROW_LOG(WARNING) << "No body";
     }
     return true;
   }
@@ -123,7 +118,7 @@ class UcxClientDataStream : public internal::ClientDataStream {
                                      ". Transport context: ", io_status_.ToString());
   }
 
-  std::unique_ptr<UcpCallDriver> driver_;
+  UcpCallDriver* driver_;
   bool finished_;
   Status io_status_;
   Status server_status_;
@@ -191,13 +186,16 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
       ucp_ep_params_t params;
       // TODO: error handling callback disables shared memory transport
-      // params.field_mask = UCP_EP_PARAM_FIELD_ERR_HANDLER | UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
+      // params.field_mask = UCP_EP_PARAM_FIELD_ERR_HANDLER |
+      // UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
       //                     UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR;
-      params.field_mask = UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR;
+      params.field_mask = UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR |
+                          UCP_EP_PARAM_FIELD_NAME;
       params.err_mode = UCP_ERR_HANDLING_MODE_PEER;
       params.err_handler.cb = HandlePeerError;
       params.err_handler.arg = this;
       params.flags = UCP_EP_PARAMS_FLAGS_CLIENT_SERVER;
+      params.name = "UcxClientImpl";
       params.sockaddr.addr = reinterpret_cast<const sockaddr*>(&listen_addr);
       params.sockaddr.addrlen = sizeof(listen_addr);
 
@@ -205,17 +203,17 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
       RETURN_NOT_OK(FromUcsStatus("ucp_ep_create", status));
     }
 
+    driver_.reset(new UcpCallDriver(ucp_worker_, remote_endpoint_));
+
     return Status::OK();
   }
 
   Status Close() override {
     auto status = Status::OK();
 
-    ARROW_LOG(WARNING) << "Disconnect";
     static uint8_t zeroes[1] = {0};
     UcpCallDriver driver(ucp_worker_, remote_endpoint_);
     RETURN_NOT_OK(driver.SendFrame(FrameType::kDisconnect, zeroes, 1));
-    ARROW_LOG(WARNING) << "Disconnect";
 
     void* request = ucp_ep_close_nb(remote_endpoint_, UCP_EP_CLOSE_MODE_FLUSH);
     if (UCS_PTR_IS_ERR(request)) {
@@ -246,7 +244,6 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
     remote_endpoint_ = nullptr;
     ucp_worker_ = nullptr;
     ucp_context_ = nullptr;
-    ARROW_LOG(WARNING) << "Closed";
     return status;
   }
 
@@ -255,26 +252,24 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
                        std::unique_ptr<FlightInfo>* info) override {
     // TODO: respect options
     // TODO: can we find a way to share code with the gRPC backend?
-    UcpCallDriver driver(ucp_worker_, remote_endpoint_);
-    // TODO: need to clear this
-    // TODO: maybe set the callback on demand??
-    driver_ = &driver;
     // TODO: constant
-    RETURN_NOT_OK(driver.StartCall("arrow.flight.protocol.FlightService/GetFlightInfo"));
+    RETURN_NOT_OK(
+        driver_->StartCall("arrow.flight.protocol.FlightService/GetFlightInfo"));
 
     std::string payload;
     descriptor.SerializeToString(&payload);
 
-    RETURN_NOT_OK(driver.SendPayload(reinterpret_cast<const uint8_t*>(payload.data()),
+    RETURN_NOT_OK(driver_->SendFrame(FrameType::kBuffer,
+                                     reinterpret_cast<const uint8_t*>(payload.data()),
                                      static_cast<int64_t>(payload.size())));
 
-    ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver.ReadNextFrame());
-    if (incoming_message->type == FrameType::kPayload) {
+    ARROW_ASSIGN_OR_RAISE(auto incoming_message, driver_->ReadNextFrame());
+    if (incoming_message->type == FrameType::kBuffer) {
       // TODO: avoid allocating string
       RETURN_NOT_OK(FlightInfo::Deserialize(incoming_message->buffer->ToString(), info));
-      ARROW_ASSIGN_OR_RAISE(incoming_message, driver.ReadNextFrame());
+      ARROW_ASSIGN_OR_RAISE(incoming_message, driver_->ReadNextFrame());
     }
-    RETURN_NOT_OK(driver.ExpectFrameType(*incoming_message, FrameType::kHeaders));
+    RETURN_NOT_OK(driver_->ExpectFrameType(*incoming_message, FrameType::kHeaders));
     ARROW_ASSIGN_OR_RAISE(auto headers,
                           HeadersFrame::Parse(std::move(incoming_message->buffer)));
     // TODO: annotate error messages
@@ -289,19 +284,18 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
 
   Status DoGet(const FlightCallOptions& options, const Ticket& ticket,
                std::unique_ptr<internal::ClientDataStream>* stream) override {
-    auto driver = arrow::internal::make_unique<UcpCallDriver>(
-        ucp_worker_, remote_endpoint_, options.memory_manager);
-    RETURN_NOT_OK(driver->StartCall("arrow.flight.protocol.FlightService/DoGet"));
-    driver_ = driver.get();
+    driver_->set_memory_manager(options.memory_manager);
+    RETURN_NOT_OK(driver_->StartCall("arrow.flight.protocol.FlightService/DoGet"));
 
     {
       std::string payload;
       ticket.SerializeToString(&payload);
-      RETURN_NOT_OK(driver->SendPayload(reinterpret_cast<const uint8_t*>(payload.data()),
-                                        static_cast<int64_t>(payload.size())));
+      RETURN_NOT_OK(driver_->SendFrame(FrameType::kBuffer,
+                                       reinterpret_cast<const uint8_t*>(payload.data()),
+                                       static_cast<int64_t>(payload.size())));
     }
 
-    *stream = arrow::internal::make_unique<UcxClientDataStream>(std::move(driver));
+    *stream = arrow::internal::make_unique<UcxClientDataStream>(driver_.get());
     return Status::OK();
   }
 
@@ -343,8 +337,7 @@ class ARROW_FLIGHT_EXPORT UcxClientImpl
   ucp_context_h ucp_context_;
   ucp_worker_h ucp_worker_;
   ucp_ep_h remote_endpoint_;
-  // TODO: needs to be atomic
-  UcpCallDriver* driver_;
+  std::unique_ptr<UcpCallDriver> driver_;
 };
 
 std::unique_ptr<arrow::flight::internal::ClientTransportImpl> MakeUcxClientImpl() {

@@ -337,8 +337,8 @@ Result<std::unique_ptr<Buffer>> CudaMemoryManager::CopyBufferTo(
     std::unique_ptr<Buffer> dest;
     ARROW_ASSIGN_OR_RAISE(auto from_context, cuda_device()->GetContext());
     ARROW_ASSIGN_OR_RAISE(dest, to->AllocateBuffer(buf.size()));
-    RETURN_NOT_OK(from_context->CopyDeviceToHost(dest->mutable_data(), buf.address(),
-                                                 buf.size()));
+    RETURN_NOT_OK(
+        from_context->CopyDeviceToHost(dest->mutable_data(), buf.address(), buf.size()));
     return dest;
   }
   return nullptr;
@@ -355,10 +355,8 @@ Result<std::unique_ptr<Buffer>> CudaMemoryManager::CopyBufferFrom(
   if (from->is_cpu()) {
     // CPU-to-device copy
     ARROW_ASSIGN_OR_RAISE(auto to_context, cuda_device()->GetContext());
-    ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> dest,
-                          to_context->Allocate(buf.size()));
-    RETURN_NOT_OK(
-        to_context->CopyHostToDevice(dest->address(), buf.data(), buf.size()));
+    ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> dest, to_context->Allocate(buf.size()));
+    RETURN_NOT_OK(to_context->CopyHostToDevice(dest->address(), buf.data(), buf.size()));
     return dest;
   }
   if (IsCudaMemoryManager(*from)) {
@@ -367,8 +365,7 @@ Result<std::unique_ptr<Buffer>> CudaMemoryManager::CopyBufferFrom(
     ARROW_ASSIGN_OR_RAISE(
         auto from_context,
         checked_cast<const CudaMemoryManager&>(*from).cuda_device()->GetContext());
-    ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> dest,
-                          to_context->Allocate(buf.size()));
+    ARROW_ASSIGN_OR_RAISE(std::unique_ptr<Buffer> dest, to_context->Allocate(buf.size()));
     if (to_context->handle() == from_context->handle()) {
       // Same context
       RETURN_NOT_OK(
