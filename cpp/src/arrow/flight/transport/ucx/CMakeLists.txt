@@ -63,6 +63,6 @@ add_arrow_test(flight_transport_ucx_test
                ${ARROW_TEST_LINK_LIBS}
                LABELS
                "arrow_flight")
-if(ARROW_CUDA)
+if(ARROW_BUILD_TESTS AND ARROW_CUDA)
   target_link_libraries(arrow-flight-transport-ucx-test PRIVATE arrow_cuda_shared)
 endif()
