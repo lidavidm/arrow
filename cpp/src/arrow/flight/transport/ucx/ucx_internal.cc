@@ -560,7 +560,20 @@ class UcpCallDriver::Impl {
 
     if ((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) ||
         (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV)) {
-      // Asynchronous receive (RNDV), or unpack to destination (DATA).
+      // Rendezvous protocol (RNDV), or unpack to destination (DATA).
+
+      // We want to map/pin/register the buffer for faster transfer
+      // where possible. This takes non-trivial time, so return
+      // UCS_INPROGRESS, kick off the allocation in the background,
+      // and recv the data later.
+
+      // For now, don't bother with the mapping and just try to
+      // background the actual work. Can we call ucp_am_recv_data_nbx
+      // on a background thread?
+
+      // Also, we don't want to exhaust memory resources. Unmap the
+      // buffer when freed, and/or provide a way to transmute the
+      // buffer into an unmapped buffer.
       if (frame->type == FrameType::kPayloadBody) {
         ARROW_ASSIGN_OR_RAISE(frame->buffer,
                               memory_manager_->AllocateBuffer(data_length));
