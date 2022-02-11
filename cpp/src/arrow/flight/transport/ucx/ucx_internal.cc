@@ -375,8 +375,8 @@ class UcpCallDriver::Impl {
     pending_send->header[0] = kFrameVersion;
     pending_send->header[1] = static_cast<uint8_t>(FrameType::kPayloadBody);
     UInt32ToBytesBe(counter_++, pending_send->header + 4);
-    RETURN_NOT_OK(LengthToUInt32BytesBe(payload.ipc_message.metadata->size(),
-                                        pending_send->header + 8));
+    RETURN_NOT_OK(
+        LengthToUInt32BytesBe(payload.ipc_message.body_length, pending_send->header + 8));
     pending_send->iovs.resize(total_buffers);
     pending_send->completed = Future<>::Make();
 
@@ -547,7 +547,7 @@ class UcpCallDriver::Impl {
     }
 
     ARROW_ASSIGN_OR_RAISE(auto frame, ParseFrameHeader(header, header_length));
-    // TODO: reconcile frame length, data length
+    DCHECK_EQ(static_cast<size_t>(frame->length), data_length);
 
     if ((param->recv_attr & UCP_AM_RECV_ATTR_FLAG_DATA) &&
         (frame->type != FrameType::kPayloadBody || memory_manager_->is_cpu())) {
