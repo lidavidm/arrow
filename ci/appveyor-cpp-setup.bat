@@ -68,7 +68,7 @@ if "%JOB%" == "Toolchain" (
 )
 if "%JOB%" NEQ "Build_Debug" (
   @rem Arrow conda environment is only required for the Build and Toolchain jobs
-  mamba create -n arrow -q -y -c conda-forge ^
+  mamba create -n arrow -q -y -c conda-forge/label/abseil_dev -c conda-forge ^
     --file=ci\conda_env_python.txt ^
     %CONDA_PACKAGES%  ^
     "cmake=3.17" ^

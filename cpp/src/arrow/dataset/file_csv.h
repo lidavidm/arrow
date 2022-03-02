@@ -87,7 +87,6 @@ class ARROW_DS_EXPORT CsvFileWriteOptions : public FileWriteOptions {
   /// Options passed to csv::MakeCSVWriter.
   std::shared_ptr<csv::WriteOptions> write_options;
 
- protected:
   using FileWriteOptions::FileWriteOptions;
 
   friend class CsvFileFormat;

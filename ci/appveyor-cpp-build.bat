@@ -91,6 +91,7 @@ pushd cpp\build
 @rem and enable runtime assertions.
 
 cmake -G "%GENERATOR%" %CMAKE_ARGS% ^
+      -DCMAKE_CXX_STANDARD=17 ^
       -DARROW_BOOST_USE_SHARED=ON ^
       -DARROW_BUILD_EXAMPLES=ON ^
       -DARROW_BUILD_STATIC=OFF ^
@@ -163,4 +164,3 @@ py.test -r sxX --durations=15 --pyargs pyarrow.tests || exit /B
 @rem
 @rem Wheels are built and tested separately (see ARROW-5142).
 @rem
-
