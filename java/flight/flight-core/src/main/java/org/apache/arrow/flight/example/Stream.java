@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.function.Consumer;
 
+import org.apache.arrow.flight.CallStatus;
 import org.apache.arrow.flight.FlightProducer.ServerStreamListener;
 import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
@@ -102,7 +103,9 @@ public class Stream implements AutoCloseable, Iterable<ArrowRecordBatch> {
       }
       listener.completed();
     } catch (Exception ex) {
-      listener.error(ex);
+      // In CI: try to get more information on failure
+      ex.printStackTrace();
+      listener.error(CallStatus.INTERNAL.withCause(ex).withDescription("Unknown error: " + ex).toRuntimeException());
     }
   }
 

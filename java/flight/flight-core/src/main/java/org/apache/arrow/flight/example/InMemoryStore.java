@@ -71,7 +71,13 @@ public class InMemoryStore implements FlightProducer, AutoCloseable {
   @Override
   public void getStream(CallContext context, Ticket ticket,
       ServerStreamListener listener) {
-    getStream(ticket).sendTo(allocator, listener);
+    try {
+      getStream(ticket).sendTo(allocator, listener);
+    } catch (Exception ex) {
+      // In CI: try to get more information on failure
+      ex.printStackTrace();
+      listener.error(CallStatus.INTERNAL.withCause(ex).withDescription("Unknown error: " + ex).toRuntimeException());
+    }
   }
 
   /**
@@ -96,7 +102,9 @@ public class InMemoryStore implements FlightProducer, AutoCloseable {
       }
       listener.onCompleted();
     } catch (Exception ex) {
-      listener.onError(ex);
+      // In CI: try to get more information on failure
+      ex.printStackTrace();
+      throw CallStatus.INTERNAL.withCause(ex).withDescription("Unknown error: " + ex).toRuntimeException();
     }
   }
 
@@ -104,7 +112,7 @@ public class InMemoryStore implements FlightProducer, AutoCloseable {
   public FlightInfo getFlightInfo(CallContext context, FlightDescriptor descriptor) {
     FlightHolder h = holders.get(descriptor);
     if (h == null) {
-      throw new IllegalStateException("Unknown descriptor.");
+      throw CallStatus.NOT_FOUND.withDescription("Unknown descriptor.").toRuntimeException();
     }
 
     return h.getFlightInfo(location);
@@ -132,6 +140,11 @@ public class InMemoryStore implements FlightProducer, AutoCloseable {
         flightStream.takeDictionaryOwnership();
         creator.complete();
         success = true;
+      } catch (Exception ex) {
+        // In CI: try to get more information on failure
+        ex.printStackTrace();
+        ackStream.onError(
+                CallStatus.INTERNAL.withCause(ex).withDescription("Unknown error: " + ex).toRuntimeException());
       } finally {
         if (!success) {
           creator.drop();
