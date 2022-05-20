@@ -86,6 +86,7 @@ Extension types
 .. doxygenclass:: arrow::ExtensionType
    :members:
 
+.. _cpp-api-datatype-fields-and-schemas:
 
 Fields and Schemas
 ==================

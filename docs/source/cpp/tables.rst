@@ -33,13 +33,14 @@ several abstractions to handle such data conveniently and efficiently.
 Fields
 ======
 
-Fields are used to denote the particular columns of a table (and also
-the particular members of a nested data type such as :class:`arrow::StructType`).
-A field, i.e. an instance of :class:`arrow::Field`, holds together a data
-type, a field name and some optional metadata.
+Fields are used to denote the particular columns of a table or record
+batch, and also the particular members of a nested data type such as
+:class:`arrow::StructType`.  A field, i.e. an instance of
+:class:`arrow::Field`, holds together a data type, a field name,
+whether the field is nullable, and some optional metadata.
 
 The recommended way to create a field is to call the :func:`arrow::field`
-factory function.
+factory function (see :ref:`cpp-api-datatype-fields-and-schemas`).
 
 Schemas
 =======
@@ -48,7 +49,7 @@ A schema describes the overall structure of a two-dimensional dataset such
 as a table.  It holds a sequence of fields together with some optional
 schema-wide metadata (in addition to per-field metadata).  The recommended
 way to create a schema is to call one the :func:`arrow::schema` factory
-function overloads::
+function overloads (see :ref:`cpp-api-datatype-fields-and-schemas`)::
 
    // Create a schema describing datasets with two columns:
    // a int32 column "A" and a utf8-encoded string column "B"
@@ -62,17 +63,20 @@ function overloads::
 Tables
 ======
 
-A :class:`arrow::Table` is a two-dimensional dataset with chunked arrays for
-columns, together with a schema providing field names.  Also, each chunked
-column must have the same logical length in number of elements (although each
-column can be chunked in a different way).
+A :class:`arrow::Table` is a two-dimensional dataset with :ref:`chunked arrays
+<cpp-arrays-chunked-arrays>` for columns, together with a schema providing
+field names.  Also, each chunked column must have the same logical length in
+number of elements (although each column can be chunked in a different
+way). Hence, the columns of a table are not contiguous in memory.
 
 Record Batches
 ==============
 
 A :class:`arrow::RecordBatch` is a two-dimensional dataset of a number of
-contiguous arrays, each the same length.  Like a table, a record batch also
-has a schema which must match its arrays' datatypes.
+contiguous arrays, each the same length.  Like a table, a record batch also has
+a schema which must match its arrays' datatypes.  Unlike a table, since each
+column is an array and not a chunked array, the columns of a record batch are
+contiguous in memory.
 
 Record batches are a convenient unit of work for various serialization
 and computation functions, possibly incremental.

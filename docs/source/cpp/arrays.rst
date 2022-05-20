@@ -170,6 +170,8 @@ implementations can have a 32-bit size limitation for those array types as well.
 For these reasons, it is recommended that huge data be chunked in subsets of
 more reasonable size.
 
+.. _cpp-arrays-chunked-arrays:
+
 Chunked Arrays
 ==============
 
@@ -222,4 +224,3 @@ of arrays and chunked arrays, to obtain an array or chunked array referring
 to some logical subsequence of the data.  This is done by calling the
 :func:`arrow::Array::Slice` and :func:`arrow::ChunkedArray::Slice` methods,
 respectively.
-

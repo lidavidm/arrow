@@ -71,6 +71,7 @@ target environment.**
    :maxdepth: 2
    :caption: Specifications and Protocols
 
+   format/Introduction
    format/Versioning
    format/Columnar
    format/Flight
@@ -79,6 +80,7 @@ target environment.**
    format/CDataInterface
    format/CStreamInterface
    format/Other
+   format/Glossary
 
 .. _toc.development:
 

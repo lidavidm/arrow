@@ -240,7 +240,7 @@ dictionaries:
 
    pa.array([{'x': 1, 'y': True}, {'z': 3.4, 'x': 4}])
 
-Struct arrays can be initialized from a sequence of Python dicts or tuples. For tuples, 
+Struct arrays can be initialized from a sequence of Python dicts or tuples. For tuples,
 you must explicitly pass the type:
 
 .. ipython:: python
@@ -282,10 +282,10 @@ the type is explicitly passed into :meth:`array`:
    ty = pa.map_(pa.string(), pa.int64())
    pa.array(data, type=ty)
 
-MapArrays can also be constructed from offset, key, and item arrays. Offsets represent the 
+MapArrays can also be constructed from offset, key, and item arrays. Offsets represent the
 starting position of each map. Note that the :attr:`MapArray.keys` and :attr:`MapArray.items`
-properties give the *flattened* keys and items. To keep the keys and items associated to 
-their row, use the :meth:`ListArray.from_arrays` constructor with the 
+properties give the *flattened* keys and items. To keep the keys and items associated to
+their row, use the :meth:`ListArray.from_arrays` constructor with the
 :attr:`MapArray.offsets` property.
 
 .. ipython:: python
@@ -369,6 +369,9 @@ When using :class:`~.DictionaryArray` with pandas, the analogue is
 .. ipython:: python
 
    dict_array.to_pandas()
+
+Chunked Arrays
+--------------
 
 .. _data.record_batch:
 
