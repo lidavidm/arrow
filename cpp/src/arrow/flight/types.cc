@@ -29,6 +29,7 @@
 #include "arrow/ipc/reader.h"
 #include "arrow/status.h"
 #include "arrow/table.h"
+#include "arrow/util/string_builder.h"
 #include "arrow/util/uri.h"
 
 namespace arrow {
@@ -93,6 +94,9 @@ bool FlightDescriptor::Equals(const FlightDescriptor& other) const {
   if (type != other.type) {
     return false;
   }
+  if (accept_partial != other.accept_partial) {
+    return false;
+  }
   switch (type) {
     case PATH:
       return path == other.path;
@@ -125,6 +129,9 @@ std::string FlightDescriptor::ToString() const {
       break;
     default:
       break;
+  }
+  if (accept_partial) {
+    ss << ", accept_partial";
   }
   ss << ">";
   return ss.str();
@@ -159,6 +166,10 @@ arrow::Result<std::unique_ptr<SchemaResult>> SchemaResult::Make(const Schema& sc
 Status SchemaResult::GetSchema(ipc::DictionaryMemo* dictionary_memo,
                                std::shared_ptr<Schema>* out) const {
   return GetSchema(dictionary_memo).Value(out);
+}
+
+std::string SchemaResult::ToString() const {
+  return "SchemaResult<raw_schema = (serialized)>";
 }
 
 bool SchemaResult::Equals(const SchemaResult& other) const {
@@ -225,6 +236,12 @@ Status FlightDescriptor::Deserialize(const std::string& serialized,
   return Deserialize(serialized).Value(out);
 }
 
+std::string Ticket::ToString() const {
+  std::stringstream ss;
+  ss << "Ticket<ticket = '" << ticket << "'>";
+  return ss.str();
+}
+
 bool Ticket::Equals(const Ticket& other) const { return ticket == other.ticket; }
 
 arrow::Result<std::string> Ticket::SerializeToString() const {
@@ -264,13 +281,17 @@ Status Ticket::Deserialize(const std::string& serialized, Ticket* out) {
 arrow::Result<FlightInfo> FlightInfo::Make(const Schema& schema,
                                            const FlightDescriptor& descriptor,
                                            const std::vector<FlightEndpoint>& endpoints,
-                                           int64_t total_records, int64_t total_bytes) {
+                                           int64_t total_records, int64_t total_bytes,
+                                           bool endpoints_ordered,
+                                           std::optional<RetryInfo> retry_info) {
   FlightInfo::Data data;
   data.descriptor = descriptor;
   data.endpoints = endpoints;
   data.total_records = total_records;
   data.total_bytes = total_bytes;
   RETURN_NOT_OK(internal::SchemaToString(schema, &data.schema));
+  data.endpoints_ordered = endpoints_ordered;
+  data.retry_info = std::move(retry_info);
   return FlightInfo(data);
 }
 
@@ -324,6 +345,57 @@ arrow::Result<std::unique_ptr<FlightInfo>> FlightInfo::Deserialize(
 Status FlightInfo::Deserialize(const std::string& serialized,
                                std::unique_ptr<FlightInfo>* out) {
   return Deserialize(serialized).Value(out);
+}
+
+std::string FlightInfo::ToString() const {
+  std::stringstream ss;
+  ss << "FlightInfo<schema = ";
+  if (schema_) {
+    ss << schema_->ToString();
+  } else {
+    ss << "(serialized)";
+  }
+  ss << ", descriptor = " << data_.descriptor.ToString();
+  ss << ", endpoints = {";
+  bool first = true;
+  for (const auto& endpoint : data_.endpoints) {
+    if (!first) ss << ", ";
+    ss << endpoint.ToString();
+    first = false;
+  }
+  ss << "}, total_records = " << data_.total_records;
+  ss << ", total_bytes = " << data_.total_bytes;
+  ss << ", endpoints_ordered = " << (data_.endpoints_ordered ? "true" : "false");
+  ss << ", retry_info = ";
+  if (data_.retry_info) {
+    ss << data_.retry_info->ToString();
+  } else {
+    ss << "(nullopt)";
+  }
+  ss << '>';
+  return ss.str();
+}
+
+bool FlightInfo::Equals(const FlightInfo& other) const {
+  return data_.schema == other.data_.schema &&
+         data_.descriptor == other.data_.descriptor &&
+         data_.endpoints == other.data_.endpoints &&
+         data_.total_records == other.data_.total_records &&
+         data_.total_bytes == other.data_.total_bytes &&
+         data_.endpoints_ordered == other.data_.endpoints_ordered &&
+         data_.retry_info == other.data_.retry_info;
+}
+
+std::string FlightInfo::RetryInfo::ToString() const {
+  std::stringstream ss;
+  ss << "FlightInfo::RetryInfo<retry_descriptor = " << retry_descriptor.ToString();
+  ss << ", progress = " << progress;
+  ss << '>';
+  return ss.str();
+}
+
+bool FlightInfo::RetryInfo::Equals(const FlightInfo::RetryInfo& other) const {
+  return retry_descriptor == other.retry_descriptor && progress == other.progress;
 }
 
 Location::Location() { uri_ = std::make_shared<arrow::internal::Uri>(); }
@@ -393,8 +465,29 @@ bool Location::Equals(const Location& other) const {
   return ToString() == other.ToString();
 }
 
+std::string FlightEndpoint::ToString() const {
+  std::stringstream ss;
+  ss << "FlightEndpoint<ticket = " << ticket.ToString();
+  ss << ", locations = {";
+  bool first = true;
+  for (const auto& location : locations) {
+    if (!first) ss << ", ";
+    ss << location.ToString();
+    first = false;
+  }
+  ss << "}, expiration_nanos = ";
+  if (expiration_nanos) {
+    ss << *expiration_nanos;
+  } else {
+    ss << "(nullopt)";
+  }
+  ss << '>';
+  return ss.str();
+}
+
 bool FlightEndpoint::Equals(const FlightEndpoint& other) const {
-  return ticket == other.ticket && locations == other.locations;
+  return ticket == other.ticket && locations == other.locations &&
+         expiration_nanos == other.expiration_nanos;
 }
 
 arrow::Result<std::string> FlightEndpoint::SerializeToString() const {
@@ -421,6 +514,11 @@ arrow::Result<FlightEndpoint> FlightEndpoint::Deserialize(std::string_view seria
   FlightEndpoint out;
   RETURN_NOT_OK(internal::FromProto(pb_flight_endpoint, &out));
   return out;
+}
+
+std::string ActionType::ToString() const {
+  return arrow::util::StringBuilder("ActionType<type = '", type, "', description = '",
+                                    description, "'>");
 }
 
 bool ActionType::Equals(const ActionType& other) const {
@@ -453,6 +551,10 @@ arrow::Result<ActionType> ActionType::Deserialize(std::string_view serialized) {
   return out;
 }
 
+std::string Criteria::ToString() const {
+  return arrow::util::StringBuilder("Criteria<expression = '", expression, "'>");
+}
+
 bool Criteria::Equals(const Criteria& other) const {
   return expression == other.expression;
 }
@@ -481,6 +583,19 @@ arrow::Result<Criteria> Criteria::Deserialize(std::string_view serialized) {
   Criteria out;
   RETURN_NOT_OK(internal::FromProto(pb_criteria, &out));
   return out;
+}
+
+std::string Action::ToString() const {
+  std::stringstream ss;
+  ss << "Action<type = '" << type;
+  ss << "', body = ";
+  if (body) {
+    ss << "(" << body->size() << " bytes)";
+  } else {
+    ss << "(nullptr)";
+  }
+  ss << '>';
+  return ss.str();
 }
 
 bool Action::Equals(const Action& other) const {
@@ -512,6 +627,17 @@ arrow::Result<Action> Action::Deserialize(std::string_view serialized) {
   Action out;
   RETURN_NOT_OK(internal::FromProto(pb_action, &out));
   return out;
+}
+
+std::string Result::ToString() const {
+  std::stringstream ss;
+  ss << "Result<body = ";
+  if (body) {
+    ss << "(" << body->size() << " bytes)>";
+  } else {
+    ss << "(nullptr)>";
+  }
+  return ss.str();
 }
 
 bool Result::Equals(const Result& other) const {
@@ -636,6 +762,11 @@ arrow::Result<std::unique_ptr<Result>> SimpleResultStream::Next() {
     return nullptr;
   }
   return std::make_unique<Result>(std::move(results_[position_++]));
+}
+
+std::string BasicAuth::ToString() const {
+  return arrow::util::StringBuilder("BasicAuth<username = '", username, "', password = '",
+                                    password, "'>");
 }
 
 bool BasicAuth::Equals(const BasicAuth& other) const {

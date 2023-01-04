@@ -24,6 +24,8 @@ option csharp_namespace = "Apache.Arrow.Flight.Protocol";
 
 package arrow.flight.protocol;
 
+import "google/protobuf/timestamp.proto";
+
 /*
  * A flight service is an endpoint for retrieving or storing Arrow data. A
  * flight service can expose one or more predefined endpoints that can be
@@ -240,6 +242,12 @@ message FlightDescriptor {
    * when type = PATH.
    */
   repeated string path = 3;
+
+  // The client is willing to accept a partial FlightInfo and poll the
+  // server to get the complete FlightInfo.  This is useful to avoid
+  // long-running blocking RPC calls and to help pipeline query
+  // execution/result consumption between client and server.
+  bool accept_partial = 4;
 }
 
 /*
@@ -268,12 +276,32 @@ message FlightInfo {
    *
    * There is no ordering defined on endpoints. Hence, if the returned
    * data has an ordering, it should be returned in a single endpoint.
+   * (This can be overridden if the server passes "endpoints_ordered"
+   * below.)
    */
   repeated FlightEndpoint endpoint = 3;
 
   // Set these to -1 if unknown.
   int64 total_records = 4;
   int64 total_bytes = 5;
+
+  // The endpoints are ordered: data in endpoint N is sorted before
+  // data in endpoint N + 1.
+  bool endpoints_ordered = 6;
+
+  // If the client requests partial results, this is used to indicate
+  // how to 1) retrieve further results and 2) whether there are
+  // further results.
+  message RetryInfo {
+    // The client should use this descriptor on the next call to
+    // GetFlightInfo.
+    FlightDescriptor retry_descriptor = 1;
+    // An estimate of query execution progress. The only requirement
+    // is that the value is in [0, 1]; the value need not be monotonic
+    // or nondecreasing, or that it ever actually be updated/set.
+    double progress = 2;
+  }
+  RetryInfo retry_info = 7;
 }
 
 /*
@@ -303,6 +331,10 @@ message FlightEndpoint {
    * represent redundant and/or load balanced services.
    */
   repeated Location location = 2;
+
+  // If present, clients may try to fetch the data more than once, up
+  // until this expiration time.  The timestamp is in UTC.
+  google.protobuf.Timestamp expiration_time = 3;
 }
 
 /*

@@ -334,6 +334,9 @@ add_arrow_test(flight_internals_test
                "arrow_flight")
 
 add_arrow_test(flight_test
+               SOURCES
+               flight_test.cc
+               flight_proposal_test.cc
                STATIC_LINK_LIBS
                ${ARROW_FLIGHT_TEST_LINK_LIBS}
                LABELS

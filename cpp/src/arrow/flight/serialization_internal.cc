@@ -132,11 +132,18 @@ Status FromProto(const pb::FlightData& pb_data, FlightDescriptor* descriptor,
 
 // FlightEndpoint
 
+constexpr int64_t kNanosPerSecond = 1'000'000'000;
+
 Status FromProto(const pb::FlightEndpoint& pb_endpoint, FlightEndpoint* endpoint) {
   RETURN_NOT_OK(FromProto(pb_endpoint.ticket(), &endpoint->ticket));
   endpoint->locations.resize(pb_endpoint.location_size());
   for (int i = 0; i < pb_endpoint.location_size(); ++i) {
     RETURN_NOT_OK(FromProto(pb_endpoint.location(i), &endpoint->locations[i]));
+  }
+  if (pb_endpoint.has_expiration_time()) {
+    endpoint->expiration_nanos =
+        pb_endpoint.expiration_time().seconds() * kNanosPerSecond +
+        pb_endpoint.expiration_time().nanos();
   }
   return Status::OK();
 }
@@ -147,6 +154,12 @@ Status ToProto(const FlightEndpoint& endpoint, pb::FlightEndpoint* pb_endpoint) 
   for (const Location& location : endpoint.locations) {
     RETURN_NOT_OK(ToProto(location, pb_endpoint->add_location()));
   }
+  if (endpoint.expiration_nanos.has_value()) {
+    pb_endpoint->mutable_expiration_time()->set_seconds(*endpoint.expiration_nanos /
+                                                        kNanosPerSecond);
+    pb_endpoint->mutable_expiration_time()->set_nanos(*endpoint.expiration_nanos %
+                                                      kNanosPerSecond);
+  }
   return Status::OK();
 }
 
@@ -154,6 +167,7 @@ Status ToProto(const FlightEndpoint& endpoint, pb::FlightEndpoint* pb_endpoint) 
 
 Status FromProto(const pb::FlightDescriptor& pb_descriptor,
                  FlightDescriptor* descriptor) {
+  descriptor->accept_partial = pb_descriptor.accept_partial();
   if (pb_descriptor.type() == pb::FlightDescriptor::PATH) {
     descriptor->type = FlightDescriptor::PATH;
     descriptor->path.reserve(pb_descriptor.path_size());
@@ -179,6 +193,7 @@ Status ToProto(const FlightDescriptor& descriptor, pb::FlightDescriptor* pb_desc
     pb_descriptor->set_type(pb::FlightDescriptor::CMD);
     pb_descriptor->set_cmd(descriptor.cmd);
   }
+  pb_descriptor->set_accept_partial(descriptor.accept_partial);
   return Status::OK();
 }
 

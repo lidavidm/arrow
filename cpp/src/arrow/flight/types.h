@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -140,6 +141,7 @@ struct ARROW_FLIGHT_EXPORT ActionType {
   /// \brief A human-readable description of the action.
   std::string description;
 
+  std::string ToString() const;
   bool Equals(const ActionType& other) const;
 
   friend bool operator==(const ActionType& left, const ActionType& right) {
@@ -161,6 +163,7 @@ struct ARROW_FLIGHT_EXPORT Criteria {
   /// Opaque criteria expression, dependent on server implementation
   std::string expression;
 
+  std::string ToString() const;
   bool Equals(const Criteria& other) const;
 
   friend bool operator==(const Criteria& left, const Criteria& right) {
@@ -185,6 +188,7 @@ struct ARROW_FLIGHT_EXPORT Action {
   /// The action content as a Buffer
   std::shared_ptr<Buffer> body;
 
+  std::string ToString() const;
   bool Equals(const Action& other) const;
 
   friend bool operator==(const Action& left, const Action& right) {
@@ -205,6 +209,7 @@ struct ARROW_FLIGHT_EXPORT Action {
 struct ARROW_FLIGHT_EXPORT Result {
   std::shared_ptr<Buffer> body;
 
+  std::string ToString() const;
   bool Equals(const Result& other) const;
 
   friend bool operator==(const Result& left, const Result& right) {
@@ -226,6 +231,7 @@ struct ARROW_FLIGHT_EXPORT BasicAuth {
   std::string username;
   std::string password;
 
+  std::string ToString() const;
   bool Equals(const BasicAuth& other) const;
 
   friend bool operator==(const BasicAuth& left, const BasicAuth& right) {
@@ -266,6 +272,11 @@ struct ARROW_FLIGHT_EXPORT FlightDescriptor {
   /// when type is PATH
   std::vector<std::string> path;
 
+  /// Whether the client would like a partial result (to avoid
+  /// long-running blocking RPC calls and to help pipeline query
+  /// execution/result consumption).
+  bool accept_partial = false;
+
   bool Equals(const FlightDescriptor& other) const;
 
   /// \brief Get a human-readable form of this descriptor.
@@ -291,12 +302,13 @@ struct ARROW_FLIGHT_EXPORT FlightDescriptor {
 
   // Convenience factory functions
 
-  static FlightDescriptor Command(const std::string& c) {
-    return FlightDescriptor{CMD, c, {}};
+  static FlightDescriptor Command(const std::string& c, bool accept_partial = false) {
+    return FlightDescriptor{CMD, c, {}, accept_partial};
   }
 
-  static FlightDescriptor Path(const std::vector<std::string>& p) {
-    return FlightDescriptor{PATH, "", p};
+  static FlightDescriptor Path(const std::vector<std::string>& p,
+                               bool accept_partial = false) {
+    return FlightDescriptor{PATH, "", p, accept_partial};
   }
 
   friend bool operator==(const FlightDescriptor& left, const FlightDescriptor& right) {
@@ -312,6 +324,7 @@ struct ARROW_FLIGHT_EXPORT FlightDescriptor {
 struct ARROW_FLIGHT_EXPORT Ticket {
   std::string ticket;
 
+  std::string ToString() const;
   bool Equals(const Ticket& other) const;
 
   friend bool operator==(const Ticket& left, const Ticket& right) {
@@ -429,6 +442,15 @@ struct ARROW_FLIGHT_EXPORT FlightEndpoint {
   /// generated
   std::vector<Location> locations;
 
+  /// If present, the client is allowed to re-read the data in this
+  /// endpoint up until the given expiration time.
+  ///
+  /// This value is a UTC timestamp measured in nanoseconds.
+  ///
+  /// (Note: std::chrono::utc_clock is not available until C++20.)
+  std::optional<int64_t> expiration_nanos;
+
+  std::string ToString() const;
   bool Equals(const FlightEndpoint& other) const;
 
   friend bool operator==(const FlightEndpoint& left, const FlightEndpoint& right) {
@@ -469,7 +491,7 @@ struct ARROW_FLIGHT_EXPORT SchemaResult {
   /// \brief return schema
   /// \param[in,out] dictionary_memo for dictionary bookkeeping, will
   /// be modified
-  /// \return Arrrow result with the reconstructed Schema
+  /// \return Arrow result with the reconstructed Schema
   arrow::Result<std::shared_ptr<Schema>> GetSchema(
       ipc::DictionaryMemo* dictionary_memo) const;
 
@@ -479,6 +501,7 @@ struct ARROW_FLIGHT_EXPORT SchemaResult {
 
   const std::string& serialized_schema() const { return raw_schema_; }
 
+  std::string ToString() const;
   bool Equals(const SchemaResult& other) const;
 
   friend bool operator==(const SchemaResult& left, const SchemaResult& right) {
@@ -502,23 +525,48 @@ struct ARROW_FLIGHT_EXPORT SchemaResult {
 /// GetFlightInfo
 class ARROW_FLIGHT_EXPORT FlightInfo {
  public:
+  struct RetryInfo {
+    FlightDescriptor retry_descriptor;
+    double progress = 0.0;
+
+    std::string ToString() const;
+    bool Equals(const RetryInfo& other) const;
+
+    friend bool operator==(const RetryInfo& left, const RetryInfo& right) {
+      return left.Equals(right);
+    }
+    friend bool operator!=(const RetryInfo& left, const RetryInfo& right) {
+      return !(left == right);
+    }
+  };
   struct Data {
     std::string schema;
     FlightDescriptor descriptor;
     std::vector<FlightEndpoint> endpoints;
     int64_t total_records;
     int64_t total_bytes;
+    bool endpoints_ordered = false;
+    std::optional<RetryInfo> retry_info;
   };
 
-  explicit FlightInfo(const Data& data) : data_(data), reconstructed_schema_(false) {}
-  explicit FlightInfo(Data&& data)
-      : data_(std::move(data)), reconstructed_schema_(false) {}
+  explicit FlightInfo(Data data) : data_(std::move(data)), reconstructed_schema_(false) {}
 
   /// \brief Factory method to construct a FlightInfo.
   static arrow::Result<FlightInfo> Make(const Schema& schema,
                                         const FlightDescriptor& descriptor,
                                         const std::vector<FlightEndpoint>& endpoints,
-                                        int64_t total_records, int64_t total_bytes);
+                                        int64_t total_records, int64_t total_bytes) {
+    return Make(schema, descriptor, endpoints, total_records, total_bytes,
+                /*endpoints_ordered=*/false, /*retry_info=*/std::nullopt);
+  }
+
+  /// \brief Factory method to construct a FlightInfo.
+  static arrow::Result<FlightInfo> Make(const Schema& schema,
+                                        const FlightDescriptor& descriptor,
+                                        const std::vector<FlightEndpoint>& endpoints,
+                                        int64_t total_records, int64_t total_bytes,
+                                        bool endpoints_ordered,
+                                        std::optional<RetryInfo> retry_info);
 
   /// \brief Deserialize the Arrow schema of the dataset. Populate any
   ///   dictionary encoded fields into a DictionaryMemo for
@@ -548,6 +596,11 @@ class ARROW_FLIGHT_EXPORT FlightInfo {
   /// The total number of bytes in the dataset. If unknown, set to -1
   int64_t total_bytes() const { return data_.total_bytes; }
 
+  /// Whether this result set is ordered.
+  bool endpoints_ordered() const { return data_.endpoints_ordered; }
+
+  const std::optional<RetryInfo>& retry_info() const { return data_.retry_info; }
+
   /// \brief Get the wire-format representation of this type.
   ///
   /// Useful when interoperating with non-Flight systems (e.g. REST
@@ -567,6 +620,20 @@ class ARROW_FLIGHT_EXPORT FlightInfo {
   ARROW_DEPRECATED("Deprecated in 8.0.0. Use Result-returning overload instead.")
   static Status Deserialize(const std::string& serialized,
                             std::unique_ptr<FlightInfo>* out);
+
+  std::string ToString() const;
+
+  /// Compare two FlightInfo for equality. This will compare the
+  /// serialized schema representations, NOT the logical equality of
+  /// the schemas.
+  bool Equals(const FlightInfo& other) const;
+
+  friend bool operator==(const FlightInfo& left, const FlightInfo& right) {
+    return left.Equals(right);
+  }
+  friend bool operator!=(const FlightInfo& left, const FlightInfo& right) {
+    return !(left == right);
+  }
 
  private:
   Data data_;

@@ -23,6 +23,8 @@ option java_package = "org.apache.arrow.flight.sql.impl";
 option go_package = "github.com/apache/arrow/go/arrow/flight/internal/flight";
 package arrow.flight.protocol.sql;
 
+import "google/protobuf/timestamp.proto";
+
 /*
  * Represents a metadata request. Used in the command member of FlightDescriptor
  * for the following RPC calls:
@@ -1840,6 +1842,85 @@ message ActionCancelQueryResult {
   }
 
   CancelResult result = 1;
+}
+
+/*
+ * Request message for the "ExtendQuery" action.
+ *
+ * This lets a client request to keep the results of a query longer on
+ * the server-side.  Clients should not rely on servers honoring this
+ * request.
+ *
+ * This command is idempotent.
+ */
+message ActionExtendQueryRequest {
+  option (experimental) = true;
+
+  // The result of the GetFlightInfo RPC that initiated the query.
+  // XXX(ARROW-16902): this must be a serialized FlightInfo, but is
+  // rendered as bytes because Protobuf does not really support one
+  // DLL using Protobuf definitions from another DLL.
+  bytes info = 1;
+}
+
+/*
+ * The result of extending a query.
+ *
+ * The result should be wrapped in a google.protobuf.Any message.
+ */
+message ActionExtendQueryResult {
+  option (experimental) = true;
+
+  // If the server extended the result set expiration time, this is
+  // the new expiration time (in UTC).  Else, this will be unset.
+  google.protobuf.Timestamp new_expiration_time = 1;
+}
+
+/*
+ * Request message for the "CloseQuery" action.
+ *
+ * This lets a client explicitly discard the results of a query,
+ * potentially freeing server resources.  This is most useful to help
+ * implement a stateful API like JDBC or ODBC.  Servers should not
+ * rely on clients explicitly sending this request.
+ *
+ * This command is idempotent.
+ */
+message ActionCloseQueryRequest {
+  option (experimental) = true;
+
+  // The result of the GetFlightInfo RPC that initiated the query.
+  // XXX(ARROW-16902): this must be a serialized FlightInfo, but is
+  // rendered as bytes because Protobuf does not really support one
+  // DLL using Protobuf definitions from another DLL.
+  bytes info = 1;
+}
+
+/*
+ * The result of closing a query.
+ *
+ * The result should be wrapped in a google.protobuf.Any message.
+ */
+message ActionCloseQueryResult {
+  option (experimental) = true;
+
+  enum CloseResult {
+    // The query status is unknown. Servers should avoid using this
+    // value (send a NOT_FOUND error if the requested query is not
+    // known). Clients can retry the request.
+    CLOSE_RESULT_UNSPECIFIED = 0;
+    // The query has been closed. Subsequent requests with the same
+    // payload may return CLOSED or a NOT_FOUND error.
+    CLOSE_RESULT_CLOSED = 1;
+    // The close request is in progress. The client may retry the
+    // close request.
+    CLOSE_RESULT_CLOSING = 2;
+    // The query cannot be closed. The client should not retry the
+    // close request.
+    CLOSE_RESULT_NOT_CLOSEABLE = 3;
+  }
+
+  CloseResult result = 1;
 }
 
 extend google.protobuf.MessageOptions {
