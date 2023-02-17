@@ -45,6 +45,7 @@ class FlightStreamWriter;
 struct Location;
 struct Result;
 class ResultStream;
+class RetryInfo;
 struct SchemaResult;
 class ServerCallContext;
 class ServerMiddleware;

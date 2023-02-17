@@ -365,6 +365,164 @@ TEST(FlightTypes, LocationConstruction) {
   ASSERT_EQ(location.ToString(), "grpc+unix:///tmp/test.sock");
 }
 
+TEST(FlightTypes, RetryInfo) {
+  Schema schema1({});
+  Schema schema2({field("ints", int64())});
+  FlightDescriptor descriptor1 = FlightDescriptor::Command("foo");
+  FlightDescriptor descriptor2 = FlightDescriptor::Path({"foo", "bar"});
+  ASSERT_OK_AND_ASSIGN(
+      FlightInfo info1,
+      FlightInfo::Make(schema1, descriptor1, {FlightEndpoint{Ticket{""}, {}}}, -1, -1));
+  ASSERT_OK_AND_ASSIGN(FlightInfo info2,
+                       FlightInfo::Make(schema2, descriptor2, {}, 5, 64));
+  std::vector<RetryInfo> values = {
+      RetryInfo(info1, descriptor1, std::nullopt,
+                std::chrono::time_point<std::chrono::system_clock>(
+                    std::chrono::nanoseconds(1000))),
+      RetryInfo(info2, descriptor2, 1.5,
+                std::chrono::time_point<std::chrono::system_clock>(
+                    std::chrono::nanoseconds(-1))),
+  };
+  std::vector<std::string> reprs = {
+      ("<RetryInfo "
+       "info=<FlightInfo schema=(serialized) descriptor=<FlightDescriptor cmd='foo'> "
+       "endpoints=[<FlightEndpoint ticket=<Ticket ticket=''> locations=[]>] "
+       "total_records=-1 total_bytes=-1> "
+       "retry_descriptor=<FlightDescriptor cmd='foo'> "
+       "progress=(nullopt) expiration_time=1000>"),
+      ("<RetryInfo "
+       "info=<FlightInfo schema=(serialized) descriptor=<FlightDescriptor "
+       "path='foo/bar'> "
+       "endpoints=[] "
+       "total_records=5 total_bytes=64> "
+       "retry_descriptor=<FlightDescriptor path='foo/bar'> "
+       "progress=1.5 expiration_time=-1>"),
+  };
+
+  ASSERT_NO_FATAL_FAILURE(TestRoundtrip<pb::RetryInfo>(values, reprs));
+}
+
+TEST(FlightTypes, ActionCancelQueryRequest) {
+  Schema schema1({});
+  FlightDescriptor descriptor1 = FlightDescriptor::Command("foo");
+  ASSERT_OK_AND_ASSIGN(FlightInfo info1,
+                       FlightInfo::Make(schema1, descriptor1, {}, -1, -1));
+
+  std::vector<ActionCancelQueryRequest> values = {
+    ActionCancelQueryRequest(info1),
+  };
+  std::vector<std::string> reprs = {
+    ("<ActionCancelQueryRequest "
+     "info=<FlightInfo schema=(serialized) descriptor=<FlightDescriptor cmd='foo'> "
+     "endpoints=[] total_records=-1 total_bytes=-1>>")
+  };
+
+  ASSERT_NO_FATAL_FAILURE(TestRoundtrip<pb::ActionCancelQueryRequest>(values, reprs));
+}
+
+TEST(FlightTypes, ActionCancelQueryResult) {
+  std::vector<ActionCancelQueryResult> values = {
+    ActionCancelQueryResult(ActionCancelQueryResult::kCancelling),
+    ActionCancelQueryResult(ActionCancelQueryResult::kCancelled),
+    ActionCancelQueryResult(ActionCancelQueryResult::kNotCancellable),
+  };
+  std::vector<std::string> reprs = {
+    "<ActionCancelQueryResult result=kCancelling>",
+    "<ActionCancelQueryResult result=kCancelled>",
+    "<ActionCancelQueryResult result=kNotCancellable>",
+  };
+
+  ASSERT_NO_FATAL_FAILURE(TestRoundtrip<pb::ActionCancelQueryResult>(values, reprs));
+}
+
+TEST(FlightTypes, ActionCloseQueryRequest) {
+  Schema schema1({});
+  FlightDescriptor descriptor1 = FlightDescriptor::Command("foo");
+  ASSERT_OK_AND_ASSIGN(FlightInfo info1,
+                       FlightInfo::Make(schema1, descriptor1, {}, -1, -1));
+
+  std::vector<ActionCloseQueryRequest> values = {
+    ActionCloseQueryRequest(info1),
+  };
+  std::vector<std::string> reprs = {
+    ("<ActionCloseQueryRequest "
+     "info=<FlightInfo schema=(serialized) descriptor=<FlightDescriptor cmd='foo'> "
+     "endpoints=[] total_records=-1 total_bytes=-1>>")
+  };
+
+  ASSERT_NO_FATAL_FAILURE(TestRoundtrip<pb::ActionCloseQueryRequest>(values, reprs));
+}
+
+TEST(FlightTypes, ActionCloseQueryResult) {
+  std::vector<ActionCloseQueryResult> values = {
+    ActionCloseQueryResult(ActionCloseQueryResult::kClosing),
+    ActionCloseQueryResult(ActionCloseQueryResult::kClosed),
+    ActionCloseQueryResult(ActionCloseQueryResult::kNotCloseable),
+  };
+  std::vector<std::string> reprs = {
+    "<ActionCloseQueryResult result=kClosing>",
+    "<ActionCloseQueryResult result=kClosed>",
+    "<ActionCloseQueryResult result=kNotCloseable>",
+  };
+
+  ASSERT_NO_FATAL_FAILURE(TestRoundtrip<pb::ActionCloseQueryResult>(values, reprs));
+}
+
+TEST(FlightTypes, ActionRefreshQueryRequest) {
+  Schema schema1({});
+  FlightDescriptor descriptor1 = FlightDescriptor::Command("foo");
+  ASSERT_OK_AND_ASSIGN(FlightInfo info1,
+                       FlightInfo::Make(schema1, descriptor1, {}, -1, -1));
+
+  std::vector<ActionRefreshQueryRequest> values = {
+    ActionRefreshQueryRequest(info1, std::nullopt),
+    ActionRefreshQueryRequest(info1, std::chrono::system_clock::time_point(std::chrono::nanoseconds(1024))),
+  };
+  std::vector<std::string> reprs = {
+    ("<ActionRefreshQueryRequest "
+     "info=<FlightInfo schema=(serialized) descriptor=<FlightDescriptor cmd='foo'> "
+     "endpoints=[] total_records=-1 total_bytes=-1> desired_expiration_time=(nullopt)>"),
+    ("<ActionRefreshQueryRequest "
+     "info=<FlightInfo schema=(serialized) descriptor=<FlightDescriptor cmd='foo'> "
+     "endpoints=[] total_records=-1 total_bytes=-1> desired_expiration_time=1024>")
+  };
+
+  ASSERT_NO_FATAL_FAILURE(TestRoundtrip<pb::ActionRefreshQueryRequest>(values, reprs));
+}
+
+TEST(FlightTypes, ActionRefreshQueryResult) {
+  Schema schema1({});
+  FlightDescriptor descriptor1 = FlightDescriptor::Command("foo");
+  ASSERT_OK_AND_ASSIGN(FlightInfo info1,
+                       FlightInfo::Make(schema1, descriptor1, {}, -1, -1));
+  std::vector<ActionRefreshQueryResult> values = {
+    ActionRefreshQueryResult(std::nullopt, std::chrono::system_clock::time_point(std::chrono::nanoseconds(1024))),
+    ActionRefreshQueryResult(info1, std::chrono::system_clock::time_point(std::chrono::nanoseconds(-1))),
+  };
+  std::vector<std::string> reprs = {
+      "<ActionRefreshQueryResult new_info=(nullopt) new_expiration_time=1024>",
+      ("<ActionRefreshQueryResult new_info=<FlightInfo "
+       "schema=(serialized) descriptor=<FlightDescriptor cmd='foo'> "
+       "endpoints=[] total_records=-1 total_bytes=-1> desired_expiration_time=(nullopt)> "
+       "new_expiration_time=-1>"),
+  };
+
+  ASSERT_NO_FATAL_FAILURE(TestRoundtrip<pb::ActionRefreshQueryResult>(values, reprs));
+}
+
+TEST(FlightTypes, FlightMethod) {
+  EXPECT_EQ("Handshake", ToString(FlightMethod::Handshake));
+  EXPECT_EQ("ListFlights", ToString(FlightMethod::ListFlights));
+  EXPECT_EQ("GetFlightInfo", ToString(FlightMethod::GetFlightInfo));
+  EXPECT_EQ("GetSchema", ToString(FlightMethod::GetSchema));
+  EXPECT_EQ("DoGet", ToString(FlightMethod::DoGet));
+  EXPECT_EQ("DoPut", ToString(FlightMethod::DoPut));
+  EXPECT_EQ("DoAction", ToString(FlightMethod::DoAction));
+  EXPECT_EQ("ListActions", ToString(FlightMethod::ListActions));
+  EXPECT_EQ("DoExchange", ToString(FlightMethod::DoExchange));
+  EXPECT_EQ("PollFlightInfo", ToString(FlightMethod::PollFlightInfo));
+}
+
 ARROW_SUPPRESS_DEPRECATION_WARNING
 TEST(FlightTypes, DeprecatedLocationConstruction) {
   Location location;

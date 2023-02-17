@@ -61,9 +61,7 @@ namespace arrow {
 
 using internal::EndsWith;
 
-namespace flight {
-namespace transport {
-namespace grpc {
+namespace flight::transport::grpc {
 
 namespace {
 namespace pb = arrow::flight::protocol;
@@ -114,7 +112,7 @@ class GrpcClientInterceptorAdapter : public ::grpc::experimental::Interceptor {
       std::vector<std::unique_ptr<ClientMiddleware>> middleware)
       : middleware_(std::move(middleware)), received_headers_(false) {}
 
-  void Intercept(::grpc::experimental::InterceptorBatchMethods* methods) {
+  void Intercept(::grpc::experimental::InterceptorBatchMethods* methods) override {
     using InterceptionHookPoints = ::grpc::experimental::InterceptionHookPoints;
     if (methods->QueryInterceptionHookPoint(
             InterceptionHookPoints::PRE_SEND_INITIAL_METADATA)) {
@@ -173,9 +171,9 @@ class GrpcClientInterceptorAdapter : public ::grpc::experimental::Interceptor {
 class GrpcClientInterceptorAdapterFactory
     : public ::grpc::experimental::ClientInterceptorFactoryInterface {
  public:
-  GrpcClientInterceptorAdapterFactory(
+  explicit GrpcClientInterceptorAdapterFactory(
       std::vector<std::shared_ptr<ClientMiddlewareFactory>> middleware)
-      : middleware_(middleware) {}
+      : middleware_(std::move(middleware)) {}
 
   ::grpc::experimental::Interceptor* CreateClientInterceptor(
       ::grpc::experimental::ClientRpcInfo* info) override {
@@ -189,6 +187,8 @@ class GrpcClientInterceptorAdapterFactory
       flight_method = FlightMethod::ListFlights;
     } else if (EndsWith(method, "/GetFlightInfo")) {
       flight_method = FlightMethod::GetFlightInfo;
+    } else if (EndsWith(method, "/PollFlightInfo")) {
+      flight_method = FlightMethod::PollFlightInfo;
     } else if (EndsWith(method, "/GetSchema")) {
       flight_method = FlightMethod::GetSchema;
     } else if (EndsWith(method, "/DoGet")) {
@@ -223,11 +223,12 @@ class GrpcClientInterceptorAdapterFactory
 
 class GrpcClientAuthSender : public ClientAuthSender {
  public:
+  // TODO: push various improvements into upstream PRs
   explicit GrpcClientAuthSender(
       std::shared_ptr<
           ::grpc::ClientReaderWriter<pb::HandshakeRequest, pb::HandshakeResponse>>
           stream)
-      : stream_(stream) {}
+      : stream_(std::move(stream)) {}
 
   Status Write(const std::string& token) override {
     pb::HandshakeRequest response;
@@ -249,7 +250,7 @@ class GrpcClientAuthReader : public ClientAuthReader {
       std::shared_ptr<
           ::grpc::ClientReaderWriter<pb::HandshakeRequest, pb::HandshakeResponse>>
           stream)
-      : stream_(stream) {}
+      : stream_(std::move(stream)) {}
 
   Status Read(std::string* token) override {
     pb::HandshakeResponse request;
@@ -788,7 +789,7 @@ class GrpcClientImpl : public internal::ClientTransport {
     }
     if (options.stop_token.IsStopRequested()) rpc.context.TryCancel();
     RETURN_NOT_OK(options.stop_token.Poll());
-    listing->reset(new SimpleFlightListing(std::move(flights)));
+    *listing = std::make_unique<SimpleFlightListing>(std::move(flights));
     return FromGrpcStatus(stream->Finish(), &rpc.context);
   }
 
@@ -835,8 +836,26 @@ class GrpcClientImpl : public internal::ClientTransport {
 
     FlightInfo::Data info_data;
     RETURN_NOT_OK(internal::FromProto(pb_response, &info_data));
-    info->reset(new FlightInfo(std::move(info_data)));
+    *info = std::make_unique<FlightInfo>(std::move(info_data));
     return Status::OK();
+  }
+
+  arrow::Result<RetryInfo> PollFlightInfo(const FlightCallOptions& options,
+                                          const FlightDescriptor& descriptor) override {
+    pb::FlightDescriptor pb_descriptor;
+    pb::RetryInfo pb_response;
+
+    RETURN_NOT_OK(internal::ToProto(descriptor, &pb_descriptor));
+
+    ClientRpc rpc(options);
+    RETURN_NOT_OK(rpc.SetToken(auth_handler_.get()));
+    Status s = FromGrpcStatus(
+        stub_->PollFlightInfo(&rpc.context, pb_descriptor, &pb_response), &rpc.context);
+    RETURN_NOT_OK(s);
+
+    RetryInfo result;
+    RETURN_NOT_OK(internal::FromProto(pb_response, &result));
+    return result;
   }
 
   arrow::Result<std::unique_ptr<SchemaResult>> GetSchema(
@@ -918,7 +937,5 @@ void InitializeFlightGrpcClient() {
   });
 }
 
-}  // namespace grpc
-}  // namespace transport
-}  // namespace flight
+}  // namespace flight::transport::grpc
 }  // namespace arrow

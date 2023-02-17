@@ -74,6 +74,10 @@ Status ClientTransport::GetFlightInfo(const FlightCallOptions& options,
                                       std::unique_ptr<FlightInfo>* info) {
   return Status::NotImplemented("GetFlightInfo for this transport");
 }
+arrow::Result<RetryInfo> ClientTransport::PollFlightInfo(
+    const FlightCallOptions& options, const FlightDescriptor& descriptor) {
+  return Status::NotImplemented("PollFlightInfo for this transport");
+}
 arrow::Result<std::unique_ptr<SchemaResult>> ClientTransport::GetSchema(
     const FlightCallOptions& options, const FlightDescriptor& descriptor) {
   return Status::NotImplemented("GetSchema for this transport");

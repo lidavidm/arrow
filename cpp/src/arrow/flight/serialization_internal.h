@@ -58,6 +58,18 @@ Status FromProto(const pb::FlightEndpoint& pb_endpoint, FlightEndpoint* endpoint
 Status FromProto(const pb::FlightInfo& pb_info, FlightInfo::Data* info);
 Status FromProto(const pb::SchemaResult& pb_result, std::string* result);
 Status FromProto(const pb::BasicAuth& pb_basic_auth, BasicAuth* info);
+Status FromProto(const pb::RetryInfo& proto, RetryInfo* value);
+Status FromProto(const pb::ActionCancelQueryRequest& value,
+                 ActionCancelQueryRequest* out);
+Status FromProto(const pb::ActionCancelQueryResult& proto,
+                 ActionCancelQueryResult* value);
+Status FromProto(const pb::ActionCloseQueryRequest& proto,
+                 ActionCloseQueryRequest* value);
+Status FromProto(const pb::ActionCloseQueryResult& proto, ActionCloseQueryResult* value);
+Status FromProto(const pb::ActionRefreshQueryRequest& proto,
+                 ActionRefreshQueryRequest* value);
+Status FromProto(const pb::ActionRefreshQueryResult& proto,
+                 ActionRefreshQueryResult* value);
 
 Status ToProto(const FlightDescriptor& descr, pb::FlightDescriptor* pb_descr);
 Status ToProto(const FlightEndpoint& endpoint, pb::FlightEndpoint* pb_endpoint);
@@ -69,6 +81,16 @@ Status ToProto(const Criteria& criteria, pb::Criteria* pb_criteria);
 Status ToProto(const SchemaResult& result, pb::SchemaResult* pb_result);
 Status ToProto(const Ticket& ticket, pb::Ticket* pb_ticket);
 Status ToProto(const BasicAuth& basic_auth, pb::BasicAuth* pb_basic_auth);
+Status ToProto(const RetryInfo& value, pb::RetryInfo* proto);
+Status ToProto(const ActionCancelQueryRequest& value,
+               pb::ActionCancelQueryRequest* proto);
+Status ToProto(const ActionCancelQueryResult& value, pb::ActionCancelQueryResult* proto);
+Status ToProto(const ActionCloseQueryRequest& value, pb::ActionCloseQueryRequest* proto);
+Status ToProto(const ActionCloseQueryResult& value, pb::ActionCloseQueryResult* proto);
+Status ToProto(const ActionRefreshQueryRequest& value,
+               pb::ActionRefreshQueryRequest* proto);
+Status ToProto(const ActionRefreshQueryResult& value,
+               pb::ActionRefreshQueryResult* proto);
 
 Status ToPayload(const FlightDescriptor& descr, std::shared_ptr<Buffer>* out);
 

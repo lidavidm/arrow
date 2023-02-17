@@ -1807,6 +1807,7 @@ message DoPutUpdateResult {
  */
 message ActionCancelQueryRequest {
   option (experimental) = true;
+  option deprecated = true;
 
   // The result of the GetFlightInfo RPC that initiated the query.
   // XXX(ARROW-16902): this must be a serialized FlightInfo, but is
@@ -1822,6 +1823,7 @@ message ActionCancelQueryRequest {
  */
 message ActionCancelQueryResult {
   option (experimental) = true;
+  option deprecated = true;
 
   enum CancelResult {
     // The cancellation status is unknown. Servers should avoid using

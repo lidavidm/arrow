@@ -250,6 +250,10 @@ class ARROW_FLIGHT_EXPORT FlightServerBase {
                                const FlightDescriptor& request,
                                std::unique_ptr<FlightInfo>* info);
 
+  /// \brief
+  virtual arrow::Result<RetryInfo> PollFlightInfo(const ServerCallContext& context,
+                                                  const FlightDescriptor& request);
+
   /// \brief Retrieve the schema for the indicated descriptor
   /// \param[in] context The call context.
   /// \param[in] request may be null

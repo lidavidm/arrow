@@ -22,6 +22,8 @@ option java_package = "org.apache.arrow.flight.impl";
 option go_package = "github.com/apache/arrow/go/arrow/flight/internal/flight";
 option csharp_namespace = "Apache.Arrow.Flight.Protocol";
 
+import "google/protobuf/timestamp.proto";
+
 package arrow.flight.protocol;
 
 /*
@@ -63,6 +65,31 @@ service FlightService {
    * service.
    */
   rpc GetFlightInfo(FlightDescriptor) returns (FlightInfo) {}
+
+  /*
+   * For a given FlightDescriptor, get information about how the flight can be
+   * consumed. This is a non-blocking version of FlightInfo that is designed
+   * to be polled.
+   *
+   * The initial request should use a FlightDescriptor like GetFlightInfo. The
+   * response will include a new FlightDescriptor that the client should use
+   * on its next call to PollFlightInfo. The client should continue this
+   * process until it does not get a FlightDescriptor in the response; then
+   * the query is complete.
+   *
+   * Servers should respond quickly on the initial call, to avoid a blocking
+   * call. On subsequent calls, servers should not respond unless/until the
+   * result would be different from the previous call. (This lets the client
+   * "long poll" for updates without constantly making requests. Clients can
+   * set a timeout to avoid blocking calls if desired.) An update to the
+   * "progress" value is considered an update (however, the server should take
+   * care to not spam the client with updates). Servers should recognize a
+   * FlightDescriptor that may be out-of-date. Servers should return an error
+   * status if the query has failed; the client should not retry the request
+   * (unless the error is TIMED_OUT or UNAVAILABLE, as these may be
+   * client-side errors).
+   */
+  rpc PollFlightInfo(FlightDescriptor) returns (RetryInfo);
 
   /*
    * For a given FlightDescriptor, get the Schema as described in Schema.fbs::Schema
@@ -266,14 +293,49 @@ message FlightInfo {
    * In other words, an application can use multiple endpoints to
    * represent partitioned data.
    *
-   * There is no ordering defined on endpoints. Hence, if the returned
-   * data has an ordering, it should be returned in a single endpoint.
+   * There is no ordering defined on endpoints. If the returned data
+   * has an ordering, it should be returned in a single endpoint, or
+   * endpoints_ordered should be set.
    */
   repeated FlightEndpoint endpoint = 3;
 
   // Set these to -1 if unknown.
   int64 total_records = 4;
   int64 total_bytes = 5;
+
+  // The dataset has an ordering, and the endpoints may be read in the
+  // order given here to retrieve the dataset in order as well.
+  bool endpoints_ordered = 6;
+
+  // Application-defined metadata.
+  bytes app_metadata = 7;
+}
+
+/*
+ * A FlightInfo with information to enable retries.
+ */
+message RetryInfo {
+  // The currently available data so far. FlightEndpoints in this
+  // FlightInfo are ready to be consumed.
+  //
+  // The server should return all available FlightEndpoints on each request,
+  // instead of sending a delta from the previous request. The server should
+  // only append to the endpoints here, so the client does not have to do
+  // extra work to identify which endpoints it has and hasn't seen. (When
+  // combined with endpoints_ordered, that means the server must return data
+  // in order.)
+  FlightInfo info = 1;
+  // The FlightDescriptor that the client should use to make its next
+  // request. If unset, the query is complete.
+  FlightDescriptor retry_descriptor = 2;
+  // Query progress. Must be in [0.0, 1.0] but need not be
+  // monotonic or nondecreasing. If unknown, do not set.
+  optional double progress = 3;
+  // Expiration time for this request. After this passes, the server
+  // might not accept the retry_descriptor anymore (and the query may
+  // be cancelled). This may be updated on a call to PollFlightInfo.
+  // The timestamp is in UTC.
+  google.protobuf.Timestamp expiration_time = 4;
 }
 
 /*
@@ -303,6 +365,23 @@ message FlightEndpoint {
    * represent redundant and/or load balanced services.
    */
   repeated Location location = 2;
+
+  /*
+   * An expiration for the data in this FlightEndpoint.
+   *
+   * If set, clients may retry requests up until the deadline.
+   * Afterwards, the server is free to return an error for
+   * requests. If not set, the client should not retry requests (see
+   * the documentation for Ticket).
+   *
+   * The timestamp is in UTC.
+   */
+  google.protobuf.Timestamp expiration_time = 3;
+
+  /*
+   * Application-defined metadata.
+   */
+  bytes app_metadata = 4;
 }
 
 /*
@@ -318,7 +397,8 @@ message Location {
  * portion of a stream.
  *
  * Tickets are meant to be single use. It is an error/application-defined
- * behavior to reuse a ticket.
+ * behavior to reuse a ticket, except as allowed by the expiration_time in
+ * FlightEndpoint.
  */
 message Ticket {
   bytes ticket = 1;
@@ -359,4 +439,90 @@ message FlightData {
  */
 message PutResult {
   bytes app_metadata = 1;
+}
+
+/*
+ * A common DoAction body with defined semantics.
+ *
+ * Request to cancel query execution. With GetFlightInfo, it can be used for a
+ * client besides the requester to cancel queries in a distributed
+ * system. (This only makes sense if the Flight server implements "query
+ * execution" as part of the DoGet call and makes the GetFlightInfo call
+ * relatively short.) With PollFlightInfo, it can be used for the client to
+ * explicitly cancel the semantic query execution operation (as opposed to the
+ * physical RPC).
+ *
+ * Should be used with Action.type == "arrow.flight.CancelQuery".
+ */
+message ActionCancelQueryRequest {
+  // The result of the GetFlightInfo/PollFlightInfo RPC that initiated the query.
+  FlightInfo info = 1;
+}
+
+/*
+ * The result of cancelling a query.
+ *
+ * The result should be wrapped in a google.protobuf.Any message, so
+ * that clients deserializing the response can perform additional
+ * typechecking.
+ */
+message ActionCancelQueryResult {
+  enum CancelResult {
+    // The cancellation status is unknown. Servers should avoid using
+    // this value (send a NOT_FOUND error if the requested query is
+    // not known). Clients can retry the request.
+    CANCEL_RESULT_UNSPECIFIED = 0;
+    // The cancellation request is complete. Subsequent requests with
+    // the same payload may return CANCELLED or a NOT_FOUND error.
+    CANCEL_RESULT_CANCELLED = 1;
+    // The cancellation request is in progress. The client may retry
+    // the cancellation request.
+    CANCEL_RESULT_CANCELLING = 2;
+    // The query is not cancellable. The client should not retry the
+    // cancellation request.
+    CANCEL_RESULT_NOT_CANCELLABLE = 3;
+  }
+
+  CancelResult result = 1;
+}
+
+message ActionCloseQueryRequest {
+  // The result of the GetFlightInfo/PollFlightInfo RPC that initiated the query.
+  FlightInfo info = 1;
+}
+
+/*
+ * The result of cancelling a query.
+ *
+ * The result should be wrapped in a google.protobuf.Any message.
+ */
+message ActionCloseQueryResult {
+  enum CloseResult {
+    // The status is unknown. Servers should avoid using this value
+    // (send a NOT_FOUND error if the requested query is not
+    // known). Clients can retry the request.
+    CLOSE_RESULT_UNSPECIFIED = 0;
+    // The request is complete. Subsequent requests with the same
+    // payload may return CANCELLED or a NOT_FOUND error.
+    CLOSE_RESULT_CANCELLED = 1;
+    // The request is in progress. The client may retry the request.
+    CLOSE_RESULT_CANCELLING = 2;
+    // The query is not closeable. The client should not retry the
+    // request.
+    CLOSE_RESULT_NOT_CLOSEABLE = 3;
+  }
+
+  CloseResult result = 1;
+}
+
+message ActionRefreshQueryRequest {
+  // The result of the GetFlightInfo/PollFlightInfo RPC that initiated the query.
+  FlightInfo info = 1;
+  // The desired expiration time. Note, the server is not obligated to honor this.
+  google.protobuf.Timestamp desired_expiration_time = 2;
+}
+
+message ActionRefreshQueryResult {
+  FlightInfo new_info = 1;
+  google.protobuf.Timestamp new_expiration_time = 2;
 }

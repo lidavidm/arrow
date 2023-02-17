@@ -43,6 +43,8 @@ std::string ToString(FlightMethod method) {
       return "ListActions";
     case FlightMethod::DoExchange:
       return "DoExchange";
+    case FlightMethod::PollFlightInfo:
+      return "PollFlightInfo";
     case FlightMethod::Invalid:
     default:
       return "(unknown Flight method)";

@@ -19,9 +19,11 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -31,6 +33,7 @@
 #include "arrow/ipc/options.h"
 #include "arrow/ipc/writer.h"
 #include "arrow/result.h"
+#include "arrow/util/compare.h"
 
 namespace arrow {
 
@@ -518,6 +521,7 @@ class ARROW_FLIGHT_EXPORT FlightInfo {
     int64_t total_bytes;
   };
 
+  FlightInfo();
   explicit FlightInfo(Data data) : data_(std::move(data)), reconstructed_schema_(false) {}
 
   /// \brief Factory method to construct a FlightInfo.
@@ -592,6 +596,173 @@ class ARROW_FLIGHT_EXPORT FlightInfo {
   Data data_;
   mutable std::shared_ptr<Schema> schema_;
   mutable bool reconstructed_schema_;
+};
+
+/// \brief
+struct ARROW_FLIGHT_EXPORT RetryInfo : public util::EqualityComparable<RetryInfo> {
+  FlightInfo info;
+  FlightDescriptor retry_descriptor;
+  std::optional<double> progress;
+  /// NOTE: assumes system_clock is relative to the Unix epoch.
+  std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>
+      expiration_time;
+
+  RetryInfo();
+  explicit RetryInfo(
+      FlightInfo info, FlightDescriptor retry_descriptor, std::optional<double> progress,
+      std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>
+          expiration_time);
+
+  arrow::Result<std::string> SerializeToString() const;
+  static arrow::Result<RetryInfo> Deserialize(std::string_view serialized);
+  bool Equals(const RetryInfo& other) const;
+  std::string ToString() const;
+};
+
+/// TODO: add a section with docstring
+
+/// \brief
+struct ARROW_FLIGHT_EXPORT ActionCancelQueryRequest
+    : public util::EqualityComparable<ActionCancelQueryRequest> {
+  FlightInfo info;
+
+  ActionCancelQueryRequest();
+  explicit ActionCancelQueryRequest(FlightInfo info);
+
+  arrow::Result<std::string> SerializeToString() const;
+  static arrow::Result<ActionCancelQueryRequest> Deserialize(std::string_view serialized);
+  arrow::Result<Action> SerializeToAction() const;
+  arrow::Result<ActionCancelQueryRequest> Deserialize(const Action& action);
+  bool Equals(const ActionCancelQueryRequest& other) const;
+  std::string ToString() const;
+
+  static const ActionType kActionType;
+};
+
+/// \brief
+struct ARROW_FLIGHT_EXPORT ActionCancelQueryResult
+    : public util::EqualityComparable<ActionCancelQueryResult> {
+  enum CancelResult {
+    // The cancellation status is unknown. Servers should avoid using
+    // this value (send a NOT_FOUND error if the requested query is
+    // not known). Clients can retry the request.
+    kUnspecified,
+    // The cancellation request is complete. Subsequent requests with
+    // the same payload may return CANCELLED or a NOT_FOUND error.
+    kCancelled,
+    // The cancellation request is in progress. The client may retry
+    // the cancellation request.
+    kCancelling,
+    // The query is not cancellable. The client should not retry the
+    // cancellation request.
+    kNotCancellable,
+  };
+
+  CancelResult result;
+
+  ActionCancelQueryResult();
+  explicit ActionCancelQueryResult(CancelResult result);
+
+  arrow::Result<std::string> SerializeToString() const;
+  static arrow::Result<ActionCancelQueryResult> Deserialize(std::string_view serialized);
+  arrow::Result<Result> SerializeToActionResult() const;
+  arrow::Result<ActionCancelQueryResult> Deserialize(const Result& result);
+  bool Equals(const ActionCancelQueryResult& other) const;
+  std::string ToString() const;
+};
+
+/// \brief
+struct ARROW_FLIGHT_EXPORT ActionCloseQueryRequest
+    : public util::EqualityComparable<ActionCloseQueryRequest> {
+  FlightInfo info;
+
+  ActionCloseQueryRequest();
+  explicit ActionCloseQueryRequest(FlightInfo info);
+
+  arrow::Result<std::string> SerializeToString() const;
+  static arrow::Result<ActionCloseQueryRequest> Deserialize(std::string_view serialized);
+  arrow::Result<Action> SerializeToAction() const;
+  arrow::Result<ActionCloseQueryRequest> Deserialize(const Action& action);
+  bool Equals(const ActionCloseQueryRequest& other) const;
+  std::string ToString() const;
+
+  static const ActionType kActionType;
+};
+
+/// \brief
+struct ARROW_FLIGHT_EXPORT ActionCloseQueryResult
+    : public util::EqualityComparable<ActionCloseQueryResult> {
+  enum CloseResult {
+    // The status is unknown. Servers should avoid using this value
+    // (send a NOT_FOUND error if the requested query is not
+    // known). Clients can retry the request.
+    kUnspecified,
+    // The request is complete. Subsequent requests with the same
+    // payload may return CANCELLED or a NOT_FOUND error.
+    kClosed,
+    // The request is in progress. The client may retry the request.
+    kClosing,
+    // The query is not closeable. The client should not retry the
+    // request.
+    kNotCloseable,
+  };
+
+  CloseResult result;
+
+  ActionCloseQueryResult();
+  explicit ActionCloseQueryResult(CloseResult result);
+
+  arrow::Result<std::string> SerializeToString() const;
+  static arrow::Result<ActionCloseQueryResult> Deserialize(std::string_view serialized);
+  arrow::Result<Result> SerializeToActionResult() const;
+  arrow::Result<ActionCloseQueryResult> Deserialize(const Result& result);
+  bool Equals(const ActionCloseQueryResult& other) const;
+  std::string ToString() const;
+};
+
+/// \brief
+struct ARROW_FLIGHT_EXPORT ActionRefreshQueryRequest
+    : public util::EqualityComparable<ActionRefreshQueryRequest> {
+  FlightInfo info;
+  std::optional<std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>>
+      desired_expiration_time;
+
+  ActionRefreshQueryRequest();
+  explicit ActionRefreshQueryRequest(
+      FlightInfo info,
+      std::optional<std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>>
+          desired_expiration_time);
+
+  arrow::Result<std::string> SerializeToString() const;
+  static arrow::Result<ActionRefreshQueryRequest> Deserialize(
+      std::string_view serialized);
+  arrow::Result<Action> SerializeToAction() const;
+  arrow::Result<ActionRefreshQueryRequest> Deserialize(const Action& action);
+  bool Equals(const ActionRefreshQueryRequest& other) const;
+  std::string ToString() const;
+
+  static const ActionType kActionType;
+};
+
+/// \brief
+struct ARROW_FLIGHT_EXPORT ActionRefreshQueryResult
+    : public util::EqualityComparable<ActionRefreshQueryResult> {
+  std::optional<FlightInfo> new_info;
+  std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>
+      new_expiration_time;
+
+  ActionRefreshQueryResult();
+  explicit ActionRefreshQueryResult(
+      std::optional<FlightInfo> info,
+      std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>
+          new_expiration_time);
+
+  arrow::Result<std::string> SerializeToString() const;
+  static arrow::Result<ActionRefreshQueryResult> Deserialize(std::string_view serialized);
+  arrow::Result<Result> SerializeToActionResult() const;
+  arrow::Result<ActionRefreshQueryResult> Deserialize(const Result& result);
+  bool Equals(const ActionRefreshQueryResult& other) const;
+  std::string ToString() const;
 };
 
 /// \brief An iterator to FlightInfo instances returned by ListFlights.

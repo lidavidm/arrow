@@ -20,6 +20,8 @@
 #include <memory>
 #include <string>
 
+#include <google/protobuf/timestamp.pb.h>
+
 #include "arrow/buffer.h"
 #include "arrow/io/memory.h"
 #include "arrow/ipc/reader.h"
@@ -27,9 +29,16 @@
 #include "arrow/result.h"
 #include "arrow/status.h"
 
-namespace arrow {
-namespace flight {
-namespace internal {
+namespace arrow::flight::internal {
+
+Status SchemaToString(const Schema& schema, std::string* out) {
+  ipc::DictionaryMemo unused_dict_memo;
+  ARROW_ASSIGN_OR_RAISE(std::shared_ptr<Buffer> serialized_schema,
+                        ipc::SerializeSchema(schema));
+  *out = std::string(reinterpret_cast<const char*>(serialized_schema->data()),
+                     static_cast<size_t>(serialized_schema->size()));
+  return Status::OK();
+}
 
 // ActionType
 
@@ -94,12 +103,6 @@ Status FromProto(const pb::Location& pb_location, Location* location) {
 
 Status ToProto(const Location& location, pb::Location* pb_location) {
   pb_location->set_uri(location.ToString());
-  return Status::OK();
-}
-
-Status ToProto(const BasicAuth& basic_auth, pb::BasicAuth* pb_basic_auth) {
-  pb_basic_auth->set_username(basic_auth.username);
-  pb_basic_auth->set_password(basic_auth.password);
   return Status::OK();
 }
 
@@ -199,27 +202,6 @@ Status FromProto(const pb::FlightInfo& pb_info, FlightInfo::Data* info) {
   return Status::OK();
 }
 
-Status FromProto(const pb::BasicAuth& pb_basic_auth, BasicAuth* basic_auth) {
-  basic_auth->password = pb_basic_auth.password();
-  basic_auth->username = pb_basic_auth.username();
-
-  return Status::OK();
-}
-
-Status FromProto(const pb::SchemaResult& pb_result, std::string* result) {
-  *result = pb_result.schema();
-  return Status::OK();
-}
-
-Status SchemaToString(const Schema& schema, std::string* out) {
-  ipc::DictionaryMemo unused_dict_memo;
-  ARROW_ASSIGN_OR_RAISE(std::shared_ptr<Buffer> serialized_schema,
-                        ipc::SerializeSchema(schema));
-  *out = std::string(reinterpret_cast<const char*>(serialized_schema->data()),
-                     static_cast<size_t>(serialized_schema->size()));
-  return Status::OK();
-}
-
 Status ToProto(const FlightInfo& info, pb::FlightInfo* pb_info) {
   // clear any repeated fields
   pb_info->clear_endpoint();
@@ -239,9 +221,132 @@ Status ToProto(const FlightInfo& info, pb::FlightInfo* pb_info) {
   return Status::OK();
 }
 
+// BasicAuth
+
+Status FromProto(const pb::BasicAuth& pb_basic_auth, BasicAuth* basic_auth) {
+  basic_auth->password = pb_basic_auth.password();
+  basic_auth->username = pb_basic_auth.username();
+
+  return Status::OK();
+}
+
+Status ToProto(const BasicAuth& basic_auth, pb::BasicAuth* pb_basic_auth) {
+  pb_basic_auth->set_username(basic_auth.username);
+  pb_basic_auth->set_password(basic_auth.password);
+  return Status::OK();
+}
+
+// SchemaResult
+
+Status FromProto(const pb::SchemaResult& pb_result, std::string* result) {
+  *result = pb_result.schema();
+  return Status::OK();
+}
+
 Status ToProto(const SchemaResult& result, pb::SchemaResult* pb_result) {
   pb_result->set_schema(result.serialized_schema());
   return Status::OK();
+}
+
+// Timestamps
+
+constexpr int64_t kNanosPerSecond = 1'000'000'000;
+
+void ToProto(const std::chrono::nanoseconds& value, google::protobuf::Timestamp* proto) {
+  // TODO: test this
+  const int64_t total_nanos = value.count();
+  const int64_t seconds = total_nanos / kNanosPerSecond;
+  // TODO: this has to be positive
+  const int64_t nanos = total_nanos - (seconds * kNanosPerSecond);
+  proto->set_seconds(seconds);
+  proto->set_nanos(nanos);
+}
+
+std::chrono::nanoseconds FromProto(const google::protobuf::Timestamp& proto) {
+  return std::chrono::seconds(proto.seconds()) + std::chrono::nanoseconds(proto.nanos());
+}
+
+// RetryInfo
+
+Status FromProto(const pb::RetryInfo& proto, RetryInfo* value) {
+  FlightInfo::Data info_data;
+  RETURN_NOT_OK(FromProto(proto.info(), &info_data));
+  value->info = FlightInfo(std::move(info_data));
+  RETURN_NOT_OK(FromProto(proto.retry_descriptor(), &value->retry_descriptor));
+  if (proto.has_progress()) {
+    value->progress = proto.progress();
+  } else {
+    value->progress = std::nullopt;
+  }
+  value->expiration_time =
+      std::chrono::system_clock::time_point(FromProto(proto.expiration_time()));
+  return Status::OK();
+}
+
+Status ToProto(const RetryInfo& value, pb::RetryInfo* proto) {
+  RETURN_NOT_OK(ToProto(value.info, proto->mutable_info()));
+  RETURN_NOT_OK(ToProto(value.retry_descriptor, proto->mutable_retry_descriptor()));
+  if (value.progress.has_value()) {
+    proto->set_progress(*value.progress);
+  } else {
+    proto->clear_progress();
+  }
+  ToProto(value.expiration_time.time_since_epoch(), proto->mutable_expiration_time());
+  return Status::OK();
+}
+
+// ActionCancelQuery
+
+// TODO: these should wrap in Any
+Status FromProto(const pb::ActionCancelQueryRequest& value,
+                 ActionCancelQueryRequest* out) {
+  return Status::NotImplemented("NYI");
+}
+Status FromProto(const pb::ActionCancelQueryResult& proto,
+                 ActionCancelQueryResult* value) {
+  return Status::NotImplemented("NYI");
+}
+Status ToProto(const ActionCancelQueryRequest& value,
+               pb::ActionCancelQueryRequest* proto) {
+  return Status::NotImplemented("NYI");
+}
+Status ToProto(const ActionCancelQueryResult& value, pb::ActionCancelQueryResult* proto) {
+  return Status::NotImplemented("NYI");
+}
+
+// ActionCloseQuery
+
+Status FromProto(const pb::ActionCloseQueryRequest& proto,
+                 ActionCloseQueryRequest* value) {
+  return Status::NotImplemented("NYI");
+}
+Status FromProto(const pb::ActionCloseQueryResult& proto, ActionCloseQueryResult* value) {
+  return Status::NotImplemented("NYI");
+}
+Status ToProto(const ActionCloseQueryRequest& value, pb::ActionCloseQueryRequest* proto) {
+  return Status::NotImplemented("NYI");
+}
+Status ToProto(const ActionCloseQueryResult& value, pb::ActionCloseQueryResult* proto) {
+  return Status::NotImplemented("NYI");
+}
+
+// Action RefreshQuery
+
+Status FromProto(const pb::ActionRefreshQueryRequest& proto,
+                 ActionRefreshQueryRequest* value) {
+  return Status::NotImplemented("NYI");
+}
+Status FromProto(const pb::ActionRefreshQueryResult& proto,
+                 ActionRefreshQueryResult* value) {
+  return Status::NotImplemented("NYI");
+}
+Status ToProto(const ActionRefreshQueryRequest& value,
+               pb::ActionRefreshQueryRequest* proto) {
+  return Status::NotImplemented("NYI");
+}
+Status ToProto(const ActionRefreshQueryResult& value,
+               pb::ActionRefreshQueryResult* proto) {
+  return Status::NotImplemented("NYI");
 }
 
 Status ToPayload(const FlightDescriptor& descr, std::shared_ptr<Buffer>* out) {
@@ -256,6 +361,4 @@ Status ToPayload(const FlightDescriptor& descr, std::shared_ptr<Buffer>* out) {
   return Status::OK();
 }
 
-}  // namespace internal
-}  // namespace flight
-}  // namespace arrow
+}  // namespace arrow::flight::internal
