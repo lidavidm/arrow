@@ -324,6 +324,10 @@ if(ARROW_BUILD_BENCHMARKS)
   target_link_libraries(arrow-flight-perf-server ${ARROW_FLIGHT_TEST_LINK_LIBS}
                         ${GFLAGS_LIBRARIES})
 
+  add_executable(arrow-flight-perf-minimal-server perf_minimal_server.cc)
+  target_link_libraries(arrow-flight-perf-minimal-server ${ARROW_FLIGHT_TEST_LINK_LIBS}
+                        ${GFLAGS_LIBRARIES})
+
   add_executable(arrow-flight-benchmark flight_benchmark.cc perf.pb.cc)
   target_link_libraries(arrow-flight-benchmark ${ARROW_FLIGHT_TEST_LINK_LIBS}
                         ${GFLAGS_LIBRARIES})
